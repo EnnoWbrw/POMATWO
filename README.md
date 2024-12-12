@@ -8,6 +8,6 @@ simulate both the day-ahead market and multiple intraday market gates.
 Within the iDesignRES framework, POMATWO is used to calculate the cost-optimal
 utilization of generation capacities. 
 
-# The POMATWO repository
+### The POMATWO repository
 The link to the GitLab repository of the POMATWO model:
 https://git.tu-berlin.de/wip/elmodtoolbox/elmod.jl/-/tree/iDesignRES?ref_type=heads
