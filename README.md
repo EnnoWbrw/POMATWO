@@ -33,30 +33,23 @@ Based on these forecasts, the model recalculates cost-minimal dispatch.
 The results are passed to Plan4Res, which performs the final AC redispatch calculations. 
 
 ## Input to and output from the model  
-
-###Inputs: 
 To run POMATWO, as it is used in iDesignRES, the following input data set is required: 
 
-*Definition of the market zones, time steps, set of nodes, set of generation technologies 
+- Definition of the market zones, time steps, set of nodes, set of generation technologies 
 (incl. solar and wind), set of storages, set of lines 
 
-*Data sets describing the power plants (availability and capacity), the grid 
+- Data sets describing the power plants (availability and capacity), the grid 
 (capacity of the lines and topographie of the grid), storages (inflow, capacity 
 and efficiency factor), marginal costs of each generation technology and the load.
-
-###Outputs:  
+ 
 POMATWO calculates the cost-optimal usage of generation capacities to meet the load while taking the grid into account: 
-*Generation of each power plant at each time step (MWh)	 
-*Generation of each power plant at each time step after redispatch (MWh) 
-*Change of each storage charging level at each time step (MWh) 
-*Injection at each node at each time step (MWh) 
-*Net exchange at each zone at each time step (MWh) 
+- Generation of each power plant at each time step (MWh)	 
+- Generation of each power plant at each time step after redispatch (MWh) 
+- Change of each storage charging level at each time step (MWh) 
+- Injection at each node at each time step (MWh) 
+- Net exchange at each zone at each time step (MWh) 
 
-These results are available for the day-ahead market at each intraday gate. 
-Moreover, POMATWO calculates possible curtailments, the power flow on the DC lines,
-possible up and down ramping for each power plant, further storage variables,
-and the voltage phase angle. 
-
+These results are available for the day-ahead market at each intraday gate.
 
 ## Implemented features  
 POMATWO employs a multi-step approach, solving the day-ahead and intraday markets sequentially.
