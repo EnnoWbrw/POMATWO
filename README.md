@@ -7,9 +7,8 @@ TU Berlin  and part of 1, Task number 1.3.
   
 ## Purpose of the model  
 
-POMATWO is an electricity market model designed to minimize system costs by
-determining the optimal electricity supply on an hourly basis. 
-It incorporates market clearing conditions, country-specific merit order curves, 
+POMATWO is an electricity market model designed to determine the optimal electricity
+supply by minimize system costs on an hourly basis. It incorporates market clearing conditions, market zone-specific merit order curves, 
 grid topology, and network constraints. Using a multi-step approach, POMATWO can 
 simulate both the electricity generation of the day-ahead market and multiple
 intraday market gates. Within the iDesignRES framework, POMATWO is used to 
@@ -21,16 +20,18 @@ systematic representation of electricity markets. The workflow consists of disti
 yet interconnected stages. It begins with the simulation of the day-ahead market,
 where electricity generation is allocated cost-efficiently based on the merit-order principle.
 This step ensures market clearing conditions are met while minimizing production costs.
-Following this, redispatch measures are calculated to address grid constraints.
-Using DC optimal power flow calculations, POMATWO determines redispatch actions
-necessary to manage congestion, aiming to minimize the extent of these adjustments 
-and maintain system stability. 
 
 In the next step, POMATWO simulates a given number intraday market gates that follow
 the day-ahead market. This phase uses updated time series data that forecast solar 
 and wind generation profiles, as well as load variations, depending on the time to delivery.
 Based on these forecasts, the model recalculates cost-minimal dispatch.
-The results are passed to Plan4Res, which performs the final AC redispatch calculations. 
+The results are passed to Plan4Res, which performs the final AC redispatch calculations.
+
+POMATWO cantains also feature of performing a DCOPF redispatch to adress grid constraints. 
+Using DC optimal power flow calculations, POMATWO determines redispatch actions
+necessary to manage congestion, aiming to minimize the extent of these adjustments 
+and maintain system stability. This feature is not used for the iDesignRES case study, since an 
+AC redispatch is calculated by Pan4Res.
 
 ## Input to and output from the model  
 To run POMATWO, as it is used in iDesignRES, the following input data set is required: 
@@ -42,19 +43,23 @@ To run POMATWO, as it is used in iDesignRES, the following input data set is req
 (capacity of the lines and topographie of the grid), storages (inflow, capacity 
 and efficiency factor), marginal costs of each generation technology and the load.
  
-POMATWO calculates the cost-optimal usage of generation capacities to meet the load while taking the grid into account: 
-- Generation of each power plant at each time step (MWh)	 
-- Generation of each power plant at each time step after redispatch (MWh) 
-- Change of each storage charging level at each time step (MWh) 
-- Injection at each node at each time step (MWh) 
-- Net exchange at each zone at each time step (MWh) 
+POMATWO calculates the cost-optimal usage of generation capacities to meet the load. 
+Main outputs are: 
 
+- Generation of each power plant at each time step (MWh)
+   
+- Change of each storage charging level at each time step (MWh)
+  
+- Injection at each node at each time step (MWh)
+  
 These results are available for the day-ahead market at each intraday gate.
 
 ## Implemented features  
 POMATWO employs a multi-step approach, solving the day-ahead and intraday markets sequentially.
 Depending on the specific application, the model can be configured to solve only 
-the day-ahead market or both the day-ahead and intraday markets consecutively. 
+the day-ahead market or both the day-ahead and intraday markets consecutively. While POMATWO 
+offers the feature to run redispatch calculation, this feature is optional for the user and is not 
+directly included in day-ahead calculations.
 
 ## Core assumption  
 POMATWO operates under the assumption of perfect foresight, minimizing system costs 
@@ -63,12 +68,9 @@ merit-order principle. This approach implies an underlying assumption of perfect
 competition in the electricity generation market, where producers are presumed 
 to bid at their marginal costs to maximize profits. 
 
-The model determines redispatch actions required to address congestion,
+The model is able to determine redispatch actions required to address congestion,
 by minimizing the scale of these adjustments to maintain grid stability. 
-Notably, dispatch decisions are not based on production costs but align with the
-practice of transmission system operators (TSOs), which similarly do not consider 
-specific production costs during dispatch. It is also important to note that the 
-model does not include flexibility costs in its considerations. 
+It is also important to note that the model does not include flexibility costs in its considerations. 
 
 ## Repository 
 The link to the GitLab repository of the POMATWO model:
