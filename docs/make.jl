@@ -18,5 +18,4 @@ pages = [
             "Nomenclature" => "nomenclature.md",
             "Market Model" => "market_model.md",
             "AC Power Flow" => "power_flow_ac.md"]
-        ],
-remotes = nothing )
+        ])
