@@ -1,7 +1,4 @@
-using Pkg
-Pkg.activate("docs")
 using Documenter
-#Pkg.develop(path = ".")
 using POMATWO
 
 makedocs(repo = "https://github.com/EnnoWbrw/POMATWO.jl.git",
