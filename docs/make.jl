@@ -4,7 +4,8 @@ using Documenter
 #Pkg.develop(path = ".")
 using POMATWO
 
-makedocs(sitename="POMATWO.jl", 
+makedocs(repo = "https://github.com/EnnoWbrw/POMATWO.jl.git",
+sitename="POMATWO.jl", 
 authors = "Enno Wiebrow, Kristin Dietrich, Mario Kendziorski", 
 pages = [
     "Home" => "index.md",
