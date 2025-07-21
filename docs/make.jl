@@ -1,7 +1,7 @@
 using Documenter
 using POMATWO
 
-makedocs(repo = "https://github.com/EnnoWbrw/POMATWO.jl.git",
+makedocs(
 sitename="POMATWO.jl", 
 authors = "Enno Wiebrow, Kristin Dietrich, Mario Kendziorski", 
 pages = [
@@ -16,3 +16,5 @@ pages = [
             "Market Model" => "market_model.md",
             "AC Power Flow" => "power_flow_ac.md"]
         ])
+
+deploydocs(repo = "github.com/EnnoWbrw/POMATWO.jl.git",)
