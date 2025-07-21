@@ -1,0 +1,4 @@
+index,dispatchable,storage,fuel_price,co2content,prosumer,color
+coal,1,0,25,0,0,#754937
+wind,1,0,7,0,0,#518696
+prosumer,0,0,0,0,1,#d5c200

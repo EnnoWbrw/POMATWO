@@ -1,4 +1,5 @@
-# POMATWO
+# pomato.jl
+
 
 This README provides an overview of the Model POMATWO within iDesignRES.
 
@@ -72,6 +73,5 @@ The model is able to determine redispatch actions required to address congestion
 by minimizing the scale of these adjustments to maintain grid stability. 
 It is also important to note that the model does not include flexibility costs in its considerations. 
 
-## Repository 
-The link to the GitLab repository of the POMATWO model:
-https://git.tu-berlin.de/wip/elmodtoolbox/elmod.jl/-/tree/iDesignRES?ref_type=heads
+## Licencing
+The POMATWO model and all additional files in the git repository are licensed under the MIT license.That means you can use and change the code of POMATWO. Furthermore, you can change the license in your redistribution but must mention the original author. We appreciate if you inform us about changes and send a merge request via git. For further information please read the LICENSE file, which contains the license text, or go to https://opensource.org/licenses/MIT

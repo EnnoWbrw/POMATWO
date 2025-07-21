@@ -1,0 +1,2 @@
+index,node,mc_el,mc_heat,g_max,h_max,d_max,eta,plant_type,storage_power,storage_capacity
+prs_n2,n2,0,0,40,0,0,1,prosumer,12,55

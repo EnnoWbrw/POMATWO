@@ -1,0 +1,4 @@
+NE_name,node_i,node_j,voltage,r,x,b,I_nom,capacity,index,lat_i,lon_i,lat_j,lon_j,node_i_name,node_j_name
+l1,n1,n2,220,4.0937,18.349,1,790,30,l1,47.90735483,7.555916922,49.4878,7.72269,Eula,Roehrsdorf
+l2,n2,n3,220,7.5895,31.888,1,790,100,l2,49.4878,7.72269,47.868229,13.076006,Roehrsdorf,Weida
+l3,n1,n3,220,7.5895,31.888,1,790,100,l3,47.90735483,7.555916922,547.868229,13.076006,Weida,Eula

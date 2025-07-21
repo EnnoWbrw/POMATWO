@@ -1,0 +1,15 @@
+index,dispatchable,storage,fuel_price,co2content,prosumer,color
+Biomass,1,0,0,0,0,#7cb342
+Coal,1,0,0,0,0,#754937
+Gas,1,0,0,0,0,#B33555
+Oil,1,0,0,0,0,#272724
+Oil/Gas,1,0,0,0,0,#272724
+Diesel,1,0,0,0,0,#B3E96A
+Oil/Gas/Diesel,1,0,0,0,0,#272724
+Oil/Diesel,1,0,0,0,0,#272724
+Nuclear,1,0,0,0,0,#B85988
+Wind,0,0,0,0,0,#518696
+Solar,0,0,0,0,0,#ffeb3b
+Hydro|run_of_river,1,0,0,0,0,#6782e4
+Hydro|pumped_storage,1,1,0,0,0,#002171
+Hydro|reservoir,1,1,0,0,0,#87CEEB

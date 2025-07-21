@@ -1,0 +1,3 @@
+index,plant_type,node,g_max,eta,storage_capacity,lat,lon,storage_power
+p1,wind,n1,140,1,0,49.978037,9.066645,
+p2,coal,n2,300,1,0,51.489714,10.413338,
