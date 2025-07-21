@@ -3,6 +3,8 @@ using POMATWO
 
 makedocs(
 sitename="POMATWO.jl", 
+format = Documenter.HTML(),
+modules = [POMATWO],
 authors = "Enno Wiebrow, Kristin Dietrich, Mario Kendziorski", 
 pages = [
     "Home" => "index.md",
