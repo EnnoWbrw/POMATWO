@@ -19,4 +19,4 @@ pages = [
             "AC Power Flow" => "power_flow_ac.md"]
         ])
 
-deploydocs(repo = "github.com/EnnoWbrw/POMATWO.jl.git",)
+deploydocs(repo = "github.com/EnnoWbrw/POMATWO.jl",)
