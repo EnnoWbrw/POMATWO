@@ -934,7 +934,7 @@ function create_lineplot_layout(figsize = (800, 1000))
 
 end
 
-function POMATWO.create_lineplot(
+function create_lineplot(
     results_path,
     type::String = "max",
     exclude_dc_lines::Bool = false,
@@ -990,7 +990,7 @@ function POMATWO.create_lineplot(
 end
 
 
-function POMATWO.create_lineplot(
+function create_lineplot(
     results_path,
     data,
     type::String = "max",
