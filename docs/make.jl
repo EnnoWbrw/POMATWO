@@ -22,4 +22,4 @@ pages = [
         "Visualizing outputs" => "Visualizing_outputs.md" ]
         ])
 
-deploydocs(repo = "github.com/EnnoWbrw/POMATWO.jl",)
+deploydocs(repo = "github.com/EnnoWbrw/POMATWO")
