@@ -56,14 +56,14 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
-      - name: Configure doc environment
+      - name: Install dependencies
         shell: julia --project=docs --color=yes {0}
         run: |
           using Pkg
           Pkg.develop(PackageSpec(path=pwd()))
           Pkg.instantiate()
-      - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-docdeploy@v1
+      - name: Build and deploy docs
+        run: julia --color=yes --project=docs docs/make.jl
       - name: Run doctests
         shell: julia --project=docs --color=yes {0}
         run: |
