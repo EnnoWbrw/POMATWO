@@ -20,7 +20,7 @@ function value_or_number(x)
     return x
 end
 
-function dual_or_number(x::T) where {T<:Union{ConstraintRef,AffExpr,LinkConstraintRef}}
+function dual_or_number(x::T) where {T<:Union{ConstraintRef,AffExpr,Plasmo.LinkConstraintRef}}
     return dual(x)
 end
 
