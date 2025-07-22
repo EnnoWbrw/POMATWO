@@ -3,7 +3,10 @@ using POMATWO
 
 makedocs(
 sitename="POMATWO.jl", 
-format = Documenter.HTML(),
+format = Documenter.HTML(;
+        canonical="https://ennowbrw.github.io/POMATWO/",
+        edit_link="main",
+        assets=String[],),
 modules = [POMATWO],
 authors = "Enno Wiebrow, Kristin Dietrich, Mario Kendziorski", 
 pages = [
@@ -22,4 +25,4 @@ pages = [
         "Visualizing outputs" => "Visualizing_outputs.md" ]
         ])
 
-deploydocs(repo = "github.com/ennowbrw/POMATWO.git")
+deploydocs(repo = "ennowbrw.github.io/POMATWO/")
