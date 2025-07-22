@@ -320,7 +320,7 @@ Creates an interactive plot for visualizing market results by zone, including ge
 fig = plot_market_interactive(results)
 ```
 """
-function plot_market_interactive(
+function POMATWO.plot_market_interactive(
     results;
     time_horizon=nothing,
     scalefactor=1/1000,
@@ -531,7 +531,7 @@ Creates an interactive, comparative visualization of Day-Ahead (DA) and Redispat
 fig = plot_DA_w_Redisp_interactive(results)
 ```
 """
-function plot_DA_w_Redisp_interactive(results; time_horizon = nothing, scalefactor = 1/1000)
+function POMATWO.plot_DA_w_Redisp_interactive(results; time_horizon = nothing, scalefactor = 1/1000)
     if time_horizon === nothing
         time_horizon = 1:maximum(results.GEN.Time)
     end
@@ -934,7 +934,7 @@ function create_lineplot_layout(figsize = (800, 1000))
 
 end
 
-function create_lineplot(
+function POMATWO.create_lineplot(
     results_path,
     type::String = "max",
     exclude_dc_lines::Bool = false,
@@ -990,7 +990,7 @@ function create_lineplot(
 end
 
 
-function create_lineplot(
+function POMATWO.create_lineplot(
     results_path,
     data,
     type::String = "max",
@@ -1076,7 +1076,7 @@ datafiles = Dict{Symbol,String}(
 fig = plot_network(datafiles)
 ```
 """
-function plot_network(data::Dict{Symbol,String})
+function POMATWO.plot_network(data::Dict{Symbol,String})
     ac_lines = select!(CSV.read(data[:lines], DataFrame), [:lat_i, :lon_i, :lat_j, :lon_j])
     dc_lines =
         select!(CSV.read(data[:dclines], DataFrame), [:lat_i, :lon_i, :lat_j, :lon_j])
@@ -1110,7 +1110,7 @@ function plot_network(data::Dict{Symbol,String})
 end
 
 
-function plot_total_gen(results, kind, zone)
+function POMATWO.plot_total_gen(results, kind, zone)
     df = summarize_result(transform_results_by_type(results, kind, zone))
 
 
@@ -1149,7 +1149,7 @@ This function displays an interactive Makie figure with two dropdown menus: one 
 fig = plot_total_gen_interactive(results)
 ```
 """
-function plot_total_gen_interactive(results::DataFiles)
+function POMATWO.plot_total_gen_interactive(results::DataFiles)
     # Fetch available kinds and zones from your results object
     kinds = [:DA, :REDISP]
     zones = results.params.sets.Z      # e.g. ["Zone1", "Zone2"]

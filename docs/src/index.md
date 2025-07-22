@@ -22,7 +22,8 @@ POMATWO calculates the cost-optimal dispatch. Main outputs include:
 
 These results are available per market stage (e.g., day-ahead, intraday gates).
 ## Installation
-
+import Pkg
+Pkg.add(url="https://github.com/EnnoWbrw/POMATWO")
 
 ## Getting Started
 Here's a minimal working example:
