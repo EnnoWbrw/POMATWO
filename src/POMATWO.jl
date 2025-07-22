@@ -16,10 +16,10 @@ using JuMP,
     CategoricalArrays,
     Statistics
     
-    function plot_DA_w_Redisp_interactive end
-    function plot_market_interactive end, 
-    function plot_network end 
-    function plot_total_gen_interactive end
+function plot_DA_w_Redisp_interactive end
+function plot_market_interactive end, 
+function plot_network end 
+function plot_total_gen_interactive end
 
 include("config_structs.jl")
 include("data_load.jl")
