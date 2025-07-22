@@ -1110,7 +1110,7 @@ function POMATWO.plot_network(data::Dict{Symbol,String})
 end
 
 
-function POMATWO.plot_total_gen(results, kind, zone)
+function plot_total_gen(results, kind, zone)
     df = summarize_result(transform_results_by_type(results, kind, zone))
 
 
