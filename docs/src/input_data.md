@@ -123,5 +123,5 @@ Placeholder table for DC transmission lines. Currently contains no entries.
 ## Parameters
 Based on the given input data, a Parameters struct is created.
 ```@docs
-Parameters
+POMATWO.Parameters
 ```
