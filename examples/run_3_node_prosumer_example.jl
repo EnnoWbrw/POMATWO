@@ -54,9 +54,10 @@ results = DataFiles(results_path)
 results.LINEFLOW
 results.PRS
 
+using POMATWO.Plotting
+
 ### creating a graph to visualize day ahead generation levels over time
 plot_DA_w_Redisp_interactive(results)
 
 ### create barplot to summarize generation by technology in the observed time horizon
 plot_total_gen_interactive(results)
-

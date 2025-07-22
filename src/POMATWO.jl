@@ -4,7 +4,7 @@ using JuMP,
     DataFrames,
     DataFramesMeta,
     Dates,
-    GLMakie,
+    Requires,
     Plasmo,
     UnPack,
     Infiltrator,
@@ -16,21 +16,15 @@ using JuMP,
     ProgressMeter,
     Suppressor,
     CSV,
-    Tyler,
-    GLMakie,
-    Tyler.TileProviders,
-    Tyler.MapTiles,
-    Tyler.Extents,
-    ColorSchemes,
     CategoricalArrays,
-    Statistics,
-    GeoInterface
+    Statistics
+    
 
 include("config_structs.jl")
 include("data_load.jl")
 include("helpers.jl")
 include("read_output.jl")
-include("plotting.jl")
+include("sub_modules/Plotting.jl")
 include("model_equations.jl")
 include("model_parts2.jl")
 include("prosumer.jl")
@@ -41,9 +35,6 @@ export load_data,
     ModelRun,
     run,
     DataFiles,
-    plot_market_interactive,
-    plot_DA_w_Redisp_interactive,
-    plot_network,
     TimeHorizon,
     MarketType,
     ZonalMarketWithRedispatch,
@@ -56,7 +47,6 @@ export load_data,
     optimizer_with_attributes,
     MOI,
     summarize_result,
-    transform_results_by_type,
-    plot_total_gen_interactive
-    
+    transform_results_by_type
+ 
 end # module POMATWO
