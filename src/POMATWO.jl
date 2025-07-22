@@ -22,7 +22,7 @@ using JuMP,
     function plot_market_interactive end, 
     function plot_network end 
     function plot_total_gen_interactive end
-    
+
 include("config_structs.jl")
 include("data_load.jl")
 include("helpers.jl")
@@ -49,7 +49,7 @@ export load_data,
     optimizer_with_attributes,
     MOI,
     summarize_result,
-    transform_results_by_typee
+    transform_results_by_type,
     plot_DA_w_Redisp_interactive, 
     plot_market_interactive, 
     plot_network, 
