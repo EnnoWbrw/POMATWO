@@ -1,5 +1,5 @@
 module Plotting
-using ..POMATWO
+using POMATWO
 using GLMakie, Tyler, ColorSchemes
 using Tyler.TileProviders
 using Tyler.MapTiles
@@ -9,7 +9,7 @@ using GeoInterface
 
 using ..POMATWO: DataFiles
 
-include("../plotting.jl")
+include("../src/plotting.jl")
 
 export plot_DA_w_Redisp_interactive, 
 plot_market_interactive, 
