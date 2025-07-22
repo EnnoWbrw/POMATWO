@@ -35,11 +35,6 @@ Base.@kwdef struct ZonalMarket <: MarketType
     target_zone::Union{String,Vector{String},Nothing} = nothing
 end
 
-"""
-    ZonalMarketType
-
-Union type for all zonal market variants (`ZonalMarket` or `ZonalMarketWithRedispatch`).
-"""
 const ZonalMarketType = Union{ZonalMarket,ZonalMarketWithRedispatch}
 
 """
@@ -59,11 +54,6 @@ Base.@kwdef struct NodalMarketWithRedispatch <: MarketType
     target_zone::Union{String,Vector{String},Nothing} = nothing
 end
 
-"""
-    NodalMarketType
-
-Union type for all nodal market variants (`NodalMarket` or `NodalMarketWithRedispatch`).
-"""
 const NodalMarketType = Union{NodalMarket,NodalMarketWithRedispatch}
 
 """

@@ -120,11 +120,8 @@ Placeholder table for DC transmission lines. Currently contains no entries.
 | `lon_j`    | String | Longitude of to-node. |
 | `capacity` | String | Capacity of the DC line. |
 
-
-## Visualizing Input Data
-### Interactive Plots
-### Static Plots
+## Parameters
+Based on the given input data, a Parameters struct is created.
 ```@docs
-plot_network(data::Dict{Symbol, String})
+Parameters
 ```
-
