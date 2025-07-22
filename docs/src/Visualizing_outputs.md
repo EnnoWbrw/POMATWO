@@ -49,6 +49,7 @@ Creates an interactive, comparative visualization of Day-Ahead (DA) and Redispat
 
 **Example**
 ```julia
+using GLMakie, Tyler, ColorSchemes
 fig = plot_DA_w_Redisp_interactive(results)
 ```
 
@@ -66,6 +67,7 @@ This function displays an interactive Makie figure with two dropdown menus: one 
 
 **Example**
 ```julia
+using GLMakie, Tyler, ColorSchemes
 fig = plot_total_gen_interactive(results)
 ```
 

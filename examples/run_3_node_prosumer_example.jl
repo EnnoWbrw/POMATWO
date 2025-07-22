@@ -54,7 +54,7 @@ results = DataFiles(results_path)
 results.LINEFLOW
 results.PRS
 
-using POMATWO
+using GLMakie, ColorSchemes, Tyler
 
 ### creating a graph to visualize day ahead generation levels over time
 plot_DA_w_Redisp_interactive(results)

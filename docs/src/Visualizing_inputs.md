@@ -28,6 +28,9 @@ datafiles = Dict{Symbol,String}(
     :demand => joinpath(datapath, "nodal_load.csv"),
     :types => joinpath(datapath, "planttypes.csv"),
 )
+
+using GLMakie, ColorSchemes, Tyler
+
 fig = plot_network(datafiles)
 ```
 

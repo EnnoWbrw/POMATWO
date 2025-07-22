@@ -52,7 +52,7 @@ results.GEN
 results.REDISP
 results.LINEFLOW
 
-
+using GLMakie, ColorSchemes, Tyler
 ### creating a graph to visualize day ahead generation levels over time
 plot_DA_w_Redisp_interactive(results)
 
