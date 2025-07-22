@@ -401,7 +401,7 @@ end
 
 
 ### SubRun
-const AffVarLink = Union{AffExpr,VariableRef,Plasmo.LinkConstraintRef}
+#const AffVarLink = Union{AffExpr,VariableRef,Plasmo.LinkConstraintRef}
 
 struct SubRun{MT<:MarketType,T<:MarketState}
 
