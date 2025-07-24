@@ -25,4 +25,5 @@ pages = [
         "Visualizing outputs" => "Visualizing_outputs.md" ]
         ])
 
-deploydocs(repo = "github.com/EnnoWbrw/POMATWO.git")
+deploydocs(repo = "github.com/EnnoWbrw/POMATWO.git",
+ devbranch="main")
