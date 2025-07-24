@@ -26,4 +26,4 @@ pages = [
         ])
 
 deploydocs(repo = "github.com/EnnoWbrw/POMATWO.git",
- devbranch="main")
+ devbranch="dev")
