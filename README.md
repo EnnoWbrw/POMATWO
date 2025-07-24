@@ -1,6 +1,6 @@
 # pomato.jl
 [![Main](https://img.shields.io/badge/docs-main-green)](https://ennowbrw.github.io/POMATWO/dev/)
-[![Build Status](https://github.com/EnnoWbrw/POMATWO/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/EnnoWbrw/POMATWO/actions/workflows/CI.yml?query=branch%3Amain)
+[![Build Status](https://github.com/EnnoWbrw/POMATWO/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/EnnoWbrw/POMATWO/actions?query=workflow%3ACI+branch%3Amain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 
