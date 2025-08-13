@@ -6,7 +6,8 @@ load_data(data::Dict)
 
 ## Model Input Data Structure
 The data that is read in using the [load_data](@ref) function has to be provided via seperate csv files. In the following section, the structure of those files is described. Generally the column headers have to be identical to what is described as `Column` in the tables below. Table rows are created to add a data entry and should follow thy `type` convention also specified below.
-### Data Structure: `plants.csv`
+
+### File Structure :plants
 
 Describes information about power plants and their attributes. Each row represents a different plant with the following columns:
 
@@ -22,15 +23,16 @@ Describes information about power plants and their attributes. Each row represen
 | `lon`              | Float    | Longitude of the plant's location. |
 | `storage_power`    | Float    | Power limit of the storage system (in MW), may be `NaN` if not applicable. |
 
-### Notes
-- Plants without storage systems have `storage_capacity = 0` and `storage_power = NaN`.
-- The `eta` column may represent conversion efficiency or a binary indicator, depending on the modeling context.
+!!! note
+    Plants without storage systems have `storage_capacity = 0` and `storage_power = NaN`.
+
+    The `eta` column may represent conversion efficiency or a binary indicator, depending on the modeling context.
 
 ---
 
-### Data Structure: `planttypes.csv`
+### File Structure :types
 
-Describes properties of each plant type used in the system.
+Planttypes are described as follows:
 
 | Column         | Type    | Description |
 |----------------|---------|-------------|
@@ -44,7 +46,7 @@ Describes properties of each plant type used in the system.
 
 ---
 
-### Data Structure: `zones.csv`
+### File Structure :zones
 
 Specifies the geographic or administrative zones involved in the model.
 
@@ -54,7 +56,7 @@ Specifies the geographic or administrative zones involved in the model.
 
 ---
 
-### Data Structure: `nodes.csv`
+### File Structure :nodes
 
 Defines all nodes in the network along with their geographic and zone information.
 
@@ -69,7 +71,7 @@ Defines all nodes in the network along with their geographic and zone informatio
 
 ---
 
-### Data Structure: `nodal_load.csv`
+### File Structure :demand
 
 Contains the time series of load demand at each node.
 
@@ -80,7 +82,22 @@ Contains the time series of load demand at each node.
 | `...`   | Integer | Load demand in MW at node `nx` for each time step. *(Example shown; actual structure may include multiple nodes.)* |
 ---
 
-### Data Structure: `lines.csv`
+### File Structure :avail, :avail_planttype_nodal, :avail_planttype_zonal
+
+Availabilities for each time step can be defined. If no availabilities are defined the default of `1.0`is assumed. The values are used to scale the maximum generation or operational capacity of a plant or unit for each time step.
+
+| Column   | Type    | Description |
+|----------|---------|-------------|
+| `prs_n1` | Float64 | Availability factor (between `0.0` and `1.0`) for the prosumer unit at node `n1`. This represents the fraction of maximum capacity that is available at each time step. |
+
+!!! note
+    Each row corresponds to a different time step.
+
+    The column name (`prs_n1`) corresponds to a prosumer identifier and may vary or be part of a larger dataset with multiple columns (e.g., `prs_n1`, `prs_n2`, etc.).
+
+    A value of `1.0` means full availability; `0.0` means the unit is unavailable at that time.
+
+### File Structure :lines
 
 Describes the properties of AC transmission lines between nodes.
 
@@ -105,9 +122,9 @@ Describes the properties of AC transmission lines between nodes.
 
 ---
 
-### Data Structure `dclines.csv`
+### File Structure :dclines
 
-Placeholder table for DC transmission lines. Currently contains no entries.
+Describes the properties of DC transmission lines between nodes.
 
 | Column     | Type   | Description |
 |------------|--------|-------------|
@@ -120,7 +137,7 @@ Placeholder table for DC transmission lines. Currently contains no entries.
 | `lon_j`    | String | Longitude of to-node. |
 | `capacity` | String | Capacity of the DC line. |
 
-### Prosumers: Data Structure `prosumer_demand.csv`
+### Prosumers: File Structure :prs_demand
 
 Contains the time series demand for prosumer nodes.
 
@@ -130,42 +147,10 @@ Contains the time series demand for prosumer nodes.
 
 ---
 
-### Prosumers: Data Structure `prosumer_plants.csv`
+### Prosumers: File Structure generation
 
-Describes the characteristics of prosumer units in the model, including generation, storage, and flexibility.
+Prosumer generators are described analogously to plants [File Structure :plants](@ref).
 
-| Column            | Type    | Description |
-|-------------------|---------|-------------|
-| `index`           | String  | Unique identifier for the prosumer unit (e.g., `prs_n1`). |
-| `node`            | String  | Node ID where the prosumer is located. |
-| `mc_el`           | Integer | Marginal cost of electricity generation (€/MWh). |
-| `mc_heat`         | Integer | Marginal cost of heat generation (€/MWh). |
-| `g_max`           | Integer | Maximum electrical generation capacity (MW). |
-| `h_max`           | Integer | Maximum heat generation capacity (MW). |
-| `d_max`           | Integer | Maximum flexible demand (MW). |
-| `eta`             | Integer | Conversion efficiency (e.g., 1 for full efficiency). |
-| `plant_type`      | String  | Type of unit, typically `prosumer`. |
-| `storage_power`   | Integer | Maximum charge/discharge power of storage (MW). |
-| `storage_capacity`| Integer | Energy capacity of the storage system (MWh). |
-
-### Notes
-- All capacities and costs are assumed to be expressed in consistent units across the model.
-- The `eta` field typically represents a fixed conversion efficiency from input to output energy.
-- If `mc_el` and `mc_heat` are both zero, the unit may represent a passive load with storage.
-
-
-### Prosumers: Data Structure `availability.csv`
-
-For prosumers availabilities for each time step can be defined. If no availabilities are defined the default of `1.0`is assumed.The values are used to scale the maximum generation or operational capacity of a plant or unit for each time step.
-
-| Column   | Type    | Description |
-|----------|---------|-------------|
-| `prs_n1` | Float64 | Availability factor (between `0.0` and `1.0`) for the prosumer unit at node `n1`. This represents the fraction of maximum capacity that is available at each time step. |
-
-### Notes
-- Each row corresponds to a different time step.
-- The column name (`prs_n1`) corresponds to a prosumer identifier and may vary or be part of a larger dataset with multiple columns (e.g., `prs_n1`, `prs_n2`, etc.).
-- A value of `1.0` means full availability; `0.0` means the unit is unavailable at that time.
 
 
 ## Parameters
