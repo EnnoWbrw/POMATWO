@@ -120,6 +120,54 @@ Placeholder table for DC transmission lines. Currently contains no entries.
 | `lon_j`    | String | Longitude of to-node. |
 | `capacity` | String | Capacity of the DC line. |
 
+### Prosumers: Data Structure `prosumer_demand.csv`
+
+Contains the time series demand for prosumer nodes.
+
+| Column   | Type    | Description |
+|----------|---------|-------------|
+| `prs_n1` | Integer | Electricity demand (in MW) for the prosumer at node `n1` for each time step. *(Additional prosumer columns may be present in the full dataset.)* |
+
+---
+
+### Prosumers: Data Structure `prosumer_plants.csv`
+
+Describes the characteristics of prosumer units in the model, including generation, storage, and flexibility.
+
+| Column            | Type    | Description |
+|-------------------|---------|-------------|
+| `index`           | String  | Unique identifier for the prosumer unit (e.g., `prs_n1`). |
+| `node`            | String  | Node ID where the prosumer is located. |
+| `mc_el`           | Integer | Marginal cost of electricity generation (€/MWh). |
+| `mc_heat`         | Integer | Marginal cost of heat generation (€/MWh). |
+| `g_max`           | Integer | Maximum electrical generation capacity (MW). |
+| `h_max`           | Integer | Maximum heat generation capacity (MW). |
+| `d_max`           | Integer | Maximum flexible demand (MW). |
+| `eta`             | Integer | Conversion efficiency (e.g., 1 for full efficiency). |
+| `plant_type`      | String  | Type of unit, typically `prosumer`. |
+| `storage_power`   | Integer | Maximum charge/discharge power of storage (MW). |
+| `storage_capacity`| Integer | Energy capacity of the storage system (MWh). |
+
+### Notes
+- All capacities and costs are assumed to be expressed in consistent units across the model.
+- The `eta` field typically represents a fixed conversion efficiency from input to output energy.
+- If `mc_el` and `mc_heat` are both zero, the unit may represent a passive load with storage.
+
+
+### Prosumers: Data Structure `availability.csv`
+
+For prosumers availabilities for each time step can be defined. If no availabilities are defined the default of `1.0`is assumed.The values are used to scale the maximum generation or operational capacity of a plant or unit for each time step.
+
+| Column   | Type    | Description |
+|----------|---------|-------------|
+| `prs_n1` | Float64 | Availability factor (between `0.0` and `1.0`) for the prosumer unit at node `n1`. This represents the fraction of maximum capacity that is available at each time step. |
+
+### Notes
+- Each row corresponds to a different time step.
+- The column name (`prs_n1`) corresponds to a prosumer identifier and may vary or be part of a larger dataset with multiple columns (e.g., `prs_n1`, `prs_n2`, etc.).
+- A value of `1.0` means full availability; `0.0` means the unit is unavailable at that time.
+
+
 ## Parameters
 Based on the given input data, a Parameters struct is created.
 ```@docs
