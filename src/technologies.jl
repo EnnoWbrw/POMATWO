@@ -1,18 +1,9 @@
-const AffOrVarOrFloatOrInt = Union{AffExpr,VariableRef,Float64,Int}
 
-function df_gen(dict)
-    if !haskey(dict, :GEN)
-        dict[:GEN] = DataFrame(;
-            index = String[],
-            Time = Int[],
-            GEN = AffOrVarOrFloatOrInt[],
-            mc = Float64[],
-            gmax = Float64[],
-            CU = AffOrVarOrFloatOrInt[],
-        )
-    end
-end
-
+"""
+Add dispatchable generators to the model for DayAhead market.
+Defines variables, objective, and constraints for dispatchable generation.
+Updates results with generation data.
+"""
 function add_disp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhead}
     T = mr.market_state.Time
     @unpack DISP = mr.modelrun.params.sets
@@ -74,6 +65,11 @@ function add_disp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhe
     return m
 end
 
+"""
+Add non-dispatchable generators to the model for DayAhead market.
+Defines variables, objective, and constraints for non-dispatchable generation.
+Updates results with generation data.
+"""
 function add_ndisp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhead}
     T = mr.market_state.Time
     @unpack NDISP = mr.modelrun.params.sets
@@ -149,29 +145,11 @@ function add_ndisp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAh
     return m
 end
 
-function df_charge(dict)
-    if !haskey(dict, :CHARGE)
-        dict[:CHARGE] = DataFrame(;
-            index = String[],
-            Time = Int[],
-            CHARGE = VariableRef[],
-            gmax = Float64[],
-        )
-    end
-end
-
-function df_sto(dict)
-    if !haskey(dict, :STO_LVL)
-        dict[:STO_LVL] = DataFrame(;
-            index = String[],
-            Time = Int[],
-            STO_LVL = VariableRef[],
-            storage = Float64[],
-            inf = AffOrVarOrFloatOrInt[],
-        )
-    end
-end
-
+"""
+Add storage units to the model for DayAhead market.
+Defines variables, objective, and constraints for storage operation.
+Updates results with storage, charge, and generation data.
+"""
 function add_storage(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhead}
     T = mr.market_state.Time
     @unpack S = mr.modelrun.params.sets
@@ -203,17 +181,6 @@ function add_storage(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhead}
         sum(mc[s][t] * GEN[s, t] for s in S, t in T) +
         sum(10000 * (INF_POS[s, t] + INF_NEG[s, t]) for s in S, t in T)
     )
-    # storage constraint
-    # @constraint(m, StorageBalance[s=S, t=T],
-
-    # 	STO_LVL[s, t]
-    # 	==
-    # 	STO_LVL[s, prev_period(T, t)]
-    # 	- GEN[s, t] / eta[s]
-    # 	+ CHARGE[s, t] * eta[s]
-    # 	+ inflow[s, t]
-    # 	+ INF[s, t]
-    # )
 
     for s in S
         for t in T
@@ -307,25 +274,11 @@ function add_storage(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhead}
 end
 
 # ### Redispatch ###
-function df_redispatch(dict)
-    if !haskey(dict, :REDISP)
-        dict[:REDISP] = DataFrame(;
-            index = String[],
-            Time = Int[],
-            GEN_REDISP = AffExpr[],
-            GEN_UP = AffOrVarOrFloatOrInt[],
-            GEN_DOWN = AffOrVarOrFloatOrInt[],
-            gen = Float64[],
-            CU_REDISP = AffOrVarOrFloatOrInt[],
-            CHARGE_REDISP = AffOrVarOrFloatOrInt[],
-            CHARGE_UP = AffOrVarOrFloatOrInt[],
-            CHARGE_DOWN = AffOrVarOrFloatOrInt[],
-            max_up = Float64[],
-        )
-    end
-end
-
-
+"""
+Add dispatchable generators to the model for Redispatch market.
+Defines variables, objective, and constraints for redispatch generation.
+Updates results with redispatch data.
+"""
 function add_disp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
     T = mr.market_state.Time
     @unpack DISP = mr.modelrun.params.sets
@@ -372,6 +325,11 @@ function add_disp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redisp
     return m
 end
 
+"""
+Add non-dispatchable generators to the model for Redispatch market.
+Defines variables, objective, and constraints for redispatch non-dispatchable generation.
+Updates results with redispatch data.
+"""
 function add_ndisp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
     T = mr.market_state.Time
     @unpack NDISP, PRS = mr.modelrun.params.sets
@@ -411,6 +369,11 @@ function add_ndisp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redis
     return m
 end
 
+"""
+Add storage units to the model for Redispatch market.
+Defines variables, objective, and constraints for redispatch storage operation.
+Updates results with redispatch data.
+"""
 function add_storage(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
     T = mr.market_state.Time
     @unpack S = mr.modelrun.params.sets
@@ -450,32 +413,7 @@ function add_storage(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
         sum(redispatch_cost * (GEN_UP[s, t] + GEN_DOWN[s, t]) for s in S, t in T) +
         sum(10000 * (INF_POS[s, t] + INF_NEG[s, t]) for s in S, t in T)
     )
-    # storage constraint
-    # @constraint(m, StorageBalance[s=S, t=T],
-
-    # 	STO_LVL_REDISP[s, t] ==
-    # 	STO_LVL_REDISP[s, prev_period(T, t)]
-    # 	- GEN_REDISP[s, t] * 1 / eta[s]
-    # 	+ CHARGE_REDISP[s, t] * eta[s]
-    # 	+ inflow[s, t]
-    # 	+ INF[s,t]
-    # )
-
-    #	for s in S
-    #		for t in T
-    #			if t == 1
-    #				@constraint(m, STO_LVL[s, t] == -(GEN[s, t]) / eta[s] + CHARGE[s, t] * eta[s] + inflow[s, t] + INF[s, t])
-    #			elseif t < T
-    #				prev_t = prev_period(T, t)
-    #				@constraint(m, STO_LVL[s, t] == (STO_LVL[s, prev_t] - GEN[s, t] / eta[s]) + CHARGE[s, t] * eta[s] + inflow[s, t] + INF[s, t])
-    #			else
-    #				prev_t = prev_period(T, t)
-    #				@constraint(m, STO_LVL[s, t] == (STO_LVL[s, prev_t] - GEN[s, t] / eta[s]) + CHARGE[s, t] * eta[s] + INF[s, t])
-    #				@constraint(m, STO_LVL[s, t] == inflow[s,t] )
-    #			end
-    #		end
-    #	end
-
+  
     for s in S
         for t in T
             if t == 1
@@ -526,47 +464,27 @@ function add_storage(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
     return m
 end
 
+"""
+Add network constraints for nodal market types using DC load flow.
+Returns the result of add_dclf.
+"""
 function add_network(sr::SubRun{MT,MS}) where {MT<:NodalMarketType,MS<:MarketState}
     return add_dclf(sr)
 end  # function _add_network
 
+"""
+Add network constraints for zonal market with redispatch using DC load flow.
+Returns the result of add_dclf.
+"""
 function add_network(sr::SubRun{MT,MS}) where {MT<:ZonalMarketWithRedispatch,MS<:Redispatch}
     return add_dclf(sr)
 end  # function _add_network
 
-function df_netinput(dict)
-    if !haskey(dict, :NETINPUT)
-        dict[:NETINPUT] = DataFrame(;
-            index = String[],
-            Time = Int[],
-            NETINPUT = AffOrVarOrFloatOrInt[],
-            DELTA = AffOrVarOrFloatOrInt[],
-        )
-    end
-end
-
-function df_lineflow(dict)
-    if !haskey(dict, :LINEFLOW)
-        dict[:LINEFLOW] = DataFrame(;
-            index = String[],
-            Time = Int[],
-            LINEFLOW = AffOrVar[],
-            line_capacity = Float64[],
-            lineinf = VariableRef[],
-        )
-    end
-
-    if !haskey(dict, :DCLINEFLOW)
-        dict[:DCLINEFLOW] = DataFrame(;
-            index = String[],
-            Time = Int[],
-            DCLINEFLOW = AffOrVarOrFloatOrInt[],
-            line_capacity = Float64[],
-            lineinf = VariableRef[],
-        )
-    end
-end
-
+"""
+Add DC load flow constraints to the model.
+Defines variables, objective, and constraints for power flows.
+Updates results with net input and line flow data.
+"""
 function add_dclf(sr::SubRun)
     T = sr.market_state.Time
     @unpack N, DC, L = sr.modelrun.params.sets
@@ -624,27 +542,11 @@ function add_dclf(sr::SubRun)
         JuMP.fix(THETA[t, n], 0)
     end
 
-    # @expression(
-    # 	m,
-    # 	NETINPUT[n=N, t=T],
-
-    # 	sum(b[n, nn] * DELTA[nn, t] for nn in N)
-    # 	+ sum(F[t, dc] for dc in DC if dc_end[dc] == n)
-    # 	- sum(F[t, dc] for dc in DC if dc_start[dc] == n)
-    # )
-
-    # @expression(
-    # 	m, LINEFLOW[l=L, t=T], sum(h[l, n] * DELTA[n, t] for n in N)
-    # )
-
 
     @constraint(m, LineLimitPos[l = L, t = T], LINEFLOW[l, t] <= acline_capacity[l])
 
     @constraint(m, LineLimitNeg[l = L, t = T], -acline_capacity[l] <= LINEFLOW[l, t])
 
-    # for n in slack, t in T
-    # 	JuMP.fix(DELTA[n, t], 0)
-    # end
 
     ### to dataframe
     df_netinput(sr.results)
@@ -685,24 +587,19 @@ function add_dclf(sr::SubRun)
 
 end
 
+"""
+Add network constraints for zonal market types using exchange model.
+Returns the result of add_exchange.
+"""
 function add_network(sr::SubRun{MT,MS}) where {MT<:ZonalMarketType,MS<:DayAhead}
     return add_exchange(sr)
 end  # function _add_network
 
-function df_exchange(dict)
-    if !haskey(dict, :EXCHANGE)
-        dict[:EXCHANGE] =
-            DataFrame(; index = String[], Time = Int[], EXCHANGE = AffOrVarOrFloatOrInt[])
-    end
-end
-
-function df_ntc(dict)
-    if !haskey(dict, :NTC)
-        dict[:NTC] =
-            DataFrame(; From = String[], To = String[], Time = Int[], NTC = VariableRef[])
-    end
-end
-
+"""
+Add exchange constraints to the model for zonal markets.
+Defines variables, objective, and constraints for exchanges.
+Updates results with NTC and exchange data.
+"""
 function add_exchange(sr::SubRun)
     T = sr.market_state.Time
     @unpack Z, NTC = sr.modelrun.params.sets

@@ -1,23 +1,4 @@
 
-function df_prosumer(dict)
-    if !haskey(dict, :PRS)
-        dict[:PRS] = DataFrame(;
-            index = String[],
-            Time = Int[],
-            PRS_TOTAL_GEN = AffExpr[],
-            PRS_SELF = VariableRef[],
-            PRS_CU = AffOrVarOrFloatOrInt[],
-            PRS_NETINPUT = AffOrVarOrFloatOrInt[],
-            PRS_STO_LVL = AffOrVarOrFloatOrInt[],
-            PRS_STO_OUT = AffOrVarOrFloatOrInt[],
-            PRS_STO_IN = AffOrVarOrFloatOrInt[],
-            PRS_BUY = VariableRef[],
-            PRS_SELL = VariableRef[],
-            INF = VariableRef[],
-        )
-    end
-end
-
 function add_prosumer(
     sr::SubRun{MT,MS},
     po::NoProsumer,

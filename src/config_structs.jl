@@ -484,3 +484,5 @@ const results_dual_cols = Dict(
     :NodalMarketRedispBalance => :MarketBalance,
     :ZonalMarketBalance => :MarketBalance,
 )
+
+const AffOrVarOrFloatOrInt = Union{AffExpr,VariableRef,Float64,Int}

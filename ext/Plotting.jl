@@ -9,6 +9,6 @@ using CSV
 
 using ..POMATWO: DataFiles
 
-include("../src/plotting.jl")
+include("plots/plotting.jl")
 
 end

@@ -22,11 +22,14 @@ function plot_network end
 function plot_total_gen_interactive end
 
 include("config_structs.jl")
+include("utils/df_utils.jl")
+include("utils/time_utils.jl")
+include("utils/get_vals_utils.jl")
+include("utils/model_utils.jl")
 include("data_load.jl")
-include("helpers.jl")
 include("read_output.jl")
-include("model_equations.jl")
-include("model_parts2.jl")
+include("energy_balances.jl")
+include("technologies.jl")
 include("prosumer.jl")
 include("solving.jl")
 

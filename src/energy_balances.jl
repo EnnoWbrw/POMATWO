@@ -23,41 +23,6 @@ function create_energybalance(
     add_prosumer(sr, sr.modelrun.setup.ProsumerSetup)
 end
 
-function df_nodalmarketbalance(dict)
-    if !haskey(dict, :NodalMarketBalance)
-        dict[:NodalMarketBalance] = DataFrame(;
-            Time = Int[],
-            Node = String[],
-            MarketBalance = LinkConstraintRef[],
-            CU = VariableRef[],
-            LL = VariableRef[],
-        )
-    end
-end
-function df_nodalmarketredispbalance(dict)
-    if !haskey(dict, :NodalMarketRedispBalance)
-        dict[:NodalMarketRedispBalance] = DataFrame(;
-            Time = Int[],
-            Node = String[],
-            MarketBalance = LinkConstraintRef[],
-            CU = VariableRef[],
-            LL = VariableRef[],
-        )
-    end
-end
-
-function df_zonalmarketbalance(dict)
-    if !haskey(dict, :ZonalMarketBalance)
-        dict[:ZonalMarketBalance] = DataFrame(;
-            Time = Int[],
-            Zone = String[],
-            MarketBalance = LinkConstraintRef[],
-            CU = VariableRef[],
-            LL = VariableRef[],
-        )
-    end
-end
-
 function link_components(sr::SubRun{MT,MS}) where {MT<:ZonalMarketType,MS<:DayAhead}
     @unpack DISP, NDISP, Z, PRS  = sr.modelrun.params.sets
     @unpack plants_in_zone, nodes_in_zone, storages_in_zone, nodal_load, prs_demand  = sr.modelrun.params
