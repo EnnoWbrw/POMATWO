@@ -1,4 +1,9 @@
+"""
+    create_energybalance(sr::SubRun{MT,MS}) where {MT<:MarketType,MS<:MarketState}
 
+Creates the energy balance equations for a given market and market state.
+Adds generators, storage, network, prosumer components, and links all components for the optimization graph.
+"""
 function create_energybalance(sr::SubRun{MT,MS}) where {MT<:MarketType,MS<:MarketState}
     add_disp_generators(sr)
     add_ndisp_generators(sr)
@@ -8,6 +13,12 @@ function create_energybalance(sr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Marke
     link_components(sr)
 end
 
+"""
+    create_energybalance(sr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
+
+Creates the energy balance equations for redispatch market state.
+Adds generators, storage, network, prosumer components, and links all components for redispatch optimization.
+"""
 function create_energybalance(sr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
     add_disp_generators(sr)
     add_ndisp_generators(sr)
@@ -17,12 +28,25 @@ function create_energybalance(sr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redis
     link_components(sr)
 end
 
+"""
+    create_energybalance(sr::SubRun{MT,MS}) where {MT<:MarketType,MS<:ProsumerOptimizationState}
+
+Creates the energy balance equations for the prosumer optimization state.
+Adds only the prosumer components for the optimization graph.
+"""
 function create_energybalance(
     sr::SubRun{MT,MS},
 ) where {MT<:MarketType,MS<:ProsumerOptimizationState}
     add_prosumer(sr, sr.modelrun.setup.ProsumerSetup)
 end
 
+"""
+    link_components(sr::SubRun{MT,MS}) where {MT<:ZonalMarketType,MS<:DayAhead}
+
+Links all components for a zonal market in the day-ahead market state.
+Defines variables, objectives, and constraints for zonal market balance.
+Stores results in the :ZonalMarketBalance DataFrame.
+"""
 function link_components(sr::SubRun{MT,MS}) where {MT<:ZonalMarketType,MS<:DayAhead}
     @unpack DISP, NDISP, Z, PRS  = sr.modelrun.params.sets
     @unpack plants_in_zone, nodes_in_zone, storages_in_zone, nodal_load, prs_demand  = sr.modelrun.params
@@ -75,7 +99,13 @@ function link_components(sr::SubRun{MT,MS}) where {MT<:ZonalMarketType,MS<:DayAh
     return m
 end
 
+"""
+    link_components(sr::SubRun{MT,MS}) where {MT<:NodalMarketType,MS<:DayAhead}
 
+Links all components for a nodal market in the day-ahead market state.
+Defines variables, objectives, and constraints for nodal market balance.
+Stores results in the :NodalMarketBalance DataFrame.
+"""
 function link_components(sr::SubRun{MT,MS}) where {MT<:NodalMarketType,MS<:DayAhead}
     @unpack DISP, NDISP, N, PRS = sr.modelrun.params.sets
     @unpack plants_in_node, storages_in_node, nodal_load, prs_demand = sr.modelrun.params
@@ -125,7 +155,13 @@ function link_components(sr::SubRun{MT,MS}) where {MT<:NodalMarketType,MS<:DayAh
     return m
 end
 
+"""
+    link_components(sr::SubRun{MT,MS}) where {MT<:Union{ZonalMarketWithRedispatch,NodalMarketWithRedispatch},MS<:Redispatch}
 
+Links all components for zonal or nodal market with redispatch in the redispatch market state.
+Defines variables, objectives, and constraints for nodal market redispatch balance.
+Stores results in the :NodalMarketRedispBalance DataFrame.
+"""
 function link_components(
     sr::SubRun{MT,MS},
 ) where {MT<:Union{ZonalMarketWithRedispatch,NodalMarketWithRedispatch},MS<:Redispatch}
@@ -143,10 +179,6 @@ function link_components(
     if has_prs
         NDISP = setdiff(NDISP, PRS)
     end
-    #     load = params.nodal_load #params.nodal_load_no_prs
-    # else
-    #     load = params.nodal_load
-    # end
 
     @variable(balance, 0 <= CU[N, T])
     @variable(balance, 0 <= LL[N, T])
