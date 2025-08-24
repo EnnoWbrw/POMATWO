@@ -52,3 +52,8 @@ function getts(avail, plant, t)
         return 1
     end
 end
+
+get_balance(::MarketType, sr::SubRun) = nothing
+get_balance(::ZonalMarketType, sr::SubRun) = dual.(sr.optigraph[:ZonalMarketBalance])
+get_balance(::NodalMarketType, sr::SubRun) = dual.(sr.optigraph[:NodalMarketBalance])
+

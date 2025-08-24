@@ -47,7 +47,7 @@ function run(mr::ModelRun)
 end
 
 
-function _run(mr::ModelRun{MT}) where {MT<:Union{ZonalMarket,NodalMarket}}
+function _run(mr::ModelRun{MT, PS}) where {MT<:Union{ZonalMarket,NodalMarket}, PS<:NoProsumer}
 
     for T in split(mr.setup.TimeHorizon)
         @info "Starting subrun for period from $(T[1]) to $(T[end])"
@@ -65,17 +65,32 @@ function _run(mr::ModelRun{MT}) where {MT<:Union{ZonalMarket,NodalMarket}}
         fetch_results(sr)
         write_results(sr)
 
-        ### Prosumer
-        if !(mr.setup.ProsumerSetup isa NoProsumer)
+        finish!(prog, desc = "Subrun -> Done")
+    end
+end
+
+function _run(mr::ModelRun{MT, PS}) where {MT<:Union{ZonalMarket,NodalMarket}, PS<:ProsumerOptimization}
+
+    for T in split(mr.setup.TimeHorizon)
+        @info "Starting subrun for period from $(T[1]) to $(T[end])"
+
+        prog = ProgressUnknown(desc = "DayAhead", spinner = true, dt = 0.1)
+        ### DayAhead
+        market_state = DayAhead(T)
+        ProgressMeter.update!(prog, desc = "DayAhead -> Building Model")
+        sr = SubRun(mr, market_state)
+
+        ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
+        @suppress optimize!(sr)
+
+        ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
+        fetch_results(sr)
+        write_results(sr)
+
+        # ### Prosumer
             ProgressMeter.update!(prog, desc = "Prosumer -> Building Model")
             da_results = prev_results_for_redispatch(sr)
-            if mr.setup.MarketType isa ZonalMarketType
-            da_results[:price] = dual.(sr.optigraph[:ZonalMarketBalance])
-            elseif mr.setup.MarketType isa NodalMarketType
-                da_results[:price] = dual.(sr.optigraph[:NodalMarketBalance])
-            else
-                @error "Prosumer optimization is not supported for the selected market type"
-            end
+            da_results[:price] = get_balance(mr.setup.MarketType, sr)
             market_state = ProsumerOptimizationState(T, da_results)
             sr = SubRun(mr, market_state)
 
@@ -84,14 +99,14 @@ function _run(mr::ModelRun{MT}) where {MT<:Union{ZonalMarket,NodalMarket}}
             fetch_results(sr)
             write_results(sr)
             da_results[:prs_netinput] = value.(sr.vars[:prosumer][:PRS_NETINPUT])
-        end
 
         finish!(prog, desc = "Subrun -> Done")
     end
 end
 
 
-function _run(mr::ModelRun{MT}) where {MT<:Union{NodalMarketWithRedispatch,ZonalMarketWithRedispatch}}
+
+function _run(mr::ModelRun{MT, PS}) where {MT<:Union{NodalMarketWithRedispatch,ZonalMarketWithRedispatch}, PS<:NoProsumer}
 
     for T in split(mr.setup.TimeHorizon)
         @info "Starting subrun for period from $(T[1]) to $(T[end])"
@@ -107,26 +122,6 @@ function _run(mr::ModelRun{MT}) where {MT<:Union{NodalMarketWithRedispatch,Zonal
         fetch_results(sr)
         write_results(sr)
         da_results = prev_results_for_redispatch(sr)
-
-        ### Prosumer
-        if !(mr.setup.ProsumerSetup isa NoProsumer)
-            ProgressMeter.update!(prog, desc = "Prosumer -> Building Model")
-            if mr.setup.MarketType isa ZonalMarketType
-            da_results[:price] = dual.(sr.optigraph[:ZonalMarketBalance])
-            elseif mr.setup.MarketType isa NodalMarketType
-                da_results[:price] = dual.(sr.optigraph[:NodalMarketBalance])
-            else
-                @error "Prosumer optimization is not supported for the selected market type"
-            end
-            market_state = ProsumerOptimizationState(T, da_results)
-            sr = SubRun(mr, market_state)
-
-            ProgressMeter.update!(prog, desc = "Prosumer -> Optimizing")
-            @suppress optimize!(sr)
-            fetch_results(sr)
-            write_results(sr)
-            da_results[:prs_netinput] = value.(sr.vars[:prosumer][:PRS_NETINPUT])
-        end
 
         ## Redispatch
         ProgressMeter.update!(prog, desc = "Redispatch -> Building Model")
@@ -145,17 +140,54 @@ function _run(mr::ModelRun{MT}) where {MT<:Union{NodalMarketWithRedispatch,Zonal
     end
 end
 
-function prev_results_for_redispatch(sr::SubRun)
-    d = sr.vars
 
-    return Dict(
-        :disp_generation => value.(d[:disp][:GEN]),
-        :ndisp_cu => value.(d[:ndisp][:CU]),
-        :sto_generation => value.(d[:sto][:GEN]),
-        :sto_charge => value.(d[:sto][:CHARGE]),
-    )
+function _run(mr::ModelRun{MT, PS}) where {MT<:Union{NodalMarketWithRedispatch,ZonalMarketWithRedispatch}, PS<:ProsumerOptimization}
+
+    for T in split(mr.setup.TimeHorizon)
+        @info "Starting subrun for period from $(T[1]) to $(T[end])"
+
+        ## DayAhead
+        prog = ProgressUnknown(desc = "DayAhead", spinner = true, dt = 0.1)
+        market_state = DayAhead(T)
+        ProgressMeter.update!(prog, desc = "DayAhead -> Building Model")
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
+        @suppress optimize!(sr)
+        ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
+        fetch_results(sr)
+        write_results(sr)
+        da_results = prev_results_for_redispatch(sr)
+
+        ### Prosumer
+
+            ProgressMeter.update!(prog, desc = "Prosumer -> Building Model")
+            da_results = prev_results_for_redispatch(sr)
+            da_results[:price] = get_balance(mr.setup.MarketType, sr)
+            market_state = ProsumerOptimizationState(T, da_results)
+            sr = SubRun(mr, market_state)
+
+            ProgressMeter.update!(prog, desc = "Prosumer -> Optimizing")
+            @suppress optimize!(sr)
+            fetch_results(sr)
+            write_results(sr)
+            da_results[:prs_netinput] = value.(sr.vars[:prosumer][:PRS_NETINPUT])
+
+        ## Redispatch
+        ProgressMeter.update!(prog, desc = "Redispatch -> Building Model")
+        market_state = Redispatch(T, da_results)
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "Redispatch -> Optimizing")
+        @suppress optimize!(sr)
+        ProgressMeter.update!(prog, desc = "Redispatch -> Fetching Results")
+        if termination_status(sr.optigraph) != MOI.OPTIMAL
+            @show termination_status(sr.optigraph)
+        end
+        fetch_results(sr)
+        write_results(sr)
+
+        finish!(prog, desc = "Subrun -> Done")
+    end
 end
-
 
 function run_intraday(datapath, Gates::Int, params, scen_name)
     files = readdir(datapath)

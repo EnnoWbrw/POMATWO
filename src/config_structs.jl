@@ -1,4 +1,3 @@
-
 ### MarketTypes
 """
     MarketType
@@ -180,11 +179,11 @@ ModelSetup(
 )
 ```
 """
-Base.@kwdef struct ModelSetup{T<:MarketType}
+Base.@kwdef struct ModelSetup{MT<:MarketType, PS<:ProsumerSetup}
     Scenario::String
     TimeHorizon::TimeHorizon
-    MarketType::T = ZonalMarket()
-    ProsumerSetup::ProsumerSetup = NoProsumer()
+    MarketType::MT = ZonalMarket()
+    ProsumerSetup::PS = NoProsumer()
 end
 
 ### Parameters
@@ -370,9 +369,9 @@ Encapsulates a single simulation run of a market model, including its setup, sol
 - Automatically creates a result directory for the run.
 - Throws an error if the scenario directory exists and `overwrite=false`.
 """
-struct ModelRun{MT<:MarketType}
+struct ModelRun{MT<:MarketType, PS<:ProsumerSetup}
     params::Parameters
-    setup::ModelSetup{MT}
+    setup::ModelSetup{MT, PS}
     solver::Any
 
     resultdir::String
@@ -382,12 +381,12 @@ struct ModelRun{MT<:MarketType}
 
     function ModelRun(
         params::Parameters,
-        setup::ModelSetup{T},
+        setup::ModelSetup{T, S},
         solver;
         resultdir::String = "results",
         scenarioname::String = randstring(6),
         overwrite::Bool = false,
-    ) where {T<:MarketType}
+    ) where {T<:MarketType, S<:ProsumerSetup}
         scen_dir = joinpath(resultdir, scenarioname)
         if isdir(scen_dir) && !overwrite
             error("Directory $scen_dir already exists. Set overwrite=true to overwrite.")
@@ -395,7 +394,7 @@ struct ModelRun{MT<:MarketType}
 
         mkpath(scen_dir)
 
-        new{T}(params, setup, solver, resultdir, scenarioname, scen_dir, overwrite)
+        new{T, S}(params, setup, solver, resultdir, scenarioname, scen_dir, overwrite)
     end
 end
 

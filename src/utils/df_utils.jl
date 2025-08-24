@@ -203,3 +203,14 @@ function df_prosumer(dict)
 end
 
 read_csv(file) = CSV.read(file, DataFrame, stringtype = String)
+
+function prev_results_for_redispatch(sr::SubRun)
+    d = sr.vars
+
+    return Dict(
+        :disp_generation => value.(d[:disp][:GEN]),
+        :ndisp_cu => value.(d[:ndisp][:CU]),
+        :sto_generation => value.(d[:sto][:GEN]),
+        :sto_charge => value.(d[:sto][:CHARGE]),
+    )
+end
