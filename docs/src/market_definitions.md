@@ -6,8 +6,6 @@ Choosing the appropriate type is essential for model construction and simulation
 
 ```@docs
 MarketType
-ZonalMarketType
-NodalMarketType
 ```
 
 ## Zonal Markets
@@ -48,21 +46,10 @@ POMATWO supports optional redispatch modeling. Redispatch is activated via types
 
 ```@docs
 DCLF
-DCLF(::Type)
-DCLF()
 NoRedispatch
 ```
 
-# Market States
 
-Market simulations in POMATWO can consist of multiple stages (or states), such as day-ahead market, redispatch, and prosumer optimization.
-
-```@docs
-MarketState
-DayAhead
-ProsumerOptimizationState
-Redispatch
-```
 
 # Prosumer Setup
 
