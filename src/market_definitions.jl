@@ -29,10 +29,8 @@ struct FlowBased <: ExchangeFormulation end
 Abstract supertype for market setup descriptors. Subtypes specify the market structure (zonal or nodal) and whether redispatch is considered.
 
 # Subtypes
-- [`ZonalMarket`](@ref): Simple zonal market without redispatch.
-- [`ZonalMarketWithRedispatch`](@ref): Zonal market including redispatch actions.
-- [`NodalMarket`](@ref): Nodal market without redispatch.
-- [`NodalMarketWithRedispatch`](@ref): Nodal market including redispatch actions.
+- [`ZonalMarket`](@ref): Zonal market with specified exchange formulation.
+- [`NodalMarket`](@ref): Nodal market with specified load flow formulation.
 
 These types are used to parameterize simulations or models, allowing code to dispatch on market design and redispatch handling.
 """
