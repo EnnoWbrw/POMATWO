@@ -21,7 +21,8 @@ function plot_market_interactive end,
 function plot_network end 
 function plot_total_gen_interactive end
 
-include("config_structs.jl")
+include("market_definitions.jl")
+include("model_structs.jl")
 include("utils/df_utils.jl")
 include("utils/time_utils.jl")
 include("utils/get_vals_utils.jl")
@@ -40,13 +41,17 @@ export load_data,
     DataFiles,
     TimeHorizon,
     MarketType,
-    ZonalMarketWithRedispatch,
     ZonalMarket,
     NodalMarket,
-    NodalMarketWithRedispatch,
     ProsumerSetup,
     NoProsumer,
     ProsumerOptimization,
+    RedispatchSetup,
+    NoRedispatch,
+    DCLF,
+    PhaseAngle,
+    ExchangeFormulation,
+    NTC,
     optimizer_with_attributes,
     MOI,
     summarize_result,

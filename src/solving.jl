@@ -19,12 +19,12 @@ function run(mr::ModelRun)
 end
 
 """
-    _run(mr::ModelRun{MT, PS}) where {MT<:Union{ZonalMarket,NodalMarket}, PS<:NoProsumer}
+    _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:NoProsumer, RD<:NoRedispatch}
 
 Runs the market simulation for zonal or nodal market types without prosumer optimization.
 Performs day-ahead optimization and stores results for each time split.
 """
-function _run(mr::ModelRun{MT, PS}) where {MT<:Union{ZonalMarket,NodalMarket}, PS<:NoProsumer}
+function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:NoProsumer, RD<:NoRedispatch}
     for T in split(mr.setup.TimeHorizon)
         @info "Starting subrun for period from $(T[1]) to $(T[end])"
         prog = ProgressUnknown(desc = "DayAhead", spinner = true, dt = 0.1)
@@ -41,12 +41,12 @@ function _run(mr::ModelRun{MT, PS}) where {MT<:Union{ZonalMarket,NodalMarket}, P
 end
 
 """
-    _run(mr::ModelRun{MT, PS}) where {MT<:Union{ZonalMarket,NodalMarket}, PS<:ProsumerOptimization}
+   _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptimization, RD<:NoRedispatch}
 
 Runs the market simulation for zonal or nodal market types with prosumer optimization.
 Performs day-ahead optimization, then prosumer optimization, and stores results for each time split.
 """
-function _run(mr::ModelRun{MT, PS}) where {MT<:Union{ZonalMarket,NodalMarket}, PS<:ProsumerOptimization}
+function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptimization, RD<:NoRedispatch}
     for T in split(mr.setup.TimeHorizon)
         @info "Starting subrun for period from $(T[1]) to $(T[end])"
         prog = ProgressUnknown(desc = "DayAhead", spinner = true, dt = 0.1)
@@ -74,12 +74,12 @@ function _run(mr::ModelRun{MT, PS}) where {MT<:Union{ZonalMarket,NodalMarket}, P
 end
 
 """
-    _run(mr::ModelRun{MT, PS}) where {MT<:Union{NodalMarketWithRedispatch,ZonalMarketWithRedispatch}, PS<:NoProsumer}
+    _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:NoProsumer, RD<:RedispatchType}
 
 Runs the market simulation for nodal or zonal market types with redispatch and no prosumer optimization.
 Performs day-ahead and redispatch optimization, storing results for each time split.
 """
-function _run(mr::ModelRun{MT, PS}) where {MT<:Union{NodalMarketWithRedispatch,ZonalMarketWithRedispatch}, PS<:NoProsumer}
+function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:NoProsumer, RD<:RedispatchType}
     for T in split(mr.setup.TimeHorizon)
         @info "Starting subrun for period from $(T[1]) to $(T[end])"
         prog = ProgressUnknown(desc = "DayAhead", spinner = true, dt = 0.1)
@@ -109,12 +109,12 @@ function _run(mr::ModelRun{MT, PS}) where {MT<:Union{NodalMarketWithRedispatch,Z
 end
 
 """
-    _run(mr::ModelRun{MT, PS}) where {MT<:Union{NodalMarketWithRedispatch,ZonalMarketWithRedispatch}, PS<:ProsumerOptimization}
+    _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptimization, RD<:RedispatchType}
 
 Runs the market simulation for nodal or zonal market types with redispatch and prosumer optimization.
 Performs day-ahead, prosumer, and redispatch optimization, storing results for each time split.
 """
-function _run(mr::ModelRun{MT, PS}) where {MT<:Union{NodalMarketWithRedispatch,ZonalMarketWithRedispatch}, PS<:ProsumerOptimization}
+function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptimization, RD<:RedispatchType}
     for T in split(mr.setup.TimeHorizon)
         @info "Starting subrun for period from $(T[1]) to $(T[end])"
         prog = ProgressUnknown(desc = "DayAhead", spinner = true, dt = 0.1)
@@ -151,83 +151,5 @@ function _run(mr::ModelRun{MT, PS}) where {MT<:Union{NodalMarketWithRedispatch,Z
         fetch_results(sr)
         write_results(sr)
         finish!(prog, desc = "Subrun -> Done")
-    end
-end
-
-"""
-    run_intraday(datapath, Gates::Int, params, scen_name)
-
-Runs intraday market simulations for multiple gates using provided data files and parameters.
-
-# Arguments
-- `datapath`: Path to the directory containing input data files.
-- `Gates::Int`: Number of intraday gates to simulate.
-- `params`: Model parameters object.
-- `scen_name`: Scenario name prefix for output directories.
-
-# Side Effects
-- Reads availability and load data for each gate.
-- Writes results for each gate to a separate scenario directory.
-"""
-function run_intraday(datapath, Gates::Int, params, scen_name)
-    files = readdir(datapath)
-    for g = 1:Gates
-        if !("avail_ID_$g.csv" in files)
-            throw(
-                DomainError(
-                    "avail_ID_$g.csv",
-                    "Intraday availibility data must be named as: 'avail_ID_g' with g being the gate number",
-                ),
-            )
-        end
-    end
-
-    for ID = 1:Gates
-        avail = read_csv(joinpath(datapath, "avail_ID_$ID.csv"))
-        for (name, column) in pairs(eachcol(avail))
-            params.avail_planttype_zonal[string(name), "ES"] = HourlyProfile(column)
-        end
-
-        for p in params.sets.P
-            pt = params.plant_type[p]
-            n = params.plant2node[p]
-            z = params.plant2zone[p]
-            if haskey(params.avail_planttype_nodal, (pt, n))
-                params.avail[p] = params.avail_planttype_nodal[pt, n]
-            elseif haskey(params.avail_planttype_zonal, (pt, z))
-                params.avail[p] = params.avail_planttype_zonal[pt, z]
-            else
-                params.avail[p] = FixedProfile(1)
-            end
-        end
-
-        df_demand = read_csv(joinpath(datapath, "nodal_load.csv"))
-        s = names(df_demand)[1] in ["Hour", "index"] ? 2 : 1
-        for col in pairs(eachcol(df_demand[!, s:end]))
-            params.nodal_load[string(col[1])] = HourlyProfile(Vector(col[2]))
-        end
-
-        for n in setdiff(params.sets.N, keys(params.nodal_load))
-            params.nodal_load[n] = FixedProfile(0)
-        end
-
-        setup = ModelSetup(
-            "TestSetup",
-            TimeHorizon(; offset = 0, split = 24, stop = 24),
-            ZonalMarket(target_zone = "ES"),
-            NoProsumer(),
-        )
-
-        solver = optimizer_with_attributes(Gurobi.Optimizer, "OutputFlag" => 0)
-
-        mr = ModelRun(
-            params,
-            setup,
-            solver;
-            scenarioname = "$(scen_name)_ID_$ID",
-            overwrite = true,
-        )
-
-        run(mr)
     end
 end

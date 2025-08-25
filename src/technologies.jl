@@ -4,7 +4,7 @@ Add dispatchable generators to the model for DayAhead market.
 Defines variables, objective, and constraints for dispatchable generation.
 Updates results with generation data.
 """
-function add_disp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhead}
+function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DayAhead}
     T = mr.market_state.Time
     @unpack DISP = mr.modelrun.params.sets
     @unpack gmax, mc, avail, historical_generation, min_generation = mr.modelrun.params
@@ -70,7 +70,7 @@ Add non-dispatchable generators to the model for DayAhead market.
 Defines variables, objective, and constraints for non-dispatchable generation.
 Updates results with generation data.
 """
-function add_ndisp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhead}
+function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DayAhead}
     T = mr.market_state.Time
     @unpack NDISP = mr.modelrun.params.sets
     @unpack gmax, avail, historical_generation, min_generation = mr.modelrun.params
@@ -150,7 +150,7 @@ Add storage units to the model for DayAhead market.
 Defines variables, objective, and constraints for storage operation.
 Updates results with storage, charge, and generation data.
 """
-function add_storage(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:DayAhead}
+function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DayAhead}
     T = mr.market_state.Time
     @unpack S = mr.modelrun.params.sets
     @unpack gmax_storage,
@@ -279,7 +279,7 @@ Add dispatchable generators to the model for Redispatch market.
 Defines variables, objective, and constraints for redispatch generation.
 Updates results with redispatch data.
 """
-function add_disp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
+function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup,MS<:Redispatch}
     T = mr.market_state.Time
     @unpack DISP = mr.modelrun.params.sets
     @unpack gmax, mc, avail = mr.modelrun.params
@@ -330,7 +330,7 @@ Add non-dispatchable generators to the model for Redispatch market.
 Defines variables, objective, and constraints for redispatch non-dispatchable generation.
 Updates results with redispatch data.
 """
-function add_ndisp_generators(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
+function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup,MS<:Redispatch}
     T = mr.market_state.Time
     @unpack NDISP, PRS = mr.modelrun.params.sets
     @unpack gmax, avail = mr.modelrun.params
@@ -374,7 +374,7 @@ Add storage units to the model for Redispatch market.
 Defines variables, objective, and constraints for redispatch storage operation.
 Updates results with redispatch data.
 """
-function add_storage(mr::SubRun{MT,MS}) where {MT<:MarketType,MS<:Redispatch}
+function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup,MS<:Redispatch}
     T = mr.market_state.Time
     @unpack S = mr.modelrun.params.sets
     @unpack gmax, gmax_storage, eta, storage, mc, inflow = mr.modelrun.params
@@ -468,16 +468,16 @@ end
 Add network constraints for nodal market types using DC load flow.
 Returns the result of add_dclf.
 """
-function add_network(sr::SubRun{MT,MS}) where {MT<:NodalMarketType,MS<:MarketState}
-    return add_dclf(sr)
+function add_network(sr::SubRun{NodalMarket{LF}, PS, RD, MS}) where {LF<:DCLFFormulation, PS <:ProsumerSetup, RD <:RedispatchSetup,MS<:MarketState}
+    return add_dclf(sr, LF)
 end  # function _add_network
 
 """
 Add network constraints for zonal market with redispatch using DC load flow.
 Returns the result of add_dclf.
 """
-function add_network(sr::SubRun{MT,MS}) where {MT<:ZonalMarketWithRedispatch,MS<:Redispatch}
-    return add_dclf(sr)
+function add_network(sr::SubRun{MT, PS, DCLF{LF}, MS}) where {MT<:MarketType, PS <: ProsumerSetup, LF <:DCLFFormulation ,MS<:Redispatch}
+    return add_dclf(sr,LF)
 end  # function _add_network
 
 """
@@ -485,7 +485,7 @@ Add DC load flow constraints to the model.
 Defines variables, objective, and constraints for power flows.
 Updates results with net input and line flow data.
 """
-function add_dclf(sr::SubRun)
+function add_dclf(sr::SubRun, ::Type{PhaseAngle})
     T = sr.market_state.Time
     @unpack N, DC, L = sr.modelrun.params.sets
     @unpack b,
@@ -591,8 +591,8 @@ end
 Add network constraints for zonal market types using exchange model.
 Returns the result of add_exchange.
 """
-function add_network(sr::SubRun{MT,MS}) where {MT<:ZonalMarketType,MS<:DayAhead}
-    return add_exchange(sr)
+function add_network(sr::SubRun{ZonalMarket{XF},PS,RD,MS}) where {XF<:ExchangeFormulation,PS <:ProsumerSetup, RD <: RedispatchSetup,MS<:DayAhead}
+    return add_exchange(sr, XF)
 end  # function _add_network
 
 """
@@ -600,7 +600,7 @@ Add exchange constraints to the model for zonal markets.
 Defines variables, objective, and constraints for exchanges.
 Updates results with NTC and exchange data.
 """
-function add_exchange(sr::SubRun)
+function add_exchange(sr::SubRun, ::Type{NTC})
     T = sr.market_state.Time
     @unpack Z, NTC = sr.modelrun.params.sets
     @unpack importing_ntcs, exporting_ntcs, ntc, fixed_exchange = sr.modelrun.params

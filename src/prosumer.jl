@@ -1,31 +1,17 @@
 
-function add_prosumer(
-    sr::SubRun{MT,MS},
-    po::NoProsumer,
-) where {MT<:MarketType,MS<:Union{ProsumerOptimizationState}}
+function add_prosumer(sr::SubRun{MT,PS, RD, MS}) where {MT<:MarketType,PS <: NoProsumer, RD <: RedispatchSetup, MS<:MarketState}
 
     return nothing
 end
 
-function add_prosumer(
-    sr::SubRun{MT,MS},
-    po::ProsumerSetup,
-) where {MT<:MarketType,MS<:DayAhead}
+function add_prosumer(sr::SubRun{MT,PS, RD, MS}
+) where {MT<:MarketType,PS <: ProsumerOptimization, RD <: RedispatchSetup, MS<:DayAhead}
 
     return nothing
 end
 
-function add_prosumer(
-    sr::SubRun{MT,MS},
-    po::NoProsumer,
-) where {MT<:MarketType,MS<:Redispatch}
-    return nothing
-end
 
-function add_prosumer(
-    sr::SubRun{MT,MS},
-    po::ProsumerSetup,
-) where {MT<:MarketType,MS<:Redispatch}
+function add_prosumer(sr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <: ProsumerOptimization, RD <: RedispatchSetup,MS<:Redispatch}
 
 
     @unpack PRS = sr.modelrun.params.sets
@@ -35,10 +21,8 @@ function add_prosumer(
     @expression(sr.prosumer, PRS_NETINPUT[prs = PRS, t = T], prev_result[prs, t])
 end
 
-function add_prosumer(
-    sr::SubRun{MT,MS},
-    po::ProsumerSetup,
-) where {MT<:MarketType,MS<:ProsumerOptimizationState}
+function add_prosumer(sr::SubRun{MT,PS,RD,MS}
+) where {MT<:MarketType,PS <: ProsumerOptimization, RD <: RedispatchSetup, MS<:ProsumerOptimizationState}
 
     T = sr.market_state.Time
     @unpack PRS, PRS_STO = sr.modelrun.params.sets
@@ -84,7 +68,7 @@ function add_prosumer(
         prs_demand[prs][t]
     )
 
-    add_prosumer_objective(sr, po)
+    add_prosumer_objective(sr)
 
     df_prosumer(sr.results)
 
@@ -113,12 +97,10 @@ function add_prosumer(
 end
 
 
-function add_prosumer_objective(
-    sr::SubRun{MT,MS},
-    po::ProsumerOptimization,
-) where {MT<:MarketType,MS<:ProsumerOptimizationState}
+function add_prosumer_objective(sr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <: ProsumerOptimization,RD <: RedispatchSetup,MS<:ProsumerOptimizationState}
     @unpack PRS, PRS_STO = sr.modelrun.params.sets
     m = sr.prosumer
+    po = sr.modelrun.setup.ProsumerSetup
 
     T = sr.market_state.Time
     if po.retail_type == :buy_price
@@ -145,20 +127,7 @@ function add_prosumer_objective(
     )
 end
 
-function add_prosumer_objective(
-    sr::SubRun{MT,MS},
-    po::ProsumerSetup,
-) where {MT<:MarketType,MS<:DayAhead}
-    @unpack PRS = sr.modelrun.params.sets
-    T = sr.market_state.Time
-    m = sr.prosumer
-
-    @objective(m, Min, sum(1000 * m[:INF][prs, t] for prs in PRS, t in T))
-end
-
-function assign_price_to_prs(
-    sr::SubRun{MT,MS},
-) where {MT<:ZonalMarketType,MS<:ProsumerOptimizationState}
+function assign_price_to_prs( sr::SubRun{MT,PS, RD,MS}) where {MT<:ZonalMarketType,PS <: ProsumerOptimization, RD <: RedispatchSetup,MS<:ProsumerOptimizationState}
     @unpack PRS = sr.modelrun.params.sets
     @unpack plant2zone = sr.modelrun.params
     T = sr.market_state.Time
@@ -167,9 +136,7 @@ function assign_price_to_prs(
     return Dict((prs, t) => p[plant2zone[prs], t] for prs in PRS, t in T)
 end
 
-function assign_price_to_prs(
-    sr::SubRun{MT,MS},
-) where {MT<:NodalMarketType,MS<:ProsumerOptimizationState}
+function assign_price_to_prs(sr::SubRun{MT,PS, RD,MS}) where {MT<:NodalMarketType,PS <: ProsumerOptimization, RD <: RedispatchSetup,MS<:ProsumerOptimizationState}
     @unpack PRS = sr.modelrun.params.sets
     @unpack plant2node = sr.modelrun.params
     T = sr.market_state.Time

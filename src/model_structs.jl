@@ -1,131 +1,3 @@
-### MarketTypes
-"""
-    MarketType
-
-Abstract supertype for market setup descriptors. Subtypes specify the market structure (zonal or nodal) and whether redispatch is considered.
-
-# Subtypes
-- [`ZonalMarket`](@ref): Simple zonal market without redispatch.
-- [`ZonalMarketWithRedispatch`](@ref): Zonal market including redispatch actions.
-- [`NodalMarket`](@ref): Nodal market without redispatch.
-- [`NodalMarketWithRedispatch`](@ref): Nodal market including redispatch actions.
-
-These types are used to parameterize simulations or models, allowing code to dispatch on market design and redispatch handling.
-"""
-abstract type MarketType end
-
-"""
-    ZonalMarketWithRedispatch(; target_zone = nothing)
-
-Represents a zonal market model with redispatch enabled. This market type is defined by a clearing of zonal markets, followed by a calculation of resulting network flows and redispatch.
-Optionally, a specific target zone or set of zones can be specified, altough this currently has no effect on model creation.
-"""
-Base.@kwdef struct ZonalMarketWithRedispatch <: MarketType
-    target_zone::Union{String,Vector{String},Nothing} = nothing
-end
-
-"""
-    ZonalMarket(; target_zone=nothing)
-
-Represents a standard zonal market model without redispatch. In zonal market models the energy balance is defined at zonal level. 
-Optionally, a specific target zone or set of zones can be specified, altough this currently has no effect on model creation.
-"""
-Base.@kwdef struct ZonalMarket <: MarketType
-    target_zone::Union{String,Vector{String},Nothing} = nothing
-end
-
-const ZonalMarketType = Union{ZonalMarket,ZonalMarketWithRedispatch}
-
-"""
-    NodalMarket
-
-Represents a nodal market model without redispatch. In nodal markets the energy balance is created at nodal level and markets are cleared subject to network constraints.
-"""
-struct NodalMarket <: MarketType end
-
-"""
-    NodalMarketWithRedispatch(; target_zone=nothing)
-
-Represents a nodal market model with redispatch enabled. This market type is defined by a clearing of nodal markets, followed by a calculation of resulting network flows and redispatch.
-Optionally, a specific target zone or set of zones can be specified, altough this currently has no effect on model creation.
-"""
-Base.@kwdef struct NodalMarketWithRedispatch <: MarketType
-    target_zone::Union{String,Vector{String},Nothing} = nothing
-end
-
-const NodalMarketType = Union{NodalMarket,NodalMarketWithRedispatch}
-
-"""
-    ProsumerSetup
-
-Abstract supertype for prosumer market participation models.
-Subtypes specify whether and how prosumers are represented in the simulation.
-
-# Subtypes
-- [`NoProsumer`](@ref): No prosumers are modeled.
-- [`ProsumerOptimization`](@ref): Prosumers are modeled with explicit optimization (variable sell/buy prices and retail tariff types).
-"""
-abstract type ProsumerSetup end
-
-"""
-    NoProsumer
-
-Represents a market setup with no prosumer participation.
-"""
-struct NoProsumer <: ProsumerSetup end
-
-"""
-    ProsumerOptimization(; sell_price, buy_price=0, retail_type=:buy_price)
-
-Represents a prosumer setup where prosumer actions are explicitly optimized with respect to market conditions.
-
-# Keyword Arguments
-- `sell_price::Float64`: Price at which the prosumer can sell electricity to the market or grid.
-- `buy_price::Float64`: Price at which the prosumer buys electricity from the market/grid. Defaults to `0`.
-- `retail_type::Symbol`: Retail tariff structure. Must be one of `:buy_price`, `:flat`, or `:realtime`. Default is `:buy_price`.
-
-An error is thrown if `retail_type` is not valid.
-
-# Example
-```julia
-ProsumerOptimization(sell_price=0.12, buy_price=0.22)
-```
-"""
-struct ProsumerOptimization <: ProsumerSetup
-    sell_price::Float64
-    buy_price::Float64
-    retail_type::Symbol
-
-    function ProsumerOptimization(;
-        sell_price,
-        buy_price = 0,
-        retail_type::Symbol = :buy_price,
-    )
-
-        if !(retail_type in [:buy_price, :flat, :realtime])
-            error("retail_type must be one of [:buy_price, :flat, :realtime]")
-        end
-
-        return new(sell_price, buy_price, retail_type)
-    end
-end
-
-### MarketStates
-abstract type MarketState end
-struct DayAhead <: MarketState
-    Time::UnitRange{Int}
-end
-
-struct ProsumerOptimizationState <: MarketState
-    Time::UnitRange{Int}
-    price::Any
-end
-struct Redispatch <: MarketState
-    Time::UnitRange{Int}
-    da_market_result::Dict
-end
-
-### TimeHorizon
 """
     TimeHorizon(; start=1, stop=8760, split=24, offset=0)
 
@@ -157,7 +29,7 @@ Base.@kwdef struct TimeHorizon
 end
 
 """
-    ModelSetup{T<:MarketType}
+    ModelSetup{T<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup}
 
 A container struct that holds the basic configuration for the market simulation model.
 
@@ -166,24 +38,28 @@ A container struct that holds the basic configuration for the market simulation 
 - `TimeHorizon::TimeHorizon`: Time settings for the simulation (see section on 'TimeHorizon').
 - `MarketType::T`: Type of market structure to simulate (see section 'MarketType'). Defaults to `ZonalMarket()`.
 - `ProsumerSetup::ProsumerSetup`: Configuration of prosumer behavior in the model (see section 'ProsumerSetup'). Defaults to `NoProsumer()`.
+- `RedispatchSetup::RedispatchSetup`: Configuration of redispatch modeling in the simulation (see section 'RedispatchSetup'). Defaults to `NoRedispatch()`.
 
 This struct supports keyword-based construction using default values where provided.
 
 # Example
 ```julia
 ModelSetup(
-    "TestSetup",
-    TimeHorizon(; offset = 0, split = 24, stop = 48),
-    NodalMarketWithRedispatch(target_zone = "DE"),
-    NoProsumer(),
+    ;Scenario = "TestSetup",
+    TimeHorizon = TimeHorizon(; offset = 0, split = 24, stop = 48),
+    MarketType = NodalMarketWithRedispatch(target_zone = "DE"),
+    ProsumerSetup = NoProsumer(),
+    RedispatchSetup = DCLF(PhaseAngle),
+    
 )
 ```
 """
-Base.@kwdef struct ModelSetup{MT<:MarketType, PS<:ProsumerSetup}
+Base.@kwdef struct ModelSetup{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup}
     Scenario::String
     TimeHorizon::TimeHorizon
     MarketType::MT = ZonalMarket()
     ProsumerSetup::PS = NoProsumer()
+    RedispatchSetup::RD = NoRedispatch()
 end
 
 ### Parameters
@@ -200,6 +76,24 @@ struct HourlyProfile{T} <: Profile{T}
     end
 end
 
+"""
+    Sets
+
+Container struct that holds all index sets for the model formulation.
+
+# Fields
+- `P`: All plants.
+- `S`: All storage units.
+- `DISP`: Dispatchable plant subset.
+- `NDISP`: Non-dispatchable plant subset.
+- `Z`: Zones.
+- `N`: Nodes.
+- `L`: AC lines.
+- `DC`: DC lines.
+- `NTC`: Tuple of zonal NTC identifiers.
+- `PRS`: Prosumers.
+- `PRS_STO`: Prosumers with storage.
+"""
 Base.@kwdef struct Sets
     P::Vector{String} = Vector{String}()
     S::Vector{String} = Vector{String}()
@@ -341,14 +235,14 @@ end
 const AffOrVar = Union{AffExpr,VariableRef}
 
 """
-    ModelRun{MT<:MarketType}(params::Parameters, setup::ModelSetup{MT}, solver; 
+    ModelRun{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup}(params::Parameters, setup::ModelSetup{MT,PS,DR}, solver; 
                              resultdir="results", scenarioname=randstring(6), overwrite=false)
 
 Encapsulates a single simulation run of a market model, including its setup, solver, and output configuration.
 
 # Arguments
 - `params::Parameters`: Input parameters for model creation (see section 'Parameters').
-- `setup::ModelSetup{MT}`: Struct containing the scenario description, time horizon, market type, and prosumer setup (see section [`ModelSetup`](@ref)).
+- `setup::ModelSetup{MT,PS,DR}`: Struct containing the scenario description, time horizon, market type, and prosumer setup (see section [`ModelSetup`](@ref)).
 - `solver`: Optimization solver used in the simulation.
 
 # Keyword Arguments
@@ -369,9 +263,9 @@ Encapsulates a single simulation run of a market model, including its setup, sol
 - Automatically creates a result directory for the run.
 - Throws an error if the scenario directory exists and `overwrite=false`.
 """
-struct ModelRun{MT<:MarketType, PS<:ProsumerSetup}
+struct ModelRun{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup}
     params::Parameters
-    setup::ModelSetup{MT, PS}
+    setup::ModelSetup{MT, PS, RD}
     solver::Any
 
     resultdir::String
@@ -381,12 +275,12 @@ struct ModelRun{MT<:MarketType, PS<:ProsumerSetup}
 
     function ModelRun(
         params::Parameters,
-        setup::ModelSetup{T, S},
+        setup::ModelSetup{T, S, R},
         solver;
         resultdir::String = "results",
         scenarioname::String = randstring(6),
         overwrite::Bool = false,
-    ) where {T<:MarketType, S<:ProsumerSetup}
+    ) where {T<:MarketType, S<:ProsumerSetup, R<:RedispatchSetup}
         scen_dir = joinpath(resultdir, scenarioname)
         if isdir(scen_dir) && !overwrite
             error("Directory $scen_dir already exists. Set overwrite=true to overwrite.")
@@ -394,7 +288,7 @@ struct ModelRun{MT<:MarketType, PS<:ProsumerSetup}
 
         mkpath(scen_dir)
 
-        new{T, S}(params, setup, solver, resultdir, scenarioname, scen_dir, overwrite)
+        new{T, S, R}(params, setup, solver, resultdir, scenarioname, scen_dir, overwrite)
     end
 end
 
@@ -402,13 +296,28 @@ end
 ### SubRun
 const AffVarLink = Union{AffExpr,VariableRef,LinkConstraintRef}
 
-struct SubRun{MT<:MarketType,T<:MarketState}
+"""
+    SubRun{MT, PS, RD, MS}
 
+Low-level container representing a single submodel (e.g. one timestep or market state).
+Contains the JuMP submodules, market state, and associated variable containers.
+
+# Fields
+- `results::Dict{Symbol,DataFrame}`: Output results from the optimization.
+- `vars::Dict{Symbol,OptiNode}`: Mapping of module names to OptiNodes.
+- `modelrun::ModelRun`: Reference to the parent model run.
+- `market_state::MarketState`: The current market state simulated.
+- `optigraph::OptiGraph`: Graph structure linking all model modules.
+- `disp`, `ndisp`, `sto`, `network`, `prosumer`, `balance`: JuMP modules.
+
+Created internally and passed to module-building functions.
+"""
+struct SubRun{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup, MS<:MarketState}
     results::Dict{Symbol,DataFrame}
     vars::Dict{Symbol,OptiNode}
 
-    modelrun::ModelRun{MT}
-    market_state::T
+    modelrun::ModelRun{MT, PS, RD}
+    market_state::MS
 
     optigraph::OptiGraph
     disp::OptiNode
@@ -418,8 +327,7 @@ struct SubRun{MT<:MarketType,T<:MarketState}
     prosumer::OptiNode
     balance::OptiNode
 
-    function SubRun(mr::ModelRun{MT}, market_state::T) where {MT<:MarketType,T<:MarketState}
-
+    function SubRun(mr::ModelRun{MT, PS, RD}, market_state::T) where {MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup, T<:MarketState}
         results = Dict{Symbol,DataFrame}()
         vars = Dict{Symbol,OptiNode}()
 
@@ -431,7 +339,7 @@ struct SubRun{MT<:MarketType,T<:MarketState}
         vars[:prosumer] = prosumer = add_module!(m, "prosumer")
         vars[:balance] = balance = add_module!(m, "balance")
 
-        self = new{MT,T}(
+        self = new{MT, PS, RD, T}(
             results,
             vars,
             mr,

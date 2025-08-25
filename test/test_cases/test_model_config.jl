@@ -1,10 +1,10 @@
 using Logging
 market_types = [
     ZonalMarket(),
-    ZonalMarketWithRedispatch(),
     NodalMarket(),
-    NodalMarketWithRedispatch(),
 ]
+
+
 
 prosumer_setups = [
     NoProsumer(),
@@ -12,13 +12,21 @@ prosumer_setups = [
     ProsumerOptimization(sell_price=0.15, buy_price=0.30, retail_type=:flat),
 ]
 
+redispatch_setups = [
+    NoRedispatch(),
+    DCLF()
+]
+
 timehorizons = [
     TimeHorizon(stop=4),
     TimeHorizon(start=1, stop=4, split=2, offset=0),
 ]
 
+redispatch_suffix(::NoRedispatch) = ""
+redispatch_suffix(::DCLF)         = "WithRedispatch"
+
 function all_setups()
-    [(mt, ps, th) for mt in market_types for ps in prosumer_setups for th in timehorizons]
+    [(mt, ps, rd, th) for mt in market_types for rd in redispatch_setups for ps in prosumer_setups for th in timehorizons]
 end
 
 function compare_dataframes(df_actual, df_expected; atol=1e-6)
@@ -41,13 +49,14 @@ function test_model_creation()
         mktempdir() do tmpdir
             logger = NullLogger()
             with_logger(logger) do
-                for (i, (market, prosumer, th)) in enumerate(all_setups())
-                    scenarioname = "testcase_$(i)_$(nameof(typeof(market)))_$(nameof(typeof(prosumer)))"
+                for (i, (market, prosumer, redisp,th)) in enumerate(all_setups())
+                    scenarioname = "testcase_$(i)_$(nameof(typeof(market)))$(redispatch_suffix(redisp))_$(nameof(typeof(prosumer)))"
                     setup = ModelSetup(
-                        scenarioname,
-                        th,
-                        market,
-                        prosumer
+                        ;Scenario = scenarioname,
+                         TimeHorizon =  th,
+                        MarketType = market,
+                        ProsumerSetup = prosumer,
+                        RedispatchSetup = redisp,
                     )
                     run_dir = tmpdir
                     mr = ModelRun(params, setup, solver;
