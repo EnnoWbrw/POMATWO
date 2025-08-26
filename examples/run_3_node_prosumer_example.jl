@@ -29,11 +29,12 @@ scen_name = "3_nodes_prosumer"
 output_path = "results/"
 
 ### Defining a test setup for a model run that stops after 4 timesteps
-setup = ModelSetup(
-    "TestSetup",
-    TimeHorizon(stop = 4),
-    ZonalMarketWithRedispatch(),
-    ProsumerOptimization(sell_price=0.12, buy_price=0.22)
+setup = ModelSetup(;
+    Scenario = "TestSetup",
+    TimeHorizon = TimeHorizon(stop = 4),
+    MarketType = ZonalMarket(),
+    ProsumerSetup = ProsumerOptimization(sell_price=0.12, buy_price=0.22),
+    RedispatchSetup = DCLF(PhaseAngle)
 )
 
 solver = HiGHS.Optimizer

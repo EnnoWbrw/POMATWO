@@ -1,7 +1,5 @@
-using PkgTemplates
-using Revise
 using POMATWO
-using Gurobi
+using HiGHS
 datapath = joinpath("examples", "CS_15_01")
 
 # define dictionary with all necessary data sets
@@ -36,14 +34,13 @@ output_path = joinpath("..", "POMATWO", "results")
 ##############################################
 
 
-setup = ModelSetup(
-    "TestSetup",
-    TimeHorizon(; offset = 0, split = 24, stop = 24),
-    ZonalMarket(target_zone = "ES"),
-    NoProsumer(),
+setup = ModelSetup(;
+    Scenario = "TestSetup",
+    TimeHorizon = TimeHorizon(; offset = 0, split = 24, stop = 24),
+    MarketType = ZonalMarket()
 )
 
-solver = optimizer_with_attributes(Gurobi.Optimizer, "OutputFlag" => 0)
+solver = HiGHS.Optimizer
 
 mr = ModelRun(params, setup, solver; scenarioname = "$(scen_name)_DA", overwrite = true)
 

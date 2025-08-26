@@ -13,11 +13,12 @@ Structure for defining a time horizon used in simulations or data analysis.
 In this setup a time period of one year is used for market simulation. The optimizeation is cut into 365 subintervals, 
 that start at hour 12 of each day.
 ```julia
-setup = ModelSetup(
-    "TestSetup",
-    TimeHorizon(start = 1, stop = 8760, split = 24, offset = 12),
-    ZonalMarketWithRedispatch(target_zone = "DE"),
-    NoProsumer(),
+setup = ModelSetup(;
+    Scenario =  "TestSetup",
+    TimeHorizon =  TimeHorizon(start = 1, stop = 8760, split = 24, offset = 12),
+    MarketType = ZonalMarket()),
+    ProsumerSetup = NoProsumer(),
+    RedispatchSetup = DCLF(PhaseAngle),
 )
 ```
 """
@@ -47,9 +48,9 @@ This struct supports keyword-based construction using default values where provi
 ModelSetup(
     ;Scenario = "TestSetup",
     TimeHorizon = TimeHorizon(; offset = 0, split = 24, stop = 48),
-    MarketType = NodalMarketWithRedispatch(target_zone = "DE"),
+    MarketType = NodalMarketh(PhaseAngle),
     ProsumerSetup = NoProsumer(),
-    RedispatchSetup = DCLF(PhaseAngle),
+    RedispatchSetup = NoRedispatch(),
     
 )
 ```
