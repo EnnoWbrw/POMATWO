@@ -58,9 +58,8 @@ output_path = "results/"
 
 ### Defining a test setup for a model run that stops after 4 timesteps
 setup = ModelSetup(;
-    Scenario = "TestSetup",
     TimeHorizon = TimeHorizon(stop = 4),
-    MarketType = ZonalMarketWithRedispatch(target_zone = "DE"),
+    MarketType = ZonalMarket(),
     ProsumerSetup = NoProsumer(),
     RedispatchSetup = NoRedispatch()
 )
@@ -79,6 +78,9 @@ results = DataFiles(results_path)
 ### Looking at specific results
 results.GEN
 results.LINEFLOW
+
+### Additional dependencies can be loaded to make use of the POMATWO plotting extension
+using GLMakie, ColorSchemes, Tyler
 
 ### creating a graph to visualize day ahead generation levels over time
 plot_DA_w_Redisp_interactive(results)

@@ -52,8 +52,7 @@ function test_model_creation()
                 for (i, (market, prosumer, redisp,th)) in enumerate(all_setups())
                     scenarioname = "testcase_$(i)_$(nameof(typeof(market)))$(redispatch_suffix(redisp))_$(nameof(typeof(prosumer)))"
                     setup = ModelSetup(
-                        ;Scenario = scenarioname,
-                         TimeHorizon =  th,
+                        TimeHorizon =  th,
                         MarketType = market,
                         ProsumerSetup = prosumer,
                         RedispatchSetup = redisp,
@@ -73,10 +72,11 @@ function test_model_creation()
 
                     @testset "Run model for $scenarioname" begin
                          @test POMATWO.run(mr) === nothing
+                        @testset "reading results for $scenarioname and reference results" begin
                         results_actual = DataFiles(joinpath(run_dir, scenarioname))
                         expected_dir = joinpath(@__DIR__, "expected_results")
                         results_expected = DataFiles(joinpath(expected_dir, scenarioname))
-                        # Compare GEN DataFrame
+                        @testset "Compare results for $scenarioname" begin
                         compare_dataframes(results_actual.GEN, results_expected.GEN)
                         compare_dataframes(results_actual.REDISP, results_expected.REDISP)
                         compare_dataframes(results_actual.CHARGE, results_expected.CHARGE)
@@ -92,6 +92,8 @@ function test_model_creation()
                         compare_dataframes(results_actual.ZonalMarketBalance, results_expected.ZonalMarketBalance)
                         compare_dataframes(results_actual.NodalMarketBalance, results_expected.NodalMarketBalance)
                         compare_dataframes(results_actual.NodalMarketRedispBalance, results_expected.NodalMarketRedispBalance)
+                        end
+                    end
                     end
                 end
             end

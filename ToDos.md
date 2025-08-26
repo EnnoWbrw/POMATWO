@@ -3,8 +3,6 @@
 ## Updating Existing code
 - Replace UnPack to ensure no issues in the feature becasue package is not maintained
 - Check if Slack variables in model equations are necessary or redundant and should be removed
-- fix prosumer implementation
-- check redundency in modelRun  scenarioname::String and ModelSetup Scenario::String
 - expand test_dataload
 - check if .arrow files can be used for crewating plots directly without using "DataFiles"
 - check DE dataset if line coordinates match node coordinates
@@ -15,6 +13,7 @@
 - remove creation of nodal_load_no_prosumers
 
 ## New Features
+- add slack zone functionality to ensure code stability for grid alculations
 - add "intraday" balance that includes prosumer behavior (PRS_NETINPUT must be taken into consideration)!!!
 - add plot for nodal markets
 - add ptdf model formulation

@@ -14,7 +14,6 @@ In this setup a time period of one year is used for market simulation. The optim
 that start at hour 12 of each day.
 ```julia
 setup = ModelSetup(;
-    Scenario =  "TestSetup",
     TimeHorizon =  TimeHorizon(start = 1, stop = 8760, split = 24, offset = 12),
     MarketType = ZonalMarket()),
     ProsumerSetup = NoProsumer(),
@@ -45,8 +44,7 @@ This struct supports keyword-based construction using default values where provi
 
 # Example
 ```julia
-ModelSetup(
-    ;Scenario = "TestSetup",
+ModelSetup(;
     TimeHorizon = TimeHorizon(; offset = 0, split = 24, stop = 48),
     MarketType = NodalMarketh(PhaseAngle),
     ProsumerSetup = NoProsumer(),
@@ -56,7 +54,6 @@ ModelSetup(
 ```
 """
 Base.@kwdef struct ModelSetup{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup}
-    Scenario::String
     TimeHorizon::TimeHorizon
     MarketType::MT = ZonalMarket()
     ProsumerSetup::PS = NoProsumer()
@@ -112,44 +109,89 @@ end
 """
     Parameters
 
-A central container that holds all data required for running the POMATWO electricity market model.  
-This struct is typically created by the [`load_data`](@ref) function and passed into the simulation via [`ModelRun`](@ref).
+Container structure for all static and time-varying input data used in a power system model.
 
-It includes detailed parameter mappings for power plants, grid infrastructure, demand, prosumers, and internal mappings used for optimization and visualization.
+This struct encapsulates metadata, technical parameters, profiles, and mappings for generation units,
+nodes, transmission infrastructure, demand, and other components relevant to electricity system modeling.
+It is typically used as a central configuration object passed to optimization or simulation routines.
 
-# Overview of Field Groups
+# Fields
 
-- **Sets**:
-  - `sets::Sets`: Holds index sets for nodes, plants, time steps, etc.
+## Sets
+- `sets::Sets`: Collection of index sets (e.g., nodes, plants, zones) used across the model.
 
-- **Power Plant Parameters**:
-  - Maximum capacities (`gmax`, `gmax_storage`), efficiencies (`eta`), marginal costs (`mc`), availabilities (`avail`, `avail_planttype_nodal`, ...), and plant-to-type mappings.
+## Power plant parameters
+- `gmax::Dict{String,Float64}`: Maximum generation capacity per plant.
+- `eta::Dict{String,Float64}`: Efficiency of each plant.
+- `gmax_storage::Dict{String,Float64}`: Maximum generation capacity from storage units.
+- `storage::Dict{String,Float64}`: Energy storage capacity.
+- `mc::Dict{String,Profile}`: Marginal costs as time series profiles per plant.
+- `avail::Dict{String,Profile}`: Availability factor per plant over time.
+- `avail_planttype_nodal::Dict{Tuple{String,String},Profile}`: Time-dependent availability by (node, plant type).
+- `avail_planttype_zonal::Dict{Tuple{String,String},Profile}`: Time-dependent availability by (zone, plant type).
+- `plant_type::Dict{String,String}`: Mapping from plant name to plant type.
 
-- **Plant Type Metadata**:
-  - Vectors of plant types (e.g., `dispatchable`, `storage_types`) and color mappings (`plant_type2color`).
+## Plant type metadata
+- `plant_type2color::Dict{String,String}`: Color coding for each plant type (for plotting).
+- `dispatchable::Vector{String}`: List of dispatchable plant types.
+- `nondispatchable::Vector{String}`: List of non-dispatchable plant types.
+- `storage_types::Vector{String}`: List of storage technologies.
+- `fuel_price::Dict{String,Profile}`: Time-varying fuel price per plant type.
+- `co2content::Dict{String,Float64}`: CO₂ emissions per MWh of each plant type.
+- `historical_generation::Dict{String,Profile}`: Historical generation profiles.
+- `min_generation::Dict{String,Profile}`: Minimum generation profiles.
 
-- **Node and Grid Parameters**:
-  - Node-to-zone mappings, node coordinates, AC/DC line parameters (`reactance`, `acline_capacity`, etc.).
+## Node parameters
+- `slack::Vector{String}`: Names of slack buses (reference nodes).
+- `node2zone::Dict{String,String}`: Mapping from node to zone.
+- `node_coords::Dict{String,Vector{Float64}}`: Coordinates of nodes (e.g., for plotting or distance-based calculations).
 
-- **Demand and Exchange**:
-  - Nodal/zonal load (`nodal_load`, `zonal_load`), inflow data, fixed exchanges, and optional prosumer-modified demand.
+## AC line parameters
+- `acline_capacity::Dict{String,Float64}`: Thermal capacity of each AC line.
+- `resistance::Dict{String,Float64}`: Resistance per AC line.
+- `reactance::Dict{String,Float64}`: Reactance per AC line.
+- `bvector::Dict{String,Float64}`: Susceptance of each AC line.
+- `circuits::Dict{String,Int64}`: Number of circuits per line.
+- `voltage::Dict{String,Float64}`: Voltage level of each line.
+- `line_start::Dict{String,String}`: Start node of each AC line.
+- `line_end::Dict{String,String}`: End node of each AC line.
 
-- **Zonal Parameters**:
-  - Net Transfer Capacities (`ntc`) and import/export mappings.
+- `b::Dict{Tuple{String,String},Float64}`: Line susceptance between node pairs.
+- `h::Dict{Tuple{String,String},Float64}`: Network matrix entries used in power flow approximations.
+- `ptdf::Dict{Tuple{String,String},Float64}`: Power Transfer Distribution Factors between (line, node) pairs.
 
-- **Prosumer and Storage Data**:
-  - Storage state, inflows, and derived demand profiles.
+## DC line parameters
+- `dcline_capacity::Dict{String,Float64}`: Transfer capacity of each DC line.
+- `dc_start::Dict{String,String}`: Start node of each DC line.
+- `dc_end::Dict{String,String}`: End node of each DC line.
 
-- **Internal Mappers**:
-  - Mappings like `plants_in_zone`, `plant2node`, `nodes_in_zone` to simplify model formulation.
+## Demand parameters
+- `nodal_load::Dict{String,Profile}`: Time series of nodal demand.
+- `zonal_load::Dict{String,Profile}`: Time series of zonal demand.
+- `inflow::Dict{String,Profile}`: Time-dependent inflows to storage (e.g., hydro).
+- `fixed_exchange::Dict{String,Profile}`: Fixed cross-border or interzonal exchanges (e.g., from contracts or historical data).
 
-- **Plotting**:
-  - Color assignments used for plotting technologies or regions (`colors`).
+## Zone parameters
+- `ntc::Dict{Tuple{String,String},Float64}`: Net transfer capacity between zones.
 
-# Notes
+## Prosumer parameters
+- `prosumer_types::Vector{String}`: List of prosumer types modeled.
+- `prs_demand::Dict{String,Profile}`: Time series of demand from prosumers.
+- `nodal_load_no_prs::Dict{String,Profile}`: Nodal demand excluding prosumer influence.
 
-This struct is designed to support keyword-based construction, but in practice it is **rarely created manually**. Use [`load_data`](@ref) to construct a complete and consistent `Parameters` instance from input files.
+## Mapping data
+- `nodes_in_zone::Dict{String,Vector{String}}`: List of nodes per zone.
+- `plants_in_zone::Dict{String,Vector{String}}`: Plants located in each zone.
+- `storages_in_zone::Dict{String,Vector{String}}`: Storage units in each zone.
+- `plants_in_node::Dict{String,Vector{String}}`: Plants located at each node.
+- `storages_in_node::Dict{String,Vector{String}}`: Storage units at each node.
+- `plant2node::Dict{String,String}`: Node location of each plant.
+- `plant2zone::Dict{String,String}`: Zone location of each plant.
+- `importing_ntcs::Dict{String,Vector{String}}`: NTCs importing into a given zone.
+- `exporting_ntcs::Dict{String,Vector{String}}`: NTCs exporting from a given zone.
 
+## Plotting parameters
+- `colors::Dict{String,String}`: Color mapping for zones, nodes, or technologies (used in visualization).
 """
 Base.@kwdef struct Parameters
     sets::Sets = Sets()
@@ -194,6 +236,7 @@ Base.@kwdef struct Parameters
 
     b::Dict{Tuple{String,String},Float64} = Dict{Tuple{String,String},Float64}()
     h::Dict{Tuple{String,String},Float64} = Dict{Tuple{String,String},Float64}()
+    ptdf::Dict{Tuple{String,String},Float64} = Dict{Tuple{String,String},Float64}()
 
     # dcline parameters
     dcline_capacity::Dict{String,Float64} = Dict{String,Float64}()

@@ -507,7 +507,7 @@ end
 
 function calc_h_b!(params)
     @unpack N, L, DC = params.sets
-    @unpack line_start, line_end, dc_start, dc_end, reactance, resistance = params
+    @unpack line_start, line_end, dc_start, dc_end, reactance, resistance, slack = params
 
     incidence = Containers.DenseAxisArray(zeros(Int, length(L), length(N)), L, N)
     dcincidence = Containers.DenseAxisArray(zeros(Int, length(DC), length(N)), DC, N)
@@ -532,6 +532,8 @@ function calc_h_b!(params)
     h = bvector.data .* incidence.data
     b = h' * incidence.data
 
+    calc_PTDF!(h, b, slack, N, L, params)
+
     for l in eachindex(L), n in eachindex(N)
         params.h[(L[l], N[n])] = h[l, n]
     end
@@ -540,6 +542,39 @@ function calc_h_b!(params)
         params.b[(N[n], N[m])] = b[n, m]
     end
 
+end
+function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{String}, N::Vector{String}, L::Vector{String}, params::Parameters)
+
+    # Indexpositionen der Slack-Busse in N finden
+    slack_idx = findall(n -> n in slack_list, N)
+
+    if isempty(slack_idx)
+        error("No slack buses found in params.slack")
+    end
+
+    if length(slack_list) > 1
+        @warn "Multiple slack buses found."
+    end
+
+    # Indizes der Nicht-Slack-Knoten
+    non_slack = setdiff(1:length(N), slack_idx)
+
+    # Reduzierte B-Matrix erzeugen
+    b_red = b[non_slack, non_slack]
+
+    # Invertiere reduzierte Matrix
+    b_red_inv = inv(b_red)
+
+    # Erzeuge vollständige Inverse mit eingebetteter B⁻¹
+    b_inv_full = zeros(length(N), length(N))
+    b_inv_full[non_slack, non_slack] .= b_red_inv
+
+    # PTDF = H * B⁻¹
+    ptdf = h * b_inv_full
+
+    for l in eachindex(L), n in eachindex(N)
+        params.ptdf[(L[l], N[n])] = ptdf[l, n]
+    end
 end
 
 function calc_mc!(params)
