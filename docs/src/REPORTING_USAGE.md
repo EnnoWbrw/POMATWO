@@ -47,7 +47,7 @@ print_report(report)
 
 ### Plants Data Validation
 -  Required columns: `index`, `plant_type`, `node`, `g_max`, `eta`
--  Positive values: `g_max` > 0, `storage_capacity` > 0, `storage_power` > 0
+-  Positive values: `g_max` >= 0, `storage_capacity` >= 0, `storage_power` >= 0
 -  Efficiency range: `eta` ∈ [0, 1] 
 -  No duplicate plant indices
 -  Proper data types in numeric columns
