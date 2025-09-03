@@ -957,9 +957,7 @@ end
 Extended version of load_data that returns both Parameters and a DataReport.
 
 # Usage
-```julia
 params, report = load_data_with_report(data_files)
-```
 """
 function load_data_with_report(data::Dict)
     params = Parameters()
