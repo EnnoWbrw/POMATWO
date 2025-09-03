@@ -1,4 +1,3 @@
-using Logging
 market_types = [
     ZonalMarket(),
     NodalMarket(),

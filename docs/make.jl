@@ -12,7 +12,8 @@ checkdocs=:public,
 authors = "Enno Wiebrow, Kristin Dietrich, Mario Kendziorski", 
 pages = [
     "Home" => "index.md",
-    "Model Data" => Any["Input Data" => "input_data.md",
+    "Model Data" => Any["Input Data Formats" => "input_data.md",
+                        "Input Data Reports" => "REPORTING_USAGE.md",
                         "Output Data" => "output_data.md"
     ],
     "Model Configuration" => Any["Market Definition" => "market_definitions.md",

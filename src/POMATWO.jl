@@ -23,6 +23,8 @@ function plot_total_gen_interactive end
 
 include("market_definitions.jl")
 include("model_structs.jl")
+include("data_report.jl")
+include("utils/data_load_utils.jl")
 include("utils/df_utils.jl")
 include("utils/time_utils.jl")
 include("utils/get_vals_utils.jl")
@@ -59,6 +61,14 @@ export load_data,
     plot_DA_w_Redisp_interactive, 
     plot_market_interactive, 
     plot_network, 
-    plot_total_gen_interactive
- 
+    plot_total_gen_interactive,
+    DataReport,
+    DataReportLevel,
+    DataReportItem,
+    print_report,
+    load_data_with_report,
+    get_errors,
+    get_warnings,
+    get_notes
+
 end # module POMATWO
