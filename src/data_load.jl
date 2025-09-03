@@ -124,6 +124,87 @@ function add_plants!(params::Parameters, files::Vector{<:AbstractString})
     end
 end
 
+function add_plants!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "plants file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        add_plants!(params, df, report, location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
+    end
+end
+
+function add_plants!(params::Parameters, files::Vector{<:AbstractString}, report::DataReport, location::String)
+    for file in files
+        if !validate_file_exists(report, file, "plants file")
+            continue
+        end
+        
+        try
+            df = read_csv(file)
+            add_plants!(params, df, report, file)
+        catch e
+            add_error!(report, "file_parsing", "Failed to parse file $(file): $(string(e))", location)
+        end
+    end
+end
+
+function add_nodes!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "nodes file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        add_nodes!(params, df, report, location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
+    end
+end
+
+function add_zones!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "zones file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        add_zones!(params, df, report, location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
+    end
+end
+
+function add_demand!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "demand file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        disallowmissing!(df)
+        add_demand!(params, df, report, location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
+    end
+end
+
+function add_types!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "types file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        add_types!(params, df, report, location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
+    end
+end
+
 function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::DataReport, location::String="nodes data")
     # Validate required columns
     required_columns = [:index, :zone, :slack]
@@ -955,6 +1036,7 @@ data = Dict(
 
 params = load_data(data)
 ```
+"""
 # Extended version of load_data that returns both Parameters and a DataReport
 # Usage: params, report = load_data_with_report(data_files)
 function load_data_with_report(data::Dict)
@@ -1113,7 +1195,6 @@ function load_data(data::Dict)
     end
     
     return params
-end
 end
 
 function calc_h_b!(params)
