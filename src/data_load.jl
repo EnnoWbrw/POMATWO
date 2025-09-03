@@ -950,61 +950,17 @@ function add_min_generation!(params::Parameters, df::AbstractDataFrame)
     end
 end
 
+
 """
-    load_data(data::Dict{Symbol, String})
+    load_data_with_report(data::Dict)
 
-Reads a collection of model input files specified by a dictionary and returns a fully populated `Parameters` struct for use in the market simulation.
+Extended version of load_data that returns both Parameters and a DataReport.
 
-# Arguments
-- `data::Dict{Symbol, String}`: A dictionary mapping required and optional parameter names to file paths.
-
-# Required keys
-The following keys **must** be included in `data`:
-- `:plants` - Plant specification file.
-- `:nodes` - Node topology file.
-- `:zones` - Zone definition file.
-- `:demand` - Nodal or zonal demand input.
-- `:types` - Technology or plant type definitions.
-
-# Optional keys
-These keys can optionally be included to enable extended model functionality:
-- Network:
-  - `:lines` - AC transmission line definitions.
-  - `:dclines` - DC line definitions (requires `:lines` to be included).
-- Availability and plant characteristics:
-  - `:avail` -  Plant availability.
-  - `:avail_planttype_nodal` - Availability by plant type and node.
-  - `:avail_planttype_zonal` - Availability by plant type and zone.
-  - `:min_generation` - Minimum generation constraints.
-- Market and operation:
-  - `:ntc` - Net Transfer Capacities between zones.
-  - `:fixed_exchange` - Fixed exchange schedules.
-  - `:prs_demand` - Prosumer demand profiles.
-  - `:fuel_prices` - Time-dependent fuel prices.
-  - `:inflow` - Storage inflow data (e.g. hydro).
-  - `:historical_generation` - Historical generation for calibration.
-
-!!! note
-    Some advanced model features (e.g. redispatch or zonal availability mapping) depend on optional keys. Omitting them may disable those capabilities.
-
-# Example
-
+# Usage
 ```julia
-data = Dict(
-    :plants => joinpath(datapath, "plants.csv"),
-    :nodes => joinpath(datapath, "nodes.csv"),
-    :zones => joinpath(datapath, "zones.csv"),
-    :lines => joinpath(datapath, "lines.csv"),
-    :dclines => joinpath(datapath, "dclines.csv"),
-    :demand => joinpath(datapath, "nodal_load.csv"),
-    :types => joinpath(datapath, "planttypes.csv"),
-)
-
-params = load_data(data)
+params, report = load_data_with_report(data_files)
 ```
 """
-# Extended version of load_data that returns both Parameters and a DataReport
-# Usage: params, report = load_data_with_report(data_files)
 function load_data_with_report(data::Dict)
     params = Parameters()
     report = DataReport()
@@ -1150,6 +1106,59 @@ function load_data_with_report(data::Dict)
     return params, report
 end
 
+"""
+    load_data(data::Dict)
+
+Reads a collection of model input files specified by a dictionary and returns a fully populated `Parameters` struct for use in the market simulation.
+
+# Arguments
+- `data::Dict{Symbol, String}`: A dictionary mapping required and optional parameter names to file paths.
+
+# Required keys
+The following keys **must** be included in `data`:
+- `:plants` - Plant specification file.
+- `:nodes` - Node topology file.
+- `:zones` - Zone definition file.
+- `:demand` - Nodal or zonal demand input.
+- `:types` - Technology or plant type definitions.
+
+# Optional keys
+These keys can optionally be included to enable extended model functionality:
+- Network:
+  - `:lines` - AC transmission line definitions.
+  - `:dclines` - DC line definitions (requires `:lines` to be included).
+- Availability and plant characteristics:
+  - `:avail` -  Plant availability.
+  - `:avail_planttype_nodal` - Availability by plant type and node.
+  - `:avail_planttype_zonal` - Availability by plant type and zone.
+  - `:min_generation` - Minimum generation constraints.
+- Market and operation:
+  - `:ntc` - Net Transfer Capacities between zones.
+  - `:fixed_exchange` - Fixed exchange schedules.
+  - `:prs_demand` - Prosumer demand profiles.
+  - `:fuel_prices` - Time-dependent fuel prices.
+  - `:inflow` - Storage inflow data (e.g. hydro).
+  - `:historical_generation` - Historical generation for calibration.
+
+!!! note
+    Some advanced model features (e.g. redispatch or zonal availability mapping) depend on optional keys. Omitting them may disable those capabilities.
+
+# Example
+
+```julia
+data = Dict(
+    :plants => joinpath(datapath, "plants.csv"),
+    :nodes => joinpath(datapath, "nodes.csv"),
+    :zones => joinpath(datapath, "zones.csv"),
+    :lines => joinpath(datapath, "lines.csv"),
+    :dclines => joinpath(datapath, "dclines.csv"),
+    :demand => joinpath(datapath, "nodal_load.csv"),
+    :types => joinpath(datapath, "planttypes.csv"),
+)
+
+params = load_data(data)
+```
+"""
 function load_data(data::Dict)
     params, report = load_data_with_report(data)
     

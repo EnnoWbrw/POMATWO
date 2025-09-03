@@ -74,21 +74,39 @@ end
 """
     get_errors(report::DataReport)
 
-Get all error-level items from the report.
+Return all error-level items from the data report.
+
+# Arguments
+- `report::DataReport`: The data report to filter.
+
+# Returns
+- `Vector{DataReportItem}`: All items with level `ERROR`.
 """
 get_errors(report::DataReport) = filter(item -> item.level == ERROR, report.items)
 
 """
     get_warnings(report::DataReport)
 
-Get all warning-level items from the report.
+Return all warning-level items from the data report.
+
+# Arguments
+- `report::DataReport`: The data report to filter.
+
+# Returns
+- `Vector{DataReportItem}`: All items with level `WARNING`.
 """
 get_warnings(report::DataReport) = filter(item -> item.level == WARNING, report.items)
 
 """
     get_notes(report::DataReport)
 
-Get all note-level items from the report.
+Return all note-level items from the data report.
+
+# Arguments
+- `report::DataReport`: The data report to filter.
+
+# Returns
+- `Vector{DataReportItem}`: All items with level `NOTE`.
 """
 get_notes(report::DataReport) = filter(item -> item.level == NOTE, report.items)
 
