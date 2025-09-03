@@ -2,7 +2,7 @@
 
 ## Input Data Load
 ```@docs
-load_data(data::Dict)
+load_data(data::Dict{Symbol, String})
 ```
 
 ## Model Input Data Structure
