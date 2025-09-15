@@ -7,6 +7,10 @@ load_data(data::Dict)
 
 ## Model Input Data Structure
 The data that is read in using the [load_data](@ref) function has to be provided via seperate csv files. In the following section, the structure of those files is described. Generally the column headers have to be identical to what is described as `Column` in the tables below. Table rows are created to add a data entry and should follow thy `type` convention also specified below.
+!!! danger "Index Linking"
+Input tables may reference each other via unique identifiers ('index').
+It is crucial that these indices are consistent and unique across all files.
+For example, `plant_type` in [File Structure `:plants`](@ref) must match an `index` in :types [File Structure `:types`](@ref), and `node` in [File Structure `:plants`](@ref) must match an `index` in [File Structure `:nodes`](@ref).
 
 ### File Structure `:plants`
 
@@ -24,7 +28,12 @@ Describes information about power plants and their attributes. Each row represen
 | `lon`              | Float    | Longitude of the plant's location. |
 | `storage_power`    | Float    | Power limit of the storage system (in MW), may be `NaN` if not applicable. |
 
-### Example
+!!! note "Index Linking"
+    - The `plant_type` column must match an `index` in [File Structure `:types`](@ref).
+    - The `node` column must match an `index` in [File Structure `:nodes`](@ref).
+
+---
+#### Example
 ```Julia
 | index | plant_type | node | g_max | eta | storage_capacity | lat       | lon        | storage_power |
 |-------|------------|------|-------|-----|------------------|-----------|------------|----------------|
@@ -53,7 +62,11 @@ Planttypes are described as follows:
 | `prosumer`     | Integer | Indicates if the plant type supports prosumer behavior (`1`) or not (`0`). |
 | `color`        | String  | Hex color code used for visualization. |
 
-### Example
+!!! note "Index Linking"
+    - The `index` column here is referenced by the `plant_type` column in [File Structure `:plants`](@ref).
+
+---
+#### Example
 ```Julia
 | index    | dispatchable | storage | fuel_price |
 |----------|--------------|---------|------------|
@@ -65,30 +78,88 @@ Planttypes are described as follows:
 
 ### File Structure `:avail`, `:avail_planttype_nodal`, `:avail_planttype_zonal`
 
-Availabilities for each time step can be defined. If no availabilities are defined the default of `1.0`is assumed. The values are used to scale the maximum generation or operational capacity of a plant or unit for each time step.
-
+Availabilities for each time step can be defined. If no availabilities are defined the default of `1.0`is assumed. The values are used to scale the maximum generation or operational capacity of a plant or unit for each time step. The model will automatically assign the provided availibility with the highest level of detail according to the following hierachy:
+|availibility type| description | hierarchy level |
+|:avail| Availability of a specific production unit| 1 |
+|:avail_planttype_nodal| Availability of a given plant_type at a specific node| 2 |
+|:avail_planttype_zonal| Availability of a given planttype at a specific zone| 3 |
+|default| automatically assigned default value if no availibility is provided via data input files (defaults to 1)| 4 |
+#### `:avail`
+Availability of a specific production unit, specified by the column name.
 | Column   | Type    | Description |
 |----------|---------|-------------|
-| `prs_n1` | Float64 | Availability factor (between `0.0` and `1.0`) for the prosumer unit at node `n1`. This represents the fraction of maximum capacity that is available at each time step. |
+| `p1` | Float64 | factor between 0.0  and 1.0|
+| `p2` | Float64 | factor between 0.0  and 1.0|
+| `...` | Float64 | factor between 0.0  and 1.0|
 
-### Example :avail
+##### Example
 ```Julia
-| prs_n1 |
-|--------|
-| 0.1    |
-| 0.8    |
-| 0.7    |
-| 0      |
+| p1     | p2     |
+|--------|--------|
+| 0.1    | 0.2    |
+| 0.8    | 0.9    |
+| 0.7    | 0.8    |
+| 0      | 0      |
 ```
 
-!!! note
-    Each row corresponds to a different time step.
-
-    The column name (`prs_n1`) corresponds to a prosumer identifier and may vary or be part of a larger dataset with multiple columns (e.g., `prs_n1`, `prs_n2`, etc.).
-
-    A value of `1.0` means full availability; `0.0` means the unit is unavailable at that time.
+!!! note "Index Linking"
+    Each columnname must reference a production unit via the index defined in the `index` column of [File Structure `:plants`](@ref)
 
 ---
+
+#### `:avail_planttype_nodal`
+Availability of a respective node, specified by the column name.
+| Column   | Type    | Description |
+|----------|---------|-------------|
+| `plant_type` | String | specification of plant type |
+| `n2` | Float64 | factor between 0.0  and 1.0|
+| `...` | Float64 | factor between 0.0  and 1.0|
+
+##### Example :avail_planttype_nodal
+```Julia
+|plant_type| n1     | n2     |
+|--------|--------|--------|
+| solar  | 0.1    | 0.2    |
+| solar  | 0.8    | 0.9    |
+| solar  | 0.7    | 0.8    |
+| solar  | 0      | 0      |
+```
+!!! danger 
+It is necesarry to use one file per plant type!
+
+--- 
+!!! note "Index Linking"
+    The plant type defined in the `plant_type` column must be defined in [File Structure `:types`](@ref)
+    Each columnname after the `plant_type` column must reference a node via the index defined in the `index` column of [File Structure `:nodes`](@ref)
+
+---
+
+#### `:avail_planttype_zonal`
+Availability of a specified planttype at a given market zone.
+| Column   | Type    | Description |
+|----------|---------|-------------|
+| `zone` | String | specification of plant type |
+| `type 1` | Float64 | factor between 0.0  and 1.0|
+| `type 2` | Float64 | factor between 0.0  and 1.0|
+| `...` | Float64 | factor between 0.0  and 1.0|
+
+##### Example :avail_planttype_zonal
+```Julia
+|zone    | solar  | wind   |
+|--------|--------|--------|
+|  DE    | 0.1    | 0.4   |
+|  DE    | 0.8    | 0.6    |
+|  DE    | 0.7    | 0.8    |
+|  DE    | 0      | 0.6     |
+```
+
+!!! note "Index Linking"
+    The zone defined in the `zone` column must be defined in [File Structure `:zones`](@ref)
+    Each columnname after the `zone` column must reference a plant type via the index defined in the `index` column of [File Structure `:types`](@ref)
+
+---
+
+
 
 ### File Structure `:demand`
 
@@ -100,7 +171,7 @@ Contains the time series of load demand at each node.
 | `n2`   | Integer | Load demand in MW at node `n2` for each time step. *(Example shown; actual structure may include multiple nodes.)* |
 | `...`   | Integer | Load demand in MW at node `nx` for each time step. *(Example shown; actual structure may include multiple nodes.)* |
 
-### Example
+#### Example
 ```Julia
 | n1  |
 |-----|
@@ -112,7 +183,10 @@ Contains the time series of load demand at each node.
 ```
 
 ---
+!!! note "Index Linking"
+    Each columnname must reference a node via the index defined in the `index` column of [File Structure `:nodes`](@ref)
 
+---
 ### File Structure `:zones`
 
 Specifies the geographic or administrative zones involved in the model.
@@ -121,7 +195,12 @@ Specifies the geographic or administrative zones involved in the model.
 |---------|--------|-------------|
 | `index` | String | Identifier for the zone (e.g., `DE`). |
 
-### Example 
+!!! note "Index Linking"
+    Index used in [`:avail_planttype_zonal`](@ref) and [File Structure `:nodes`](@ref)
+
+---
+
+#### Example 
 ```Julia
 | index  |
 |--------|
@@ -142,7 +221,7 @@ Defines all nodes in the network along with their geographic and zone informatio
 | `lon`     | Float   | Longitude coordinate. |
 | `slack`   | Integer | Indicator for slack bus (`1` if slack, otherwise `0`). |
 
-### Example 
+#### Example 
 ```Julia
 | index  | zone | name                 | lat        | lon        | slack |
 |--------|------|----------------------|------------|------------|-------|
@@ -175,7 +254,7 @@ Describes the properties of AC transmission lines between nodes.
 | `node_i_name` | String  | Name of from-node. |
 | `node_j_name` | String  | Name of to-node. |
 
-### Example 
+#### Example 
 ```Julia
 | NE_name | node_i | node_j | voltage |   r    |    x    | b | I_nom | capacity | index |   lat_i   |   lon_i   |   lat_j   |   lon_j   | node_i_name | node_j_name |
 |---------|--------|--------|---------|--------|---------|---|--------|----------|--------|-----------|-----------|-----------|-----------|--------------|--------------|
@@ -201,7 +280,7 @@ Describes the properties of DC transmission lines between nodes.
 | `lon_j`    | String | Longitude of to-node. |
 | `capacity` | String | Capacity of the DC line. |
 
-### Example 
+#### Example 
 ```Julia
 | index   | node_i | node_j | lat_i | lon_i   | lat_j  | lon_j  | capacity |
 |---------|--------|--------|--------|--------|--------|--------|----------|
@@ -216,7 +295,7 @@ Contains the time series demand for prosumer nodes.
 |----------|---------|-------------|
 | `prs_n1` | Integer | Electricity demand (in MW) for the prosumer at node `n1` for each time step. *(Additional prosumer columns may be present in the full dataset.)* |
 
-### Example
+#### Example
 ```Julia
 | prs_n1 |
 |--------|
