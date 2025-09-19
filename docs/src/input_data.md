@@ -7,10 +7,12 @@ load_data(data::Dict)
 
 ## Model Input Data Structure
 The data that is read in using the [load_data](@ref) function has to be provided via seperate csv files. In the following section, the structure of those files is described. Generally the column headers have to be identical to what is described as `Column` in the tables below. Table rows are created to add a data entry and should follow thy `type` convention also specified below.
+
 !!! danger "Index Linking"
-Input tables may reference each other via unique identifiers ('index').
-It is crucial that these indices are consistent and unique across all files.
-For example, `plant_type` in [File Structure `:plants`](@ref) must match an `index` in :types [File Structure `:types`](@ref), and `node` in [File Structure `:plants`](@ref) must match an `index` in [File Structure `:nodes`](@ref).
+    Input tables may reference each other via unique identifiers ('index').
+    It is crucial that these indices are consistent and unique across all files.
+    For example, `plant_type` in [File Structure `:plants`](@ref) must match an `index` in :types [File Structure `:types`](@ref), and `node` in [File Structure `:plants`](@ref) must match an `index` in [File Structure `:nodes`](@ref).
+---
 
 ### File Structure `:plants`
 
@@ -125,7 +127,7 @@ Availability of a respective node, specified by the column name.
 | solar  | 0      | 0      |
 ```
 !!! danger 
-It is necesarry to use one file per plant type!
+    It is necesarry to use one file per plant type!
 
 --- 
 !!! note "Index Linking"

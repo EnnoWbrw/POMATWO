@@ -1138,8 +1138,9 @@ These keys can optionally be included to enable extended model functionality:
   - `:inflow` - Storage inflow data (e.g. hydro).
   - `:historical_generation` - Historical generation for calibration.
 
-!!! note
-    Some advanced model features (e.g. redispatch or zonal availability mapping) depend on optional keys. Omitting them may disable those capabilities.
+!!! danger "Optional Keys"
+    Some model features (e.g. redispatch or zonal availability mapping) depend on optional keys. Omitting them may disable those capabilities. The functionallity of optional file inputs and keys is currently not included in automated testing.
+--- 
 
 # Example
 
