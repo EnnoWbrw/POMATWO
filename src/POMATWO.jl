@@ -23,6 +23,10 @@ function plot_total_gen_interactive end
 
 include("market_definitions.jl")
 include("model_structs.jl")
+include("market_traits.jl")
+include("network_config.jl")
+include("model_extensions.jl")
+include("unified_balance.jl")
 include("data_report.jl")
 include("utils/data_load_utils.jl")
 include("utils/df_utils.jl")
@@ -69,6 +73,20 @@ export load_data,
     load_data_with_report,
     get_errors,
     get_warnings,
-    get_notes
+    get_notes,
+    # New exports for flexibility
+    MarketScope,
+    ZonalScope,
+    NodalScope,
+    market_scope,
+    MarketConstraintConfig,
+    NetworkConstraints,
+    ModelExtension,
+    ModelHooks,
+    ExtendedModelSetup,
+    register_hook!,
+    NetworkFormulation,
+    DCPowerFlow,
+    ZonalExchange
 
 end # module POMATWO
