@@ -76,5 +76,14 @@ The model is able to determine redispatch actions required to address congestion
 by minimizing the scale of these adjustments to maintain grid stability. 
 It is also important to note that the model does not include flexibility costs in its considerations. 
 
+## Flexible Architecture (New in v0.2+)
+POMATWO now features a trait-based architecture that significantly improves extensibility:
+- **Modular market configurations**: Easy to add new market types and features
+- **Extension hooks**: Customize model behavior without modifying core code
+- **Configurable constraints**: Enable/disable specific model features
+- **Future-ready**: Supports planned features like intraday markets, FBMC, and seasonal storage
+
+See [Flexible Architecture Guide](docs/FLEXIBLE_ARCHITECTURE.md) for details and examples.
+
 ## Licencing
 The POMATWO model and all additional files in the git repository are licensed under the MIT license.That means you can use and change the code of POMATWO. Furthermore, you can change the license in your redistribution but must mention the original author. We appreciate if you inform us about changes and send a merge request via git. For further information please read the LICENSE file, which contains the license text, or go to https://opensource.org/licenses/MIT
