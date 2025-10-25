@@ -56,6 +56,13 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
+      - name: Remove pinned docs Manifest (if present)
+        shell: julia --color=yes {0}
+        run: |
+          if isfile(joinpath("docs", "Manifest.toml"))
+              @info "Removing docs/Manifest.toml to avoid stale pins"
+              rm(joinpath("docs", "Manifest.toml"))
+          end
       - name: Configure doc environment
         shell: julia --project=docs --color=yes {0}
         run: |

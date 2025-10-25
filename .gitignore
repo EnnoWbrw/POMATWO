@@ -3,3 +3,4 @@ pomato.jl.code-workspace
 results
 vscode.code-workspace
 docs/build/
+docs/Manifest.toml

@@ -78,3 +78,22 @@ It is also important to note that the model does not include flexibility costs i
 
 ## Licencing
 The POMATWO model and all additional files in the git repository are licensed under the MIT license.That means you can use and change the code of POMATWO. Furthermore, you can change the license in your redistribution but must mention the original author. We appreciate if you inform us about changes and send a merge request via git. For further information please read the LICENSE file, which contains the license text, or go to https://opensource.org/licenses/MIT
+
+## Building the documentation
+The docs are built with Documenter.jl in an isolated environment under `docs/`. To avoid stale dependency pins, we do not commit `docs/Manifest.toml`.
+
+- Locally, build the docs with a fresh resolve:
+
+	PowerShell:
+
+	```powershell
+	# Recommended (two-step, avoids quoting pitfalls)
+	julia --project=docs -e "using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()"
+	julia --project=docs docs/make.jl
+
+	# Or a one-liner (PowerShell escaping uses backticks, not backslashes)
+	julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate(); include(\"docs/make.jl\")'
+	```
+
+- In CI, the workflow removes any pinned `docs/Manifest.toml` and instantiates against current compat bounds.
+
