@@ -629,44 +629,44 @@ function add_prs_demand!(params::Parameters, path::AbstractString, report::DataR
 end
 
 function add_avail!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "availability file")
+    if !validate_path_exists(report, path, "availability file or directory")
         return
     end
     
     try
-        # Call original function
+        # Call original function (handles both file and directory)
         add_avail!(params, path)
         add_note!(report, "data_summary", "Loaded availability data", location)
     catch e
-        add_error!(report, "file_parsing", "Failed to parse availability file: $(string(e))", location)
+        add_error!(report, "file_parsing", "Failed to parse availability data: $(string(e))", location)
     end
 end
 
 function add_avail_planttype_nodal!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "nodal availability file")
+    if !validate_path_exists(report, path, "nodal availability file or directory")
         return
     end
     
     try
-        # Call original function
+        # Call original function (handles both file and directory)
         add_avail_planttype_nodal!(params, path)
         add_note!(report, "data_summary", "Loaded nodal plant type availability data", location)
     catch e
-        add_error!(report, "file_parsing", "Failed to parse nodal availability file: $(string(e))", location)
+        add_error!(report, "file_parsing", "Failed to parse nodal availability data: $(string(e))", location)
     end
 end
 
 function add_avail_planttype_zonal!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "zonal availability file")
+    if !validate_path_exists(report, path, "zonal availability file or directory")
         return
     end
     
     try
-        # Call original function
+        # Call original function (handles both file and directory)
         add_avail_planttype_zonal!(params, path)
         add_note!(report, "data_summary", "Loaded zonal plant type availability data", location)
     catch e
-        add_error!(report, "file_parsing", "Failed to parse zonal availability file: $(string(e))", location)
+        add_error!(report, "file_parsing", "Failed to parse zonal availability data: $(string(e))", location)
     end
 end
 
@@ -702,16 +702,16 @@ function add_fixed_exchange!(params::Parameters, path::AbstractString, report::D
 end
 
 function add_inflow!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "inflow file")
+    if !validate_path_exists(report, path, "inflow file or directory")
         return
     end
     
     try
-        # Call original function
+        # Call original function (handles both file and directory)
         add_inflow!(params, path)
         add_note!(report, "data_summary", "Loaded inflow data", location)
     catch e
-        add_error!(report, "file_parsing", "Failed to parse inflow file: $(string(e))", location)
+        add_error!(report, "file_parsing", "Failed to parse inflow data: $(string(e))", location)
     end
 end
 
@@ -1089,6 +1089,18 @@ function load_data_with_report(data::Dict)
     # Continue with post-processing only if no critical errors
     if !report.has_errors
         try
+            # Validate network topology before attempting PTDF calculation
+            if !isempty(params.sets.L)
+                validate_network_topology(report, params, "network topology validation")
+                
+                # Only proceed with PTDF if no topology errors found
+                if report.has_errors
+                    add_note!(report, "processing_incomplete", 
+                             "Skipping PTDF calculation due to network topology errors", "post-processing")
+                    return params, report
+                end
+            end
+            
             calc_h_b!(params)
             create_subsets!(params)
             create_mappers!(params)
@@ -1172,4 +1184,48 @@ function load_data(data::Dict)
     end
     
     return params
+end
+
+"""
+    validate_params(params::Parameters)
+
+Validate a Parameters object for common issues, particularly network topology problems.
+Returns a DataReport with detailed diagnostics.
+
+# Example
+```julia
+params = load_data(data_files)
+report = validate_params(params)
+print_report(report)
+```
+"""
+function validate_params(params::Parameters)
+    report = DataReport()
+    
+    # Validate basic data presence
+    if isempty(params.sets.N)
+        add_error!(report, "missing_data", "No nodes defined", "basic validation")
+    end
+    
+    if isempty(params.sets.Z)
+        add_error!(report, "missing_data", "No zones defined", "basic validation")
+    end
+    
+    if isempty(params.sets.P)
+        add_error!(report, "missing_data", "No plants defined", "basic validation")
+    end
+    
+    # Validate network topology if lines are defined
+    if !isempty(params.sets.L)
+        validate_network_topology(report, params, "network topology")
+    else
+        add_note!(report, "validation_info", "No transmission lines defined - operating in copper plate mode", "network validation")
+    end
+    
+    # Validate slack bus presence
+    if isempty(params.slack)
+        add_error!(report, "missing_data", "No slack bus defined", "slack bus validation")
+    end
+    
+    return report
 end

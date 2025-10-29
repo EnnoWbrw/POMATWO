@@ -1,4 +1,3 @@
-
 function calc_h_b!(params)
     @unpack N, L, DC = params.sets
     @unpack line_start, line_end, dc_start, dc_end, reactance, resistance, slack = params
@@ -56,8 +55,46 @@ function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{S
     # Reduzierte B-Matrix erzeugen
     b_red = b[non_slack, non_slack]
 
-    # Invertiere reduzierte Matrix
-    b_red_inv = inv(b_red)
+    # Check matrix condition before inversion
+    matrix_rank = rank(b_red)
+    expected_rank = size(b_red, 1)
+    
+    if matrix_rank < expected_rank
+        # Matrix is singular - try to provide helpful diagnostic
+        @warn """
+        B-matrix is singular (rank $matrix_rank < $expected_rank).
+        This typically indicates:
+        - Isolated network sections (islands)
+        - Missing or zero line reactances
+        - Duplicate or contradictory line definitions
+        
+        Network topology issues:
+        - Total nodes: $(length(N))
+        - Slack nodes: $(length(slack_idx)) at $(slack_list)
+        - Non-slack nodes: $(length(non_slack))
+        - Lines: $(length(L))
+        
+        Attempting pseudoinverse for PTDF calculation (may produce inaccurate results).
+        """
+        # Use pseudoinverse as fallback
+        b_red_inv = pinv(b_red)
+    else
+        # Try regular inversion, catch singularity errors
+        try
+            b_red_inv = inv(b_red)
+        catch e
+            if e isa LinearAlgebra.SingularException
+                @warn """
+                Matrix inversion failed despite full rank.
+                This may indicate numerical conditioning issues.
+                Using pseudoinverse as fallback.
+                """
+                b_red_inv = pinv(b_red)
+            else
+                rethrow(e)
+            end
+        end
+    end
 
     # Erzeuge vollständige Inverse mit eingebetteter B⁻¹
     b_inv_full = zeros(length(N), length(N))

@@ -181,6 +181,204 @@ function validate_file_exists(report::DataReport, path::String, description::Str
 end
 
 """
+    validate_path_exists(report::DataReport, path::String, description::String="path")
+
+Validate that a file or directory exists, adding appropriate reports.
+This function accepts both files and directories, making it suitable for data loading
+functions that can handle either (e.g., availability data stored as single file or directory of files).
+"""
+function validate_path_exists(report::DataReport, path::String, description::String="path")
+    if !ispath(path)
+        add_error!(report, "file_access", "Required $description does not exist", path)
+        return false
+    end
+    return true
+end
+
+"""
+    validate_network_topology(report::DataReport, params::Parameters, location::String="network topology")
+
+Validate network topology for common issues that cause singularity in PTDF calculation.
+Checks for:
+- Isolated nodes (not connected to any line)
+- Network islands (disconnected subnetworks)
+- Zero or missing reactances
+- Lines referencing non-existent nodes
+- Duplicate line definitions
+"""
+function validate_network_topology(report::DataReport, params, location::String="network topology")
+    N = params.sets.N
+    L = params.sets.L
+    
+    if isempty(L)
+        add_note!(report, "network_validation", "No lines defined - skipping topology validation", location)
+        return true
+    end
+    
+    issues_found = false
+    
+    # Check 1: Lines reference valid nodes
+    for l in L
+        start_node = params.line_start[l]
+        end_node = params.line_end[l]
+        
+        if !(start_node in N)
+            add_error!(report, "network_topology", 
+                      "Line '$l' references non-existent start node '$start_node'", location)
+            issues_found = true
+        end
+        
+        if !(end_node in N)
+            add_error!(report, "network_topology", 
+                      "Line '$l' references non-existent end node '$end_node'", location)
+            issues_found = true
+        end
+        
+        if start_node == end_node
+            add_error!(report, "network_topology", 
+                      "Line '$l' connects node '$start_node' to itself", location)
+            issues_found = true
+        end
+    end
+    
+    # Check 2: Reactance and resistance values
+    for l in L
+        if haskey(params.reactance, l)
+            x = params.reactance[l]
+            if x == 0.0
+                add_error!(report, "network_topology", 
+                          "Line '$l' has zero reactance (x=0), which causes singularity", location)
+                issues_found = true
+            elseif abs(x) < 1e-10
+                add_warning!(report, "network_topology", 
+                            "Line '$l' has very small reactance (x=$x), may cause numerical issues", location)
+            end
+        end
+        
+        if haskey(params.resistance, l)
+            r = params.resistance[l]
+            if abs(r) < 1e-10 && !haskey(params.reactance, l)
+                add_warning!(report, "network_topology", 
+                            "Line '$l' has very small resistance and no reactance defined", location)
+            end
+        end
+    end
+    
+    # Check 3: Find isolated nodes (not connected to any line)
+    connected_nodes = Set{String}()
+    for l in L
+        if haskey(params.line_start, l) && haskey(params.line_end, l)
+            push!(connected_nodes, params.line_start[l])
+            push!(connected_nodes, params.line_end[l])
+        end
+    end
+    
+    isolated_nodes = setdiff(Set(N), connected_nodes)
+    if !isempty(isolated_nodes)
+        add_error!(report, "network_topology", 
+                  "Found $(length(isolated_nodes)) isolated node(s) not connected to any line: $(join(sort(collect(isolated_nodes)), ", "))", 
+                  location)
+        issues_found = true
+    end
+    
+    # Check 4: Detect network islands using depth-first search
+    if length(connected_nodes) > 1
+        adjacency = Dict{String, Vector{String}}()
+        for n in connected_nodes
+            adjacency[n] = String[]
+        end
+        
+        for l in L
+            if haskey(params.line_start, l) && haskey(params.line_end, l)
+                start = params.line_start[l]
+                stop = params.line_end[l]
+                push!(adjacency[start], stop)
+                push!(adjacency[stop], start)
+            end
+        end
+        
+        # DFS to find connected components
+        visited = Set{String}()
+        islands = Vector{Set{String}}()
+        
+        for start_node in connected_nodes
+            if !(start_node in visited)
+                # New island found
+                island = Set{String}()
+                stack = [start_node]
+                
+                while !isempty(stack)
+                    node = pop!(stack)
+                    if !(node in visited)
+                        push!(visited, node)
+                        push!(island, node)
+                        for neighbor in adjacency[node]
+                            if !(neighbor in visited)
+                                push!(stack, neighbor)
+                            end
+                        end
+                    end
+                end
+                
+                push!(islands, island)
+            end
+        end
+        
+        if length(islands) > 1
+            add_error!(report, "network_topology", 
+                      "Network has $(length(islands)) disconnected islands (should be 1 connected network)", 
+                      location)
+            
+            for (i, island) in enumerate(islands)
+                island_nodes = join(sort(collect(island)), ", ")
+                slack_in_island = count(n -> n in params.slack, island)
+                add_error!(report, "network_topology", 
+                          "Island $i: $(length(island)) nodes ($island_nodes), $slack_in_island slack bus(es)", 
+                          location)
+            end
+            issues_found = true
+        end
+    end
+    
+    # Check 5: Duplicate lines (same start-end pair)
+    line_connections = Dict{Tuple{String,String}, Vector{String}}()
+    for l in L
+        if haskey(params.line_start, l) && haskey(params.line_end, l)
+            start = params.line_start[l]
+            stop = params.line_end[l]
+            # Normalize connection (order doesn't matter for undirected lines)
+            connection = start < stop ? (start, stop) : (stop, start)
+            
+            if !haskey(line_connections, connection)
+                line_connections[connection] = String[]
+            end
+            push!(line_connections[connection], l)
+        end
+    end
+    
+    for ((n1, n2), lines) in line_connections
+        if length(lines) > 1
+            add_warning!(report, "network_topology", 
+                        "Multiple lines ($(join(lines, ", "))) connect nodes '$n1' and '$n2' - parallel lines detected", 
+                        location)
+        end
+    end
+    
+    # Check 6: Slack bus connectivity
+    if !isempty(params.slack)
+        for slack_node in params.slack
+            if !(slack_node in connected_nodes)
+                add_error!(report, "network_topology", 
+                          "Slack bus '$slack_node' is not connected to any line", location)
+                issues_found = true
+            end
+        end
+    end
+    
+    return !issues_found
+end
+
+"""
     validate_numeric_column(report::DataReport, df::AbstractDataFrame, column::Symbol, 
                            location::String; required::Bool=true, positive::Bool=false)
 

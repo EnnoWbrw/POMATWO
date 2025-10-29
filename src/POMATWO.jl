@@ -14,8 +14,9 @@ using JuMP,
     Suppressor,
     CSV,
     CategoricalArrays,
-    Statistics
-    
+    Statistics,
+    LinearAlgebra
+
 function plot_DA_w_Redisp_interactive end
 function plot_market_interactive end, 
 function plot_network end 
