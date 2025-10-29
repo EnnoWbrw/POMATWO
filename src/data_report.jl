@@ -195,53 +195,245 @@ function validate_path_exists(report::DataReport, path::String, description::Str
     return true
 end
 
-"""
-    validate_network_topology(report::DataReport, params::Parameters, location::String="network topology")
+# ===== Network Topology Validation Helper Functions =====
 
-Validate network topology for common issues that cause singularity in PTDF calculation.
-Checks for:
-- Isolated nodes (not connected to any line)
-- Network islands (disconnected subnetworks)
-- Zero or missing reactances
-- Lines referencing non-existent nodes
-- Duplicate line definitions
 """
-function validate_network_topology(report::DataReport, params, location::String="network topology")
+    get_connected_nodes(params, line_type::Symbol=:all)
+
+Get sets of nodes connected by AC lines, DC lines, or both.
+
+# Arguments
+- `params`: Parameters object containing network data
+- `line_type`: `:ac`, `:dc`, or `:all` (default)
+
+# Returns
+- `ac_connected`: Set of nodes connected by AC lines
+- `dc_connected`: Set of nodes connected by DC lines
+- `all_connected`: Set of nodes connected by any line
+- `dc_only`: Set of nodes connected only by DC lines
+- `isolated`: Set of nodes not connected to any line
+"""
+function get_connected_nodes(params)
     N = params.sets.N
     L = params.sets.L
+    DC = params.sets.DC
     
-    if isempty(L)
-        add_note!(report, "network_validation", "No lines defined - skipping topology validation", location)
-        return true
+    ac_connected = Set{String}()
+    for l in L
+        if haskey(params.line_start, l) && haskey(params.line_end, l)
+            push!(ac_connected, params.line_start[l])
+            push!(ac_connected, params.line_end[l])
+        end
     end
     
+    dc_connected = Set{String}()
+    for dc in DC
+        if haskey(params.dc_start, dc) && haskey(params.dc_end, dc)
+            push!(dc_connected, params.dc_start[dc])
+            push!(dc_connected, params.dc_end[dc])
+        end
+    end
+    
+    all_connected = union(ac_connected, dc_connected)
+    dc_only = setdiff(dc_connected, ac_connected)
+    isolated = setdiff(Set(N), all_connected)
+    
+    return ac_connected, dc_connected, all_connected, dc_only, isolated
+end
+
+"""
+    get_nodes_to_omit_for_ptdf(params)
+
+Get list of nodes that must be omitted from PTDF calculation.
+This includes truly isolated nodes and nodes connected only via DC lines.
+
+# Arguments
+- `params`: Parameters object containing network data
+
+# Returns
+- `Vector{String}`: List of node names to omit from PTDF calculation
+"""
+function get_nodes_to_omit_for_ptdf(params)
+    _, _, _, dc_only, isolated = get_connected_nodes(params)
+    return sort(collect(union(dc_only, isolated)))
+end
+
+"""
+    build_adjacency_list(params, include_dc::Bool=true)
+
+Build adjacency list representation of the network graph.
+
+# Arguments
+- `params`: Parameters object containing network data
+- `include_dc`: Whether to include DC lines in adjacency (default: true)
+
+# Returns
+- `Dict{String, Vector{String}}`: Adjacency list mapping each node to its neighbors
+- `Set{String}`: Set of all nodes in the graph
+"""
+function build_adjacency_list(params, include_dc::Bool=true)
+    L = params.sets.L
+    DC = params.sets.DC
+    
+    ac_connected, dc_connected, all_connected, _, _ = get_connected_nodes(params)
+    
+    nodes = include_dc ? all_connected : ac_connected
+    adjacency = Dict{String, Vector{String}}()
+    
+    for n in nodes
+        adjacency[n] = String[]
+    end
+    
+    # Add AC line connections
+    for l in L
+        if haskey(params.line_start, l) && haskey(params.line_end, l)
+            start = params.line_start[l]
+            stop = params.line_end[l]
+            if start in nodes && stop in nodes
+                push!(adjacency[start], stop)
+                push!(adjacency[stop], start)
+            end
+        end
+    end
+    
+    # Add DC line connections if requested
+    if include_dc
+        for dc in DC
+            if haskey(params.dc_start, dc) && haskey(params.dc_end, dc)
+                start = params.dc_start[dc]
+                stop = params.dc_end[dc]
+                if start in nodes && stop in nodes
+                    push!(adjacency[start], stop)
+                    push!(adjacency[stop], start)
+                end
+            end
+        end
+    end
+    
+    return adjacency, nodes
+end
+
+"""
+    find_network_islands(adjacency::Dict{String, Vector{String}}, nodes::Set{String})
+
+Find disconnected components (islands) in a network using depth-first search.
+
+# Arguments
+- `adjacency`: Adjacency list representation of the network
+- `nodes`: Set of all nodes to consider
+
+# Returns
+- `Vector{Set{String}}`: List of islands, each island is a set of node names
+"""
+function find_network_islands(adjacency::Dict{String, Vector{String}}, nodes::Set{String})
+    visited = Set{String}()
+    islands = Vector{Set{String}}()
+    
+    for start_node in nodes
+        if !(start_node in visited)
+            # New island found - perform DFS
+            island = Set{String}()
+            stack = [start_node]
+            
+            while !isempty(stack)
+                node = pop!(stack)
+                if !(node in visited)
+                    push!(visited, node)
+                    push!(island, node)
+                    if haskey(adjacency, node)
+                        for neighbor in adjacency[node]
+                            if !(neighbor in visited)
+                                push!(stack, neighbor)
+                            end
+                        end
+                    end
+                end
+            end
+            
+            push!(islands, island)
+        end
+    end
+    
+    return islands
+end
+
+"""
+    validate_line_references(report::DataReport, params, location::String)
+
+Validate that AC and DC lines reference valid nodes and don't create self-loops.
+
+# Returns
+- `Bool`: true if no issues found, false otherwise
+"""
+function validate_line_references(report::DataReport, params, location::String)
+    N = params.sets.N
+    L = params.sets.L
+    DC = params.sets.DC
     issues_found = false
     
-    # Check 1: Lines reference valid nodes
+    # Check AC lines
     for l in L
         start_node = params.line_start[l]
         end_node = params.line_end[l]
         
         if !(start_node in N)
             add_error!(report, "network_topology", 
-                      "Line '$l' references non-existent start node '$start_node'", location)
+                      "AC line '$l' references non-existent start node '$start_node'", location)
             issues_found = true
         end
         
         if !(end_node in N)
             add_error!(report, "network_topology", 
-                      "Line '$l' references non-existent end node '$end_node'", location)
+                      "AC line '$l' references non-existent end node '$end_node'", location)
             issues_found = true
         end
         
         if start_node == end_node
             add_error!(report, "network_topology", 
-                      "Line '$l' connects node '$start_node' to itself", location)
+                      "AC line '$l' connects node '$start_node' to itself", location)
             issues_found = true
         end
     end
     
-    # Check 2: Reactance and resistance values
+    # Check DC lines
+    for dc in DC
+        start_node = params.dc_start[dc]
+        end_node = params.dc_end[dc]
+        
+        if !(start_node in N)
+            add_error!(report, "network_topology", 
+                      "DC line '$dc' references non-existent start node '$start_node'", location)
+            issues_found = true
+        end
+        
+        if !(end_node in N)
+            add_error!(report, "network_topology", 
+                      "DC line '$dc' references non-existent end node '$end_node'", location)
+            issues_found = true
+        end
+        
+        if start_node == end_node
+            add_error!(report, "network_topology", 
+                      "DC line '$dc' connects node '$start_node' to itself", location)
+            issues_found = true
+        end
+    end
+    
+    return !issues_found
+end
+
+"""
+    validate_line_parameters(report::DataReport, params, location::String)
+
+Validate reactance and resistance values for AC lines.
+
+# Returns
+- `Bool`: true if no critical issues found, false otherwise
+"""
+function validate_line_parameters(report::DataReport, params, location::String)
+    L = params.sets.L
+    issues_found = false
+    
     for l in L
         if haskey(params.reactance, l)
             x = params.reactance[l]
@@ -264,72 +456,62 @@ function validate_network_topology(report::DataReport, params, location::String=
         end
     end
     
-    # Check 3: Find isolated nodes (not connected to any line)
-    connected_nodes = Set{String}()
-    for l in L
-        if haskey(params.line_start, l) && haskey(params.line_end, l)
-            push!(connected_nodes, params.line_start[l])
-            push!(connected_nodes, params.line_end[l])
-        end
-    end
+    return !issues_found
+end
+
+"""
+    validate_node_connectivity(report::DataReport, params, location::String)
+
+Validate node connectivity, identifying isolated nodes and DC-only nodes.
+
+# Returns
+- `Bool`: true if no critical issues found, false otherwise
+"""
+function validate_node_connectivity(report::DataReport, params, location::String)
+    ac_connected, _, _, dc_only, isolated = get_connected_nodes(params)
+    issues_found = false
     
-    isolated_nodes = setdiff(Set(N), connected_nodes)
-    if !isempty(isolated_nodes)
+    # Report truly isolated nodes (ERROR)
+    if !isempty(isolated)
         add_error!(report, "network_topology", 
-                  "Found $(length(isolated_nodes)) isolated node(s) not connected to any line: $(join(sort(collect(isolated_nodes)), ", "))", 
+                  "Found $(length(isolated)) isolated node(s) not connected to any AC or DC line: $(join(sort(collect(isolated)), ", "))", 
                   location)
         issues_found = true
     end
     
-    # Check 4: Detect network islands using depth-first search
-    if length(connected_nodes) > 1
-        adjacency = Dict{String, Vector{String}}()
-        for n in connected_nodes
-            adjacency[n] = String[]
-        end
+    # Report DC-only nodes (WARNING - need to be omitted from PTDF calculation)
+    if !isempty(dc_only)
+        add_warning!(report, "network_topology", 
+                    "Found $(length(dc_only)) node(s) connected only via DC lines (must be omitted from PTDF calculation): $(join(sort(collect(dc_only)), ", "))", 
+                    location)
+    end
+    
+    return !issues_found
+end
+
+"""
+    validate_network_islands(report::DataReport, params, location::String)
+
+Validate network connectivity, checking for disconnected islands in both the overall network
+and the AC-only network (relevant for PTDF).
+
+# Returns
+- `Bool`: true if no critical issues found, false otherwise
+"""
+function validate_network_islands(report::DataReport, params, location::String)
+    issues_found = false
+    
+    # Check overall network islands (AC + DC)
+    adjacency_all, all_nodes = build_adjacency_list(params, true)
+    if length(all_nodes) > 1
+        islands_all = find_network_islands(adjacency_all, all_nodes)
         
-        for l in L
-            if haskey(params.line_start, l) && haskey(params.line_end, l)
-                start = params.line_start[l]
-                stop = params.line_end[l]
-                push!(adjacency[start], stop)
-                push!(adjacency[stop], start)
-            end
-        end
-        
-        # DFS to find connected components
-        visited = Set{String}()
-        islands = Vector{Set{String}}()
-        
-        for start_node in connected_nodes
-            if !(start_node in visited)
-                # New island found
-                island = Set{String}()
-                stack = [start_node]
-                
-                while !isempty(stack)
-                    node = pop!(stack)
-                    if !(node in visited)
-                        push!(visited, node)
-                        push!(island, node)
-                        for neighbor in adjacency[node]
-                            if !(neighbor in visited)
-                                push!(stack, neighbor)
-                            end
-                        end
-                    end
-                end
-                
-                push!(islands, island)
-            end
-        end
-        
-        if length(islands) > 1
+        if length(islands_all) > 1
             add_error!(report, "network_topology", 
-                      "Network has $(length(islands)) disconnected islands (should be 1 connected network)", 
+                      "Network has $(length(islands_all)) disconnected islands considering AC+DC lines (should be 1 connected network)", 
                       location)
             
-            for (i, island) in enumerate(islands)
+            for (i, island) in enumerate(islands_all)
                 island_nodes = join(sort(collect(island)), ", ")
                 slack_in_island = count(n -> n in params.slack, island)
                 add_error!(report, "network_topology", 
@@ -340,13 +522,47 @@ function validate_network_topology(report::DataReport, params, location::String=
         end
     end
     
-    # Check 5: Duplicate lines (same start-end pair)
+    # Check AC network islands (relevant for PTDF)
+    adjacency_ac, ac_nodes = build_adjacency_list(params, false)
+    if !isempty(params.sets.L) && length(ac_nodes) > 1
+        islands_ac = find_network_islands(adjacency_ac, ac_nodes)
+        
+        if length(islands_ac) > 1
+            add_warning!(report, "network_topology", 
+                        "AC network has $(length(islands_ac)) disconnected islands for PTDF calculation", 
+                        location)
+            
+            for (i, island) in enumerate(islands_ac)
+                island_nodes = join(sort(collect(island)), ", ")
+                slack_in_island = count(n -> n in params.slack, island)
+                add_warning!(report, "network_topology", 
+                            "AC island $i: $(length(island)) nodes ($island_nodes), $slack_in_island slack bus(es)", 
+                            location)
+            end
+        end
+    end
+    
+    return !issues_found
+end
+
+"""
+    validate_duplicate_lines(report::DataReport, params, location::String)
+
+Check for parallel lines (multiple lines connecting the same pair of nodes).
+
+# Returns
+- `Bool`: Always returns true (warnings only, no errors)
+"""
+function validate_duplicate_lines(report::DataReport, params, location::String)
+    L = params.sets.L
+    DC = params.sets.DC
+    
+    # Check AC lines
     line_connections = Dict{Tuple{String,String}, Vector{String}}()
     for l in L
         if haskey(params.line_start, l) && haskey(params.line_end, l)
             start = params.line_start[l]
             stop = params.line_end[l]
-            # Normalize connection (order doesn't matter for undirected lines)
             connection = start < stop ? (start, stop) : (stop, start)
             
             if !haskey(line_connections, connection)
@@ -359,23 +575,108 @@ function validate_network_topology(report::DataReport, params, location::String=
     for ((n1, n2), lines) in line_connections
         if length(lines) > 1
             add_warning!(report, "network_topology", 
-                        "Multiple lines ($(join(lines, ", "))) connect nodes '$n1' and '$n2' - parallel lines detected", 
+                        "Multiple AC lines ($(join(lines, ", "))) connect nodes '$n1' and '$n2' - parallel lines detected", 
                         location)
         end
     end
     
-    # Check 6: Slack bus connectivity
-    if !isempty(params.slack)
-        for slack_node in params.slack
-            if !(slack_node in connected_nodes)
-                add_error!(report, "network_topology", 
-                          "Slack bus '$slack_node' is not connected to any line", location)
-                issues_found = true
+    # Check DC lines
+    dc_connections = Dict{Tuple{String,String}, Vector{String}}()
+    for dc in DC
+        if haskey(params.dc_start, dc) && haskey(params.dc_end, dc)
+            start = params.dc_start[dc]
+            stop = params.dc_end[dc]
+            connection = start < stop ? (start, stop) : (stop, start)
+            
+            if !haskey(dc_connections, connection)
+                dc_connections[connection] = String[]
             end
+            push!(dc_connections[connection], dc)
+        end
+    end
+    
+    for ((n1, n2), lines) in dc_connections
+        if length(lines) > 1
+            add_warning!(report, "network_topology", 
+                        "Multiple DC lines ($(join(lines, ", "))) connect nodes '$n1' and '$n2' - parallel lines detected", 
+                        location)
+        end
+    end
+    
+    return true
+end
+
+"""
+    validate_slack_bus_connectivity(report::DataReport, params, location::String)
+
+Validate that slack buses are properly connected to the network.
+
+# Returns
+- `Bool`: true if no critical issues found, false otherwise
+"""
+function validate_slack_bus_connectivity(report::DataReport, params, location::String)
+    if isempty(params.slack)
+        return true
+    end
+    
+    _, _, all_connected, dc_only, _ = get_connected_nodes(params)
+    issues_found = false
+    
+    for slack_node in params.slack
+        if !(slack_node in all_connected)
+            add_error!(report, "network_topology", 
+                      "Slack bus '$slack_node' is not connected to any AC or DC line", location)
+            issues_found = true
+        elseif slack_node in dc_only
+            add_warning!(report, "network_topology", 
+                        "Slack bus '$slack_node' is connected only via DC lines (cannot participate in AC power flow)", 
+                        location)
         end
     end
     
     return !issues_found
+end
+
+"""
+    validate_network_topology(report::DataReport, params::Parameters, location::String="network topology")
+
+Validate network topology for common issues that cause singularity in PTDF calculation.
+
+This function orchestrates multiple validation checks:
+- Line reference validation (nodes exist, no self-loops)
+- Line parameter validation (reactance, resistance)
+- Node connectivity (isolated nodes, DC-only nodes)
+- Network islands (overall and AC-only)
+- Duplicate/parallel lines
+- Slack bus connectivity
+
+# Arguments
+- `report::DataReport`: Report object to accumulate validation messages
+- `params`: Parameters object containing network data
+- `location::String`: Location identifier for error messages
+
+# Returns
+- `Bool`: true if no critical issues found, false if errors were detected
+"""
+function validate_network_topology(report::DataReport, params, location::String="network topology")
+    L = params.sets.L
+    DC = params.sets.DC
+    
+    if isempty(L) && isempty(DC)
+        add_note!(report, "network_validation", "No AC or DC lines defined - skipping topology validation", location)
+        return true
+    end
+    
+    # Run all validation checks
+    valid_refs = validate_line_references(report, params, location)
+    valid_params = validate_line_parameters(report, params, location)
+    valid_connectivity = validate_node_connectivity(report, params, location)
+    valid_islands = validate_network_islands(report, params, location)
+    validate_duplicate_lines(report, params, location)  # Always returns true (warnings only)
+    valid_slack = validate_slack_bus_connectivity(report, params, location)
+    
+    # Return true only if no critical errors were found
+    return valid_refs && valid_params && valid_connectivity && valid_islands && valid_slack
 end
 
 """
