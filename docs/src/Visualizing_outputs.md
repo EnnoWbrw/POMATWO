@@ -71,4 +71,50 @@ using GLMakie, Tyler, ColorSchemes
 fig = plot_total_gen_interactive(results)
 ```
 
+
+
 ## Static Plots
+
+### `create_lineplot(results_path, data, type="max", exclude_dc_lines=false, threshhold=0.95)`
+Creates a geographical network map showing transmission line utilization with color-coded lines based on either maximum utilization frequency or average utilization.
+
+**Arguments**
+- `results_path`: Path to the directory containing simulation results.
+- `data`: A dictionary containing file paths for required network data tables (see section [Input Data Load](@ref)).
+- `type`: (optional, default: `"max"`) Visualization mode:
+    - `"max"`: Color lines by the count of timesteps where utilization >= `threshhold`.
+    - `"avg"`: Color lines by the average utilization across all timesteps.
+- `exclude_dc_lines`: (optional, default: `false`) If `true`, only AC lines are visualized.
+- `threshhold`: (optional, default: `0.95`) Utilization threshold (0-1 scale) for `"max"` mode counting.
+
+**Plot Details**
+- Lines are colored using the `ColorSchemes.lajolla` colormap.
+- **Max mode**: Colorbar shows the count of hours where line utilization exceeds the threshold.
+- **Avg mode**: Colorbar shows average utilization percentage (0-100%).
+- Network nodes are displayed as black points.
+- Uses geographical coordinates with Web Mercator projection.
+
+**Returns**
+- `fig`: A Makie figure object with the network map, color-coded lines, and colorbar.
+
+**Example**
+```julia
+using GLMakie, Tyler, ColorSchemes
+
+datafiles = Dict{Symbol,String}(
+    :plants => joinpath(datapath, "plants.csv"),
+    :nodes => joinpath(datapath, "nodes.csv"),
+    :zones => joinpath(datapath, "zones.csv"),
+    :lines => joinpath(datapath, "lines.csv"),
+    :dclines => joinpath(datapath, "dclines.csv"),
+    :demand => joinpath(datapath, "nodal_load.csv"),
+    :types => joinpath(datapath, "planttypes.csv"),
+)
+results_path = "path/to/results"
+
+# Visualize lines by max utilization frequency
+fig = create_lineplot(results_path, datafiles, "max", false, 0.95)
+
+# Visualize lines by average utilization
+fig = create_lineplot(results_path, datafiles, "avg")
+```

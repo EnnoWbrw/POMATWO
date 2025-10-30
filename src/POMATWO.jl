@@ -21,6 +21,7 @@ function plot_DA_w_Redisp_interactive end
 function plot_market_interactive end, 
 function plot_network end 
 function plot_total_gen_interactive end
+function create_lineplot end
 
 include("market_definitions.jl")
 include("model_structs.jl")
@@ -63,6 +64,7 @@ export load_data,
     plot_market_interactive, 
     plot_network, 
     plot_total_gen_interactive,
+    create_lineplot,
     DataReport,
     DataReportLevel,
     DataReportItem,

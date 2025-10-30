@@ -6,6 +6,7 @@ using Tyler.MapTiles
 using Tyler.Extents
 using DataFramesMeta 
 using CSV
+using Statistics
 
 using ..POMATWO: DataFiles
 

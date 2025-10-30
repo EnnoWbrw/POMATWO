@@ -419,9 +419,9 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
             if t == 1
                 @constraint(
                     m,
-                    STO_LVL[s, t] ==
-                    -(GEN[s, t]) / eta[s] +
-                    CHARGE[s, t] * eta[s] +
+                    STO_LVL_REDISP[s, t] ==
+                    -(GEN_REDISP[s, t]) / eta[s] +
+                    CHARGE_REDISP[s, t] * eta[s] +
                     inflow[s, t] +
                     INF[s, t]
                 )
@@ -429,9 +429,9 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
                 prev_t = prev_period(T, t)
                 @constraint(
                     m,
-                    STO_LVL[s, t] ==
-                    (STO_LVL[s, prev_t] - GEN[s, t] / eta[s]) +
-                    CHARGE[s, t] * eta[s] +
+                    STO_LVL_REDISP[s, t] ==
+                    (STO_LVL_REDISP[s, prev_t] - GEN_REDISP[s, t] / eta[s]) +
+                    CHARGE_REDISP[s, t] * eta[s] +
                     inflow[s, t] +
                     INF[s, t]
                 )
