@@ -425,7 +425,8 @@ end
 """
     validate_line_parameters(report::DataReport, params, location::String)
 
-Validate reactance and resistance values for AC lines.
+Validate reactance and resistance values for AC lines, including checking for
+zero or near-zero bvector values that would cause singularity in PTDF calculation.
 
 # Returns
 - `Bool`: true if no critical issues found, false otherwise
@@ -433,13 +434,15 @@ Validate reactance and resistance values for AC lines.
 function validate_line_parameters(report::DataReport, params, location::String)
     L = params.sets.L
     issues_found = false
+    zero_bvector_lines = String[]
     
     for l in L
+        # Check reactance
         if haskey(params.reactance, l)
             x = params.reactance[l]
             if x == 0.0
                 add_error!(report, "network_topology", 
-                          "Line '$l' has zero reactance (x=0), which causes singularity", location)
+                          "Line '$l' has zero reactance (x=0), which causes singularity in PTDF calculation", location)
                 issues_found = true
             elseif abs(x) < 1e-10
                 add_warning!(report, "network_topology", 
@@ -447,6 +450,7 @@ function validate_line_parameters(report::DataReport, params, location::String)
             end
         end
         
+        # Check resistance
         if haskey(params.resistance, l)
             r = params.resistance[l]
             if abs(r) < 1e-10 && !haskey(params.reactance, l)
@@ -454,6 +458,25 @@ function validate_line_parameters(report::DataReport, params, location::String)
                             "Line '$l' has very small resistance and no reactance defined", location)
             end
         end
+        
+        # Check calculated bvector value if it exists
+        if haskey(params.bvector, l)
+            bv = params.bvector[l]
+            if abs(bv) < 1e-10
+                push!(zero_bvector_lines, l)
+            end
+        end
+    end
+    
+    # Report all lines with zero bvector together
+    if !isempty(zero_bvector_lines)
+        add_error!(report, "network_topology", 
+                  "$(length(zero_bvector_lines)) line(s) have zero or near-zero susceptance (bvector ≈ 0), causing singularity: $(join(zero_bvector_lines, ", "))", 
+                  location)
+        add_error!(report, "network_topology",
+                  "Lines with zero susceptance are electrically invisible and will cause PTDF calculation to use pseudoinverse (inaccurate results)",
+                  location)
+        issues_found = true
     end
     
     return !issues_found
@@ -482,7 +505,7 @@ function validate_node_connectivity(report::DataReport, params, location::String
     # Report DC-only nodes (WARNING - need to be omitted from PTDF calculation)
     if !isempty(dc_only)
         add_warning!(report, "network_topology", 
-                    "Found $(length(dc_only)) node(s) connected only via DC lines (must be omitted from PTDF calculation): $(join(sort(collect(dc_only)), ", "))", 
+                    "Found $(length(dc_only)) node(s) connected only via DC lines: $(join(sort(collect(dc_only)), ", "))", 
                     location)
     end
     
@@ -551,13 +574,14 @@ end
 Check for parallel lines (multiple lines connecting the same pair of nodes).
 
 # Returns
-- `Bool`: Always returns true (warnings only, no errors)
+- `Bool`: Always returns true (notes only, no errors)
 """
 function validate_duplicate_lines(report::DataReport, params, location::String)
     L = params.sets.L
     DC = params.sets.DC
     
     # Check AC lines
+    ac_parallel_connections = Vector{String}()
     line_connections = Dict{Tuple{String,String}, Vector{String}}()
     for l in L
         if haskey(params.line_start, l) && haskey(params.line_end, l)
@@ -574,13 +598,12 @@ function validate_duplicate_lines(report::DataReport, params, location::String)
     
     for ((n1, n2), lines) in line_connections
         if length(lines) > 1
-            add_warning!(report, "network_topology", 
-                        "Multiple AC lines ($(join(lines, ", "))) connect nodes '$n1' and '$n2' - parallel lines detected", 
-                        location)
+            push!(ac_parallel_connections, "$(join(lines, ", ")) connecting '$n1' and '$n2'")
         end
     end
     
     # Check DC lines
+    dc_parallel_connections = Vector{String}()
     dc_connections = Dict{Tuple{String,String}, Vector{String}}()
     for dc in DC
         if haskey(params.dc_start, dc) && haskey(params.dc_end, dc)
@@ -597,10 +620,26 @@ function validate_duplicate_lines(report::DataReport, params, location::String)
     
     for ((n1, n2), lines) in dc_connections
         if length(lines) > 1
-            add_warning!(report, "network_topology", 
-                        "Multiple DC lines ($(join(lines, ", "))) connect nodes '$n1' and '$n2' - parallel lines detected", 
-                        location)
+            push!(dc_parallel_connections, "$(join(lines, ", ")) connecting '$n1' and '$n2'")
         end
+    end
+    
+    # Report all parallel lines in a single note
+    if !isempty(ac_parallel_connections) || !isempty(dc_parallel_connections)
+        total_count = length(ac_parallel_connections) + length(dc_parallel_connections)
+        message_parts = ["Found $total_count parallel line group(s):"]
+        
+        if !isempty(ac_parallel_connections)
+            push!(message_parts, "AC lines: " * string(length(ac_parallel_connections)))
+        end
+        
+        if !isempty(dc_parallel_connections)
+            push!(message_parts, "DC lines: " * string(length(dc_parallel_connections)))
+        end
+        
+        add_note!(report, "network_topology", 
+                 join(message_parts, " "), 
+                 location)
     end
     
     return true

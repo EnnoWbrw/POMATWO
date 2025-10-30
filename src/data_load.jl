@@ -390,7 +390,7 @@ function add_lines!(params::Parameters, df_lines::AbstractDataFrame)
     for row in eachrow(df_lines)
         push!(params.sets.L, row[:index])
 
-        trm = 1
+        trm = 1 ### transfer reliability margin
         params.acline_capacity[row[:index]] = trm * row[:capacity]
 
         if haskey(row, :circuits)
@@ -1101,13 +1101,22 @@ function load_data_with_report(data::Dict)
                 end
             end
             
-            calc_h_b!(params)
+            calc_h_b!(params, report)
             create_subsets!(params)
             create_mappers!(params)
             calc_mc!(params)
             map_avail_planttype!(params)
             haskey(data, :prs_demand) && calc_nodal_load_no_prs!(params)
-            add_note!(report, "processing_complete", "Data processing completed successfully", "post-processing")
+            
+            # Add completion note with warning count
+            warning_count = length(get_warnings(report))
+            if warning_count > 0
+                add_note!(report, "processing_complete", 
+                         "Data processing completed with $warning_count warning(s). Please review the warnings for potential issues.", "post-processing")
+            else
+                add_note!(report, "processing_complete", 
+                         "Data processing completed successfully", "post-processing")
+            end
         catch e
             add_error!(report, "post_processing_error", "Failed during post-processing: $(string(e))", "post-processing")
         end

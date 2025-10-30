@@ -214,15 +214,17 @@ end
         )
         
         report = POMATWO.validate_params(params)
-        
-        warnings = POMATWO.get_warnings(report)
-        
-        # Should warn about parallel lines
-        parallel_warning = findfirst(w -> w.category == "network_topology" && 
-                                         occursin("parallel lines", w.message), warnings)
-        @test parallel_warning !== nothing
-        @test occursin("line1", warnings[parallel_warning].message)
-        @test occursin("line2", warnings[parallel_warning].message)
+
+        notes = POMATWO.get_notes(report)
+
+        # Should have a single note about parallel lines
+        parallel_note = findfirst(n -> n.category == "network_topology" && 
+                                      occursin("parallel line group", n.message), notes)
+        @test parallel_note !== nothing
+        @test occursin("line1", notes[parallel_note].message)
+        @test occursin("line2", notes[parallel_note].message)
+        @test occursin("node1", notes[parallel_note].message)
+        @test occursin("node2", notes[parallel_note].message)
     end
     
     @testset "Disconnected slack bus" begin

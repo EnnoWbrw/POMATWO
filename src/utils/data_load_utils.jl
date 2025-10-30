@@ -1,4 +1,87 @@
-function calc_h_b!(params)
+"""
+    isinvertible(A::Matrix{Float64}) -> Bool
+
+Check if matrix A is invertible by computing its determinant with high precision.
+Uses BigFloat arithmetic to avoid numerical errors, with tolerance 1e-18.
+"""
+isinvertible(A::Matrix{Float64}) = !isapprox(det(BigFloat.(A)), 0, atol = 1e-18)
+
+"""
+    diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String})
+
+Diagnostic function to identify why a matrix is singular.
+Checks for network islands, zero rows/columns, and rank deficiency.
+"""
+function diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String})
+    n = size(b_red, 1)
+    
+    println("\n" * "="^60)
+    println("SINGULAR MATRIX DIAGNOSTICS")
+    println("="^60)
+    
+    # Check determinant
+    det_val = det(BigFloat.(b_red))
+    println("Determinant: ", det_val)
+    
+    # Check rank
+    r = rank(b_red)
+    println("Rank: $r / $n (deficit: $(n - r))")
+    
+    # Check for zero or near-zero rows/columns
+    row_norms = [norm(b_red[i, :]) for i in 1:n]
+    col_norms = [norm(b_red[:, j]) for j in 1:n]
+    
+    zero_rows = findall(x -> x < 1e-10, row_norms)
+    zero_cols = findall(x -> x < 1e-10, col_norms)
+    
+    if !isempty(zero_rows)
+        println("\nNodes with near-zero rows (likely isolated or faulty line data):")
+        for i in zero_rows
+            println("  - $(included_nodes[i]) (row $i, norm: $(row_norms[i]))")
+        end
+    end
+    
+    if !isempty(zero_cols)
+        println("\nNodes with near-zero columns (likely isolated or faulty line data):")
+        for j in zero_cols
+            println("  - $(included_nodes[j]) (col $j, norm: $(col_norms[j]))")
+        end
+    end
+    
+    # Check condition number
+    cond_num = cond(b_red)
+    println("\nCondition number: $cond_num")
+    if cond_num > 1e12
+        println("  ⚠️  Matrix is severely ill-conditioned!")
+    end
+    
+    # Check for disconnected components (simplified check)
+    # A connected network should have rank = n-1 for the Laplacian-like matrix
+    println("\nExpected rank for connected network: $(n-1)")
+    println("Actual rank: $r")
+    if r < n - 1
+        println("  ⚠️  Network likely has $(n - r) disconnected islands!")
+    end
+    
+    # Show diagonal values
+    diag_vals = diag(b_red)
+    println("\nDiagonal value statistics:")
+    println("  Min: $(minimum(diag_vals))")
+    println("  Max: $(maximum(diag_vals))")
+    println("  Mean: $(sum(diag_vals) / n)")
+    
+    near_zero_diag = findall(x -> abs(x) < 1e-6, diag_vals)
+    if !isempty(near_zero_diag)
+        println("\nNodes with near-zero diagonal (suspicious):")
+        for i in near_zero_diag
+            println("  - $(included_nodes[i]): $(diag_vals[i])")
+        end
+    end
+    
+    println("="^60 * "\n")
+end
+
+function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
     @unpack N, L, DC = params.sets
     @unpack line_start, line_end, dc_start, dc_end, reactance, resistance, slack = params
 
@@ -25,7 +108,16 @@ function calc_h_b!(params)
     h = bvector.data .* incidence.data
     b = h' * incidence.data
 
-    calc_PTDF!(h, b, slack, N, L, params)
+    if !issymmetric(b)
+        @warn "B-matrix is not symmetric. This indicates a numerical or algorithmic issue."
+        if !isnothing(report)
+            add_error!(report, "matrix_calculation", 
+                        "B-matrix is not symmetric - indicates numerical or algorithmic issue", 
+                        "PTDF calculation")
+        end
+    end
+
+    calc_PTDF!(h, b, slack, N, L, params, report)
 
     for l in eachindex(L), n in eachindex(N)
         params.h[(L[l], N[n])] = h[l, n]
@@ -36,9 +128,16 @@ function calc_h_b!(params)
     end
 
 end
-function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{String}, N::Vector{String}, L::Vector{String}, params::Parameters)
+function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{String}, N::Vector{String}, L::Vector{String}, params::Parameters, report::Union{DataReport,Nothing}=nothing)
 
-    # Indexpositionen der Slack-Busse in N finden
+    # Get nodes that should be omitted from PTDF calculation
+    # (isolated nodes and DC-only nodes)
+    nodes_to_omit = get_nodes_to_omit_for_ptdf(params)
+    
+    # Find indices of nodes to omit
+    omit_idx = findall(n -> n in nodes_to_omit, N)
+    
+    # Find indices of slack buses in N
     slack_idx = findall(n -> n in slack_list, N)
 
     if isempty(slack_idx)
@@ -48,61 +147,101 @@ function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{S
     if length(slack_list) > 1
         @warn "Multiple slack buses found."
     end
-
-    # Indizes der Nicht-Slack-Knoten
-    non_slack = setdiff(1:length(N), slack_idx)
-
-    # Reduzierte B-Matrix erzeugen
-    b_red = b[non_slack, non_slack]
-
-    # Check matrix condition before inversion
-    matrix_rank = rank(b_red)
-    expected_rank = size(b_red, 1)
     
-    if matrix_rank < expected_rank
-        # Matrix is singular - try to provide helpful diagnostic
-        @warn """
-        B-matrix is singular (rank $matrix_rank < $expected_rank).
-        This typically indicates:
-        - Isolated network sections (islands)
-        - Missing or zero line reactances
-        - Duplicate or contradictory line definitions
-        
-        Network topology issues:
-        - Total nodes: $(length(N))
-        - Slack nodes: $(length(slack_idx)) at $(slack_list)
-        - Non-slack nodes: $(length(non_slack))
-        - Lines: $(length(L))
-        
-        Attempting pseudoinverse for PTDF calculation (may produce inaccurate results).
+    # Report omitted nodes
+    if !isempty(nodes_to_omit)
+        @info """
+        Omitting $(length(nodes_to_omit)) node(s) from PTDF calculation:
+        $(join(sort(nodes_to_omit), ", "))
+        Reason: Nodes are either isolated or connected only via DC lines.
         """
-        # Use pseudoinverse as fallback
-        b_red_inv = pinv(b_red)
-    else
-        # Try regular inversion, catch singularity errors
-        try
-            b_red_inv = inv(b_red)
-        catch e
-            if e isa LinearAlgebra.SingularException
-                @warn """
-                Matrix inversion failed despite full rank.
-                This may indicate numerical conditioning issues.
-                Using pseudoinverse as fallback.
-                """
-                b_red_inv = pinv(b_red)
-            else
-                rethrow(e)
-            end
-        end
     end
 
-    # Erzeuge vollständige Inverse mit eingebetteter B⁻¹
-    b_inv_full = zeros(length(N), length(N))
-    b_inv_full[non_slack, non_slack] .= b_red_inv
+    # Indices to exclude: slack buses + nodes to omit
+    excluded_idx = union(slack_idx, omit_idx)
+    
+    # Indices of nodes included in B-matrix inversion
+    included_idx = setdiff(1:length(N), excluded_idx)
+    
+    if isempty(included_idx)
+        @warn """
+        No nodes available for PTDF calculation after excluding slack and omitted nodes.
+        PTDF matrix will be zeros.
+        """
+        # Create zero PTDF matrix
+        ptdf = zeros(length(L), length(N))
+    else
+        # Create reduced B-matrix (excluding slack and omitted nodes)
+        b_red = b[included_idx, included_idx]
 
-    # PTDF = H * B⁻¹
-    ptdf = h * b_inv_full
+        if !isinvertible(b_red)
+            # Matrix is singular - try to provide helpful diagnostic
+            @warn """
+            B-matrix is singular (determinant is zero).
+            This typically indicates:
+            - Isolated network sections (islands)
+            - Missing or zero line reactances
+            - Duplicate or contradictory line definitions
+            
+            Network topology issues:
+            - Total nodes: $(length(N))
+            - Slack nodes: $(length(slack_idx)) at $(slack_list)
+            - Omitted nodes: $(length(omit_idx))
+            - Nodes in calculation: $(length(included_idx))
+            - Lines: $(length(L))
+            
+            Attempting pseudoinverse for PTDF calculation (may produce inaccurate results).
+            """
+            
+            # Run detailed diagnostics
+            included_nodes = N[included_idx]
+            diagnose_singular_matrix(b_red, included_nodes)
+            
+            # Add warning to report
+            if !isnothing(report)
+                add_warning!(report, "ptdf_calculation", 
+                            "B-matrix is singular - using pseudoinverse (may produce inaccurate PTDF values). See console output for detailed diagnostics.", 
+                            "PTDF calculation")
+            end
+            
+            # Use pseudoinverse as fallback
+            b_red_inv = pinv(b_red)
+        else
+            # Try regular inversion, catch singularity errors
+            try
+                b_red_inv = inv(b_red)
+            catch e
+                if e isa LinearAlgebra.SingularException
+                    @warn """
+                    Matrix inversion failed despite full rank.
+                    This may indicate numerical conditioning issues.
+                    Using pseudoinverse as fallback.
+                    """
+                    
+                    # Add warning to report
+                    if !isnothing(report)
+                        add_warning!(report, "ptdf_calculation", 
+                                    "Matrix inversion failed despite determinant check - using pseudoinverse due to numerical conditioning issues", 
+                                    "PTDF calculation")
+                    end
+                    
+                    b_red_inv = pinv(b_red)
+                else
+                    rethrow(e)
+                end
+            end
+        end
 
+        # Create full inverse matrix with embedded B⁻¹
+        # Excluded nodes (slack + omitted) remain zero
+        b_inv_full = zeros(length(N), length(N))
+        b_inv_full[included_idx, included_idx] .= b_red_inv
+
+        # PTDF = H * B⁻¹
+        ptdf = h * b_inv_full
+    end
+
+    # Store PTDF values
     for l in eachindex(L), n in eachindex(N)
         params.ptdf[(L[l], N[n])] = ptdf[l, n]
     end
