@@ -24,7 +24,6 @@ function write_results(sr::SubRun; format = "arrow")
     for (varname, df) in sr.results
 
         filename = joinpath(sr_dir, string(varname) * "." * format)
-        println(filename)
 
         if format == "arrow"
             try
