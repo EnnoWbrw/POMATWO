@@ -59,16 +59,14 @@ function add_plants!(params::Parameters, df_pp::AbstractDataFrame, report::DataR
             if row[:mc] isa Number
                 params.mc[row[:index]] = FixedProfile(row[:mc])
             end
-            # else
-            #     params.mc[row[:index]] = FixedProfile(0)
+
         end
 
         if haskey(row, :availability)
             if row[:availability] isa Number
                 params.avail[row[:index]] = FixedProfile(row[:availability])
             end
-            # else
-            #     params.avail[row[:index]] = FixedProfile(1)
+
         end
 
         params.plant_type[row[:index]] = row[:plant_type]
@@ -455,6 +453,24 @@ function add_demand!(params::Parameters, df_demand::AbstractDataFrame, report::D
     end
 
     s = names(df_demand)[1] in ["Hour", "index"] ? 2 : 1
+
+    # Validate node consistency based on demand table columns (no explicit Time column expected)
+    try
+        node_cols = String.(names(df_demand)[s:end])
+        # Errors for unknown nodes present in file
+        for n in node_cols
+            if !(n in params.sets.N)
+                add_error!(report, "unknown_node_in_demand", "Node '" * n * "' appears in demand data but is not defined in nodes set", location)
+            end
+        end
+        # Warnings for nodes that exist but have no column in the file
+        missing_in_file = setdiff(params.sets.N, node_cols)
+        for n in missing_in_file
+            add_warning!(report, "node_missing_demand", "Node '" * n * "' has no demand column in input; will default to 0", location)
+        end
+    catch err
+        add_note!(report, "demand_node_validation_skipped", "Could not infer node columns in demand DataFrame (" * string(err) * ")", location)
+    end
     loaded_nodes = 0
     for col in pairs(eachcol(df_demand[!, s:end]))
         params.nodal_load[string(col[1])] = HourlyProfile(Vector(col[2]))
@@ -1236,5 +1252,83 @@ function validate_params(params::Parameters)
         add_error!(report, "missing_data", "No slack bus defined", "slack bus validation")
     end
     
+    return report
+end
+
+"""
+    validate_params(params::Parameters, setup::ModelSetup)
+
+Extended validation that additionally checks time-series lengths against the configured TimeHorizon
+and validates node consistency for nodal availability and nodal load.
+
+Returns a DataReport containing any errors, warnings, and notes.
+"""
+function validate_params(params::Parameters, setup::ModelSetup)
+    # Start with the base validations
+    report = validate_params(params)
+
+    # 1) Time horizon length checks (row count vs TimeHorizon.stop)
+    stop_val = setup.TimeHorizon.stop
+
+    # Helper to get apparent length of a Profile (FixedProfile -> 1)
+    _plen(p) = p isa HourlyProfile ? length(p.val) : 1
+
+    # Demand (nodal_load)
+    for (n, prof) in params.nodal_load
+        len = _plen(prof)
+        if prof isa HourlyProfile && len != stop_val
+            add_error!(report, "timeseries_length_mismatch", "Nodal demand at node '" * n * "' has length $(len) but TimeHorizon.stop=$(stop_val)", "validate_params")
+        end
+    end
+
+    # Availability per plant (covers prosumer availability as well)
+    for (p, prof) in params.avail
+        len = _plen(prof)
+        if prof isa HourlyProfile && len != stop_val
+            add_error!(report, "timeseries_length_mismatch", "Availability for plant '" * p * "' has length $(len) but TimeHorizon.stop=$(stop_val)", "validate_params")
+        end
+    end
+
+    # Inflow
+    for (k, prof) in params.inflow
+        len = _plen(prof)
+        if prof isa HourlyProfile && len != stop_val
+            add_error!(report, "timeseries_length_mismatch", "Inflow series '" * k * "' has length $(len) but TimeHorizon.stop=$(stop_val)", "validate_params")
+        end
+    end
+
+    # 2) Node existence checks for nodal availability and nodal demand
+    # 2a) Nodal availability: nodes referenced must exist
+    if !isempty(params.avail_planttype_nodal)
+        nodes_in_avail = unique(last.(collect(keys(params.avail_planttype_nodal))))
+        for n in nodes_in_avail
+            if !(n in params.sets.N)
+                add_error!(report, "unknown_node_in_availability", "Node '" * n * "' appears in nodal availability but is not defined in nodes set", "validate_params")
+            end
+        end
+        # Warn for nodes that exist but have no nodal availability mapping
+        nodes_without_avail = setdiff(params.sets.N, nodes_in_avail)
+        for n in nodes_without_avail
+            add_warning!(report, "node_missing_availability", "Node '" * n * "' has no nodal availability mapping", "validate_params")
+        end
+    else
+        add_note!(report, "nodal_availability_absent", "No nodal availability data present", "validate_params")
+    end
+
+    # 2b) Nodal demand: keys must be valid nodes, and warn for missing nodes
+    if !isempty(params.nodal_load)
+        for n in keys(params.nodal_load)
+            if !(n in params.sets.N)
+                add_error!(report, "unknown_node_in_demand", "Node '" * n * "' appears in nodal demand but is not defined in nodes set", "validate_params")
+            end
+        end
+        nodes_without_demand = setdiff(params.sets.N, collect(keys(params.nodal_load)))
+        for n in nodes_without_demand
+            add_warning!(report, "node_missing_demand", "Node '" * n * "' has no nodal demand entry", "validate_params")
+        end
+    else
+        add_note!(report, "nodal_demand_absent", "No nodal demand data present", "validate_params")
+    end
+
     return report
 end
