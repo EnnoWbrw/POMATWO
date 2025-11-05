@@ -1276,24 +1276,30 @@ function validate_params(params::Parameters, setup::ModelSetup)
     # Demand (nodal_load)
     for (n, prof) in params.nodal_load
         len = _plen(prof)
-        if prof isa HourlyProfile && len != stop_val
+        if prof isa HourlyProfile && len < stop_val
             add_error!(report, "timeseries_length_mismatch", "Nodal demand at node '" * n * "' has length $(len) but TimeHorizon.stop=$(stop_val)", "validate_params")
+        elseif prof isa HourlyProfile && len > stop_val
+            add_warning!(report, "timeseries_length_excess", "Nodal demand at node '" * n * "' has length $(len) exceeding TimeHorizon.stop=$(stop_val); excess data will be ignored", "validate_params")
         end
     end
 
     # Availability per plant (covers prosumer availability as well)
     for (p, prof) in params.avail
         len = _plen(prof)
-        if prof isa HourlyProfile && len != stop_val
+        if prof isa HourlyProfile && len < stop_val
             add_error!(report, "timeseries_length_mismatch", "Availability for plant '" * p * "' has length $(len) but TimeHorizon.stop=$(stop_val)", "validate_params")
+        elseif prof isa HourlyProfile && len > stop_val
+            add_warning!(report, "timeseries_length_excess", "Availability for plant '" * p * "' has length $(len) exceeding TimeHorizon.stop=$(stop_val); excess data will be ignored", "validate_params")
         end
     end
 
     # Inflow
     for (k, prof) in params.inflow
         len = _plen(prof)
-        if prof isa HourlyProfile && len != stop_val
+        if prof isa HourlyProfile && len < stop_val
             add_error!(report, "timeseries_length_mismatch", "Inflow series '" * k * "' has length $(len) but TimeHorizon.stop=$(stop_val)", "validate_params")
+        elseif prof isa HourlyProfile && len > stop_val
+            add_warning!(report, "timeseries_length_excess", "Inflow series '" * k * "' has length $(len) exceeding TimeHorizon.stop=$(stop_val); excess data will be ignored", "validate_params")
         end
     end
 
