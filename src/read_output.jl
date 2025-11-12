@@ -1,4 +1,32 @@
 """
+Helper function to reconstruct a Parameters object from a JLD2.ReconstructedMutable
+or any object with similar field structure. Attempts to extract known fields and
+create a new Parameters with defaults for any missing fields.
+"""
+function reconstruct_parameters(old_obj)
+    try
+        # Get all field names from the current Parameters struct
+        current_fields = fieldnames(Parameters)
+        
+        # Try to extract values from the old object
+        kwargs = Dict{Symbol, Any}()
+        
+        for field in current_fields
+            if hasproperty(old_obj, field)
+                kwargs[field] = getproperty(old_obj, field)
+            end
+        end
+        
+        # Create a new Parameters with the extracted values
+        # Any missing fields will use their defaults from the @kwdef struct
+        return Parameters(; kwargs...)
+    catch e
+        @warn "Failed to reconstruct Parameters from old object: $(typeof(e)) - $(e)"
+        return Parameters()
+    end
+end
+
+"""
     DataFiles
 
 A container for loading and storing output data related to a model run. Each field corresponds to a specific dataset represented as a `DataFrame`.
@@ -79,7 +107,42 @@ struct DataFiles
         end
 
         values = [self[field] for field in fields]
-        params = load_object(joinpath(dir, "params.jld2"))
+
+        # Load params with backward compatibility: fall back to an empty Parameters()
+        # when the stored struct schema doesn't match the current Parameters type.
+        params_file = joinpath(dir, "params.jld2")
+        params::Parameters = try
+            loaded = load_object(params_file)
+            # Check if it's the correct type; if not, try to reconstruct or fall back
+            if loaded isa Parameters
+                loaded
+            else
+                @warn "Loaded params is not a Parameters type (got $(typeof(loaded))); using default Parameters()"
+                Parameters()
+            end
+        catch e
+            # Try a secondary path: open the file with JLD2.load and see if we can reconstruct
+            try
+                obj = JLD2.load(params_file)
+                # JLD2 may return a ReconstructedMutable object when the struct changed
+                # Try to extract field values and build a new Parameters
+                if haskey(obj, "single_stored_object")
+                    loaded = obj["single_stored_object"]
+                    if loaded isa Parameters
+                        loaded
+                    else
+                        # Try to reconstruct from field values
+                        reconstruct_parameters(loaded)
+                    end
+                else
+                    @warn "Could not find params in $(params_file); using default Parameters()"
+                    Parameters()
+                end
+            catch inner_e
+                @warn "Could not load params from $(params_file); using default Parameters() due to: $(typeof(e)) - $(e)"
+                Parameters()
+            end
+        end
 
         return new(params, values...)
     end
