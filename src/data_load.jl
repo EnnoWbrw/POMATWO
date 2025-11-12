@@ -1,3 +1,17 @@
+###########################################################################
+##### Data Loading Functions ##############################################
+##### Level Structure: ####################################################
+##### 1. Functions that load data from DataFrames into Parameters structure
+##### 2. Wrapper functions that load data from file paths into DataFrames 
+#####    structure and pass it to Level 1 functions
+###########################################################################
+
+
+#############################################
+##### Plant Data ############################
+#############################################
+
+# Load plant data from DataFrame into Parameters structure (Level 1)
 function add_plants!(params::Parameters, df_pp::AbstractDataFrame, report::DataReport, location::String="plants data")
     # Validate required columns
     required_columns = [:index, :plant_type, :node, :g_max, :eta]
@@ -79,48 +93,8 @@ function add_plants!(params::Parameters, df_pp::AbstractDataFrame, report::DataR
               "Loaded $(length(params.sets.P)) plants", location)
 end
 
-function add_plants!(params::Parameters, df_pp::AbstractDataFrame)
-    report = DataReport()
-    add_plants!(params, df_pp, report, "plants DataFrame")
-    if has_issues(report)
-        @warn "Issues found while loading plants data:"
-        print_report(report; show_notes=false)
-    end
-end
 
-
-
-function add_plants!(params::Parameters, path::AbstractString)
-    report = DataReport()
-    
-    if !validate_file_exists(report, path, "plants file")
-        print_report(report)
-        error("Cannot proceed without plants file")
-    end
-    
-    try
-        df = read_csv(path)
-        add_plants!(params, df, report, path)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", path)
-        print_report(report)
-        rethrow(e)
-    end
-    
-    if has_issues(report)
-        print_report(report; show_notes=false)
-    end
-    
-    return report
-end
-
-function add_plants!(params::Parameters, files::Vector{<:AbstractString})
-    for file in files
-        df = read_csv(file)
-        add_plants!(params, df)
-    end
-end
-
+# Wrapper function to load plant data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
 function add_plants!(params::Parameters, path::AbstractString, report::DataReport, location::String)
     if !validate_file_exists(report, path, "plants file")
         return
@@ -134,6 +108,7 @@ function add_plants!(params::Parameters, path::AbstractString, report::DataRepor
     end
 end
 
+# Wrapper function to load plant data from multiple file paths into DataFrames structure (Level 2) and pass it to Level 1 function
 function add_plants!(params::Parameters, files::Vector{<:AbstractString}, report::DataReport, location::String)
     for file in files
         if !validate_file_exists(report, file, "plants file")
@@ -142,6 +117,7 @@ function add_plants!(params::Parameters, files::Vector{<:AbstractString}, report
         
         try
             df = read_csv(file)
+            # Call level 1 function
             add_plants!(params, df, report, file)
         catch e
             add_error!(report, "file_parsing", "Failed to parse file $(file): $(string(e))", location)
@@ -149,59 +125,12 @@ function add_plants!(params::Parameters, files::Vector{<:AbstractString}, report
     end
 end
 
-function add_nodes!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "nodes file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        add_nodes!(params, df, report, location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
-    end
-end
 
-function add_zones!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "zones file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        add_zones!(params, df, report, location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
-    end
-end
+#############################################
+##### Node Data #############################
+#############################################
 
-function add_demand!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "demand file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        disallowmissing!(df)
-        add_demand!(params, df, report, location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
-    end
-end
-
-function add_types!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "types file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        add_types!(params, df, report, location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
-    end
-end
-
+# Load node data from file path into Parameters structure (Level 1)
 function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::DataReport, location::String="nodes data")
     # Validate required columns
     required_columns = [:index, :zone, :slack]
@@ -287,38 +216,33 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
               "Loaded $(length(params.sets.N)) nodes with $slack_count slack bus(es)", location)
 end
 
-function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame)
-    report = DataReport()
-    add_nodes!(params, df_nodes, report, "nodes DataFrame")
-    if has_issues(report)
-        @warn "Issues found while loading nodes data:"
-        print_report(report; show_notes=false)
-    end
-end
-function add_nodes!(params::Parameters, path::AbstractString)
-    report = DataReport()
-    
+# Wrapper function to load node data from file path into Parameters structure (Level 2) and pass it to Level 1 function
+function add_nodes!(params::Parameters, path::AbstractString, report::DataReport, location::String)
     if !validate_file_exists(report, path, "nodes file")
-        print_report(report)
-        error("Cannot proceed without nodes file")
+        return
     end
     
     try
         df = read_csv(path)
-        add_nodes!(params, df, report, path)
+        # call level 1 function
+        add_nodes!(params, df, report, location)
     catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", path)
-        print_report(report)
-        rethrow(e)
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
     end
-    
-    if has_issues(report)
-        print_report(report; show_notes=false)
-    end
-    
-    return report
 end
 
+# Placeholder for multiple node file loading passed as vector - not implemented
+function add_nodes!(params::Parameters, files::Vector{<:AbstractString}, report::DataReport, location::String)
+    add_error!(report, "not_implemented", 
+              "Loading nodes from multiple files, passed via a vector, is not supported", location)
+end
+
+
+#############################################
+##### Zone Data #############################
+#############################################
+
+# Function to load zone data from DataFrame into Parameters structure (Level 1)
 function add_zones!(params::Parameters, df_zones::AbstractDataFrame, report::DataReport, location::String="zones data")
     # Validate required columns
     required_columns = [:index]
@@ -351,96 +275,29 @@ function add_zones!(params::Parameters, df_zones::AbstractDataFrame, report::Dat
               "Loaded $(length(params.sets.Z)) zones", location)
 end
 
-function add_zones!(params::Parameters, df_zones::AbstractDataFrame)
-    report = DataReport()
-    add_zones!(params, df_zones, report, "zones DataFrame")
-    if has_issues(report)
-        @warn "Issues found while loading zones data:"
-        print_report(report; show_notes=false)
-    end
-end
-
-function add_zones!(params::Parameters, path::AbstractString)
-    report = DataReport()
-    
+# Wrapper function to load zone data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_zones!(params::Parameters, path::AbstractString, report::DataReport, location::String)
     if !validate_file_exists(report, path, "zones file")
-        print_report(report)
-        error("Cannot proceed without zones file")
+        return
     end
     
     try
         df = read_csv(path)
-        add_zones!(params, df, report, path)
+        # call level 1 function
+        add_zones!(params, df, report, location)
     catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", path)
-        print_report(report)
-        rethrow(e)
-    end
-    
-    if has_issues(report)
-        print_report(report; show_notes=false)
-    end
-    
-    return report
-end
-
-function add_lines!(params::Parameters, df_lines::AbstractDataFrame)
-    for row in eachrow(df_lines)
-        push!(params.sets.L, row[:index])
-
-        trm = 1 ### transfer reliability margin
-        params.acline_capacity[row[:index]] = trm * row[:capacity]
-
-        if haskey(row, :circuits)
-            params.circuits[row[:index]] = row[:circuits]
-        else
-            params.circuits[row[:index]] = 1
-        end
-
-        if haskey(row, :x_pu) && haskey(row, :r_pu)
-            params.resistance[row[:index]] = row[:r_pu]
-            params.reactance[row[:index]] = row[:x_pu]
-        else
-            params.resistance[row[:index]] =
-                row[:r] / zbase(row[:voltage]) / params.circuits[row[:index]]
-            params.reactance[row[:index]] =
-                row[:x] / zbase(row[:voltage]) / params.circuits[row[:index]]
-        end
-
-        if haskey(row, :b)
-            params.bvector[row[:index]] = row[:b]
-        end
-
-        params.voltage[row[:index]] = row[:voltage]
-        params.line_start[row[:index]] = row[:node_i]
-        params.line_end[row[:index]] = row[:node_j]
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
     end
 end
 
-function add_lines!(params::Parameters, path::AbstractString)
-    df = read_csv(path)
-    return add_lines!(params, df)
-end
+#############################################
+##### Demand Data #############################
+#############################################
 
-function add_dclines!(params::Parameters, df_dclines::AbstractDataFrame)
-    for row in eachrow(df_dclines)
-        push!(params.sets.DC, row[:index])
-        params.dcline_capacity[row[:index]] = row[:capacity]
-        params.dc_start[row[:index]] = row[:node_i]
-        params.dc_end[row[:index]] = row[:node_j]
-    end
-end
 
-function add_dclines!(params::Parameters, path::AbstractString)
-    df = read_csv(path)
-    return add_dclines!(params, df)
-end
-
-# Stub implementations for other functions to accept report parameter
-# These maintain original functionality while accepting a report parameter
-
+# Load demand data from DataFrame into Parameters structure (Level 1)
 function add_demand!(params::Parameters, df_demand::AbstractDataFrame, report::DataReport, location::String="demand data")
-    # Original implementation with basic validation
+    #  basic validation
     if !validate_required_columns(report, df_demand, Symbol[], location)  # No strict requirements, but check structure
         add_note!(report, "validation_info", "Demand data structure check completed", location)
     end
@@ -484,31 +341,27 @@ function add_demand!(params::Parameters, df_demand::AbstractDataFrame, report::D
     add_note!(report, "data_summary", "Loaded demand data for $loaded_nodes nodes", location)
 end
 
-function add_demand!(params::Parameters, path::AbstractString)
-    report = DataReport()
-    
+# Wrapper function to load demand data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_demand!(params::Parameters, path::AbstractString, report::DataReport, location::String)
     if !validate_file_exists(report, path, "demand file")
-        print_report(report)
-        error("Cannot proceed without demand file")
+        return
     end
     
     try
         df = read_csv(path)
         disallowmissing!(df)
-        add_demand!(params, df, report, path)
+        # call level 1 function
+        add_demand!(params, df, report, location)
     catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", path)
-        print_report(report)
-        rethrow(e)
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
     end
-    
-    if has_issues(report)
-        print_report(report; show_notes=false)
-    end
-    
-    return report
 end
 
+#############################################
+##### Type Data #############################
+#############################################
+
+# Load type data from DataFrame into Parameters structure (Level 1)
 function add_types!(params::Parameters, df_types::AbstractDataFrame, report::DataReport, location::String="types data")
     # Validate required columns
     required_columns = [:index, :dispatchable]
@@ -573,31 +426,89 @@ function add_types!(params::Parameters, df_types::AbstractDataFrame, report::Dat
               "Loaded $(length(params.dispatchable) + length(params.nondispatchable)) plant types", location)
 end
 
-function add_types!(params::Parameters, path::AbstractString)
-    report = DataReport()
-    
+# Wrapper function to load type data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_types!(params::Parameters, path::AbstractString, report::DataReport, location::String)
     if !validate_file_exists(report, path, "types file")
-        print_report(report)
-        error("Cannot proceed without types file")
+        return
     end
     
     try
         df = read_csv(path)
-        add_types!(params, df, report, path)
+        # Call level 1 function
+        add_types!(params, df, report, location)
     catch e
-        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", path)
-        print_report(report)
-        rethrow(e)
+        add_error!(report, "file_parsing", "Failed to parse file: $(string(e))", location)
     end
-    
-    if has_issues(report)
-        print_report(report; show_notes=false)
-    end
-    
-    return report
 end
 
-# Stub implementations for optional data functions
+
+#############################################
+##### Line Data #############################
+#############################################
+
+# Load line data from DataFrame into Parameters structure (Level 1)
+function add_lines!(params::Parameters, df_lines::AbstractDataFrame, report::DataReport, location::String="lines data")
+    for row in eachrow(df_lines)
+        push!(params.sets.L, row[:index])
+
+        trm = 1 ### transfer reliability margin
+        params.acline_capacity[row[:index]] = trm * row[:capacity]
+
+        if haskey(row, :circuits)
+            params.circuits[row[:index]] = row[:circuits]
+        else
+            params.circuits[row[:index]] = 1
+        end
+
+        # Handle impedance parameters (resistance and reactance)
+        if haskey(row, :x_pu) && haskey(row, :r_pu)
+            params.resistance[row[:index]] = row[:r_pu]
+            params.reactance[row[:index]] = row[:x_pu]
+        elseif haskey(row, :x) && haskey(row, :r) && haskey(row, :voltage)
+            params.resistance[row[:index]] =
+                row[:r] / zbase(row[:voltage]) / params.circuits[row[:index]]
+            params.reactance[row[:index]] =
+                row[:x] / zbase(row[:voltage]) / params.circuits[row[:index]]
+        else
+            # Only error if neither per-unit nor absolute impedance values are available
+            if !haskey(row, :b)
+                add_warning!(report, "missing_line_parameters",
+                          "Line $(row[:index]) missing impedance parameters (x_pu & r_pu) or (x & r & voltage)", location)
+            end
+        end
+
+        # Handle susceptance separately (can coexist with impedance)
+        if haskey(row, :b) && params.resistance[row[:index]] !== nothing && params.reactance[row[:index]] !== nothing
+            params.bvector[row[:index]] = row[:b]
+            add_warning!(report, "line_parameters",
+                      "Line $(row[:index]) has susceptance 'b' defined along with impedance; ensure consistency. only susceptance 'b' will be used", location)
+        end
+
+        if haskey(row, :voltage)
+            params.voltage[row[:index]] = row[:voltage]
+        else
+            add_warning!(report, "missing_voltage_level",
+                        "Line $(row[:index]) missing voltage level; defaulting to 220 kV", location)
+            params.voltage[row[:index]] = 220  # default voltage level in kV
+        end
+
+        if haskey(row, :node_i)
+            params.line_start[row[:index]] = row[:node_i]
+        else
+            add_error!(report, "missing_line_nodes",
+                      "Line $(row[:index]) missing start node (node_i)", location)
+        end
+        if haskey(row, :node_j)
+            params.line_end[row[:index]] = row[:node_j]
+        else
+            add_error!(report, "missing_line_nodes",
+                      "Line $(row[:index]) missing end node (node_j)", location)
+        end
+    end
+end
+
+
+# Wrapper function to load line data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
 function add_lines!(params::Parameters, path::AbstractString, report::DataReport, location::String)
     if !validate_file_exists(report, path, "lines file")
         return
@@ -605,14 +516,40 @@ function add_lines!(params::Parameters, path::AbstractString, report::DataReport
     
     try
         df = read_csv(path)
-        # Call original function
-        add_lines!(params, df)
+        # Call level 1 function
+        add_lines!(params, df, report, location)
         add_note!(report, "data_summary", "Loaded lines data", location)
     catch e
         add_error!(report, "file_parsing", "Failed to parse lines file: $(string(e))", location)
     end
 end
 
+#############################################
+##### DC Line Data #############################
+#############################################
+
+# Load DC line data from DataFrame into Parameters structure (Level 1)
+function add_dclines!(params::Parameters, df_dclines::AbstractDataFrame, report::DataReport, location::String="DC lines data")
+    for row in eachrow(df_dclines)
+        push!(params.sets.DC, row[:index])
+        if haskey(row, :capacity)
+            params.dcline_capacity[row[:index]] = row[:capacity]
+        else
+            add_error!(report, "missing_dcline_capacity",
+                        "DC Line $(row[:index]) missing capacity. Capacity must be given via column 'capacity'", location)
+        end
+
+        if haskey(row, :node_i) && haskey(row, :node_j)
+            params.dc_start[row[:index]] = row[:node_i]
+            params.dc_end[row[:index]] = row[:node_j]
+        else
+            add_error!(report, "missing_dcline_nodes",
+                        "DC Line $(row[:index]) missing start or end node", location)
+        end
+    end
+end
+
+# Wrapper function to load DC line data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
 function add_dclines!(params::Parameters, path::AbstractString, report::DataReport, location::String)
     if !validate_file_exists(report, path, "dclines file")
         return
@@ -620,191 +557,21 @@ function add_dclines!(params::Parameters, path::AbstractString, report::DataRepo
     
     try
         df = read_csv(path)
-        # Call original function
-        add_dclines!(params, df)
+        # Call level 1 function
+        add_dclines!(params, df, report, location)
         add_note!(report, "data_summary", "Loaded DC lines data", location)
     catch e
         add_error!(report, "file_parsing", "Failed to parse DC lines file: $(string(e))", location)
     end
 end
 
-function add_prs_demand!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "prosumer demand file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        disallowmissing!(df)
-        # Call original function
-        add_prs_demand!(params, df)
-        add_note!(report, "data_summary", "Loaded prosumer demand data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse prosumer demand file: $(string(e))", location)
-    end
-end
 
-function add_avail!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_path_exists(report, path, "availability file or directory")
-        return
-    end
-    
-    try
-        # Call original function (handles both file and directory)
-        add_avail!(params, path)
-        add_note!(report, "data_summary", "Loaded availability data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse availability data: $(string(e))", location)
-    end
-end
+#############################################
+##### Prs Demand Data #############################
+#############################################
 
-function add_avail_planttype_nodal!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_path_exists(report, path, "nodal availability file or directory")
-        return
-    end
-    
-    try
-        # Call original function (handles both file and directory)
-        add_avail_planttype_nodal!(params, path)
-        add_note!(report, "data_summary", "Loaded nodal plant type availability data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse nodal availability data: $(string(e))", location)
-    end
-end
-
-function add_avail_planttype_zonal!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_path_exists(report, path, "zonal availability file or directory")
-        return
-    end
-    
-    try
-        # Call original function (handles both file and directory)
-        add_avail_planttype_zonal!(params, path)
-        add_note!(report, "data_summary", "Loaded zonal plant type availability data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse zonal availability data: $(string(e))", location)
-    end
-end
-
-function add_ntc!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "NTC file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        # Call original function
-        add_ntc!(params, df)
-        add_note!(report, "data_summary", "Loaded NTC data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse NTC file: $(string(e))", location)
-    end
-end
-
-function add_fixed_exchange!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "fixed exchange file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        disallowmissing!(df)
-        # Call original function  
-        add_fixed_exchange!(params, df)
-        add_note!(report, "data_summary", "Loaded fixed exchange data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse fixed exchange file: $(string(e))", location)
-    end
-end
-
-function add_inflow!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_path_exists(report, path, "inflow file or directory")
-        return
-    end
-    
-    try
-        # Call original function (handles both file and directory)
-        add_inflow!(params, path)
-        add_note!(report, "data_summary", "Loaded inflow data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse inflow data: $(string(e))", location)
-    end
-end
-
-function add_fuel_prices!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "fuel prices file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        disallowmissing!(df)
-        # Call original function
-        add_fuel_prices!(params, df)
-        add_note!(report, "data_summary", "Loaded fuel prices data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse fuel prices file: $(string(e))", location)
-    end
-end
-
-function add_historical_generation!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "historical generation file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        disallowmissing!(df)
-        # Call original function
-        add_historical_generation!(params, df)
-        add_note!(report, "data_summary", "Loaded historical generation data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse historical generation file: $(string(e))", location)
-    end
-end
-
-# Keep original function signatures for backward compatibility
-function add_demand!(params::Parameters, df_demand::AbstractDataFrame)
-    report = DataReport()
-    add_demand!(params, df_demand, report, "demand DataFrame")
-    if has_issues(report)
-        @warn "Issues found while loading demand data:"
-        print_report(report; show_notes=false)
-    end
-end
-
-function add_types!(params::Parameters, df_types::AbstractDataFrame)
-    report = DataReport()
-    add_types!(params, df_types, report, "types DataFrame")
-    if has_issues(report)
-        @warn "Issues found while loading types data:"
-        print_report(report; show_notes=false)
-    end
-end
-
-function add_min_generation!(params::Parameters, path::AbstractString, report::DataReport, location::String)
-    if !validate_file_exists(report, path, "minimum generation file")
-        return
-    end
-    
-    try
-        df = read_csv(path)
-        disallowmissing!(df)
-        # Call original function
-        add_min_generation!(params, df)
-        add_note!(report, "data_summary", "Loaded minimum generation data", location)
-    catch e
-        add_error!(report, "file_parsing", "Failed to parse minimum generation file: $(string(e))", location)
-    end
-end
-
-function add_prs_demand!(params::Parameters, path::AbstractString)
-    df = read_csv(path)
-    disallowmissing!(df)
-    return add_prs_demand!(params, df)
-end
-
-function add_prs_demand!(params::Parameters, df::AbstractDataFrame)
+# Load prosumer demand data from DataFrame into Parameters structure (Level 1)
+function add_prs_demand!(params::Parameters, df::AbstractDataFrame, report::DataReport, location::String="prosumer demand data")
     stacked = "value" in names(df)
 
     if stacked
@@ -819,41 +586,78 @@ function add_prs_demand!(params::Parameters, df::AbstractDataFrame)
     end
 end
 
-function add_avail!(params::Parameters, files::Vector{<:AbstractString})
-    for file in files
-        df = read_csv(file)
-        add_avail!(params, df)
+# Wrapper function to load prosumer demand data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_prs_demand!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "prosumer demand file")
+        return
     end
-end
-
-function add_avail!(params::Parameters, path::AbstractString)
-    if isfile(path)
+    
+    try
         df = read_csv(path)
-        add_avail!(params, df)
-    else
-        add_avail!(params, readdir(path, join = true))
+        disallowmissing!(df)
+        # Call level 1 function
+        add_prs_demand!(params, df, report, location)
+        add_note!(report, "data_summary", "Loaded prosumer demand data", location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse prosumer demand file: $(string(e))", location)
     end
 end
 
-function add_avail!(params::Parameters, df_avail::AbstractDataFrame)
+
+#############################################
+##### Availability Data #####################
+#############################################
+
+
+function add_avail!(params::Parameters, df_avail::AbstractDataFrame, report::DataReport, location::String="availability data")
     for col in pairs(eachcol(df_avail))
         params.avail[string(col[1])] = HourlyProfile(col[2])
     end
 end
 
-function add_avail_planttype_nodal!(params::Parameters, path::AbstractString)
-    if isfile(path)
-        df = read_csv(path)
-        add_avail_planttype_nodal!(params, df)
-    else
-        for file in readdir(path, join = true)
-            df = read_csv(file)
-            add_avail_planttype_nodal!(params, df)
+# Wrapper function to load availability data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_avail!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_path_exists(report, path, "availability file or directory")
+        return
+    end
+
+    try
+        if isfile(path)
+            df = read_csv(path)
+            # Call level 1 function (handles single file)
+            add_avail!(params, df, report, location)
+        else
+            # Call level 1 function (handles directory)
+            add_avail!(params, readdir(path, join = true), report, location)
         end
+        add_note!(report, "data_summary", "Loaded availability data", location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse availability data: $(string(e))", location)
     end
 end
 
-function add_avail_planttype_nodal!(params::Parameters, df::AbstractDataFrame)
+# Wrapper function to load availability data from multiple file paths into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_avail!(params::Parameters, files::Vector{<:AbstractString}, report::DataReport, location::String)
+    for file in files
+        df = read_csv(file)
+        # Call level 1 function
+        add_avail!(params, df, report, location)
+    end
+end
+
+#############################################
+##### Nodal Availability Data #####################
+#############################################
+
+# Load nodal plant type availability data from DataFrame into Parameters structure (Level 1)
+# warning: assumes plant type in first column, nodes in header row!
+# warining: assumes only one plant type per file!
+function add_avail_planttype_nodal!(params::Parameters, df::AbstractDataFrame, report::DataReport, location::String="nodal plant type availability data")
+    if unique(df[!, 1]) |> length != 1
+        add_error!(report, "invalid_nodal_availability_data",
+                  "Nodal plant type availability data must contain exactly one plant type per file, found: $(unique(df[!, 1]))", location)
+        return
+    end
     for col in pairs(eachcol(df[!, 2:end]))
         pt = first(df[!, 1])
         node = string(col[1])
@@ -861,19 +665,50 @@ function add_avail_planttype_nodal!(params::Parameters, df::AbstractDataFrame)
     end
 end
 
-function add_avail_planttype_zonal!(params::Parameters, path::AbstractString)
-    if isfile(path)
-        df = read_csv(path)
-        add_avail_planttype_zonal!(params, df)
-    else
-        for file in readdir(path, join = true)
-            df = read_csv(file)
-            add_avail_planttype_zonal!(params, df)
+# Wrapper function to load nodal plant type availability data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_avail_planttype_nodal!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_path_exists(report, path, "nodal availability file or directory")
+        return
+    end
+     if isfile(path)
+        try
+            df = read_csv(path)
+            # call level 1 function 
+            add_avail_planttype_nodal!(params, df, report, location)
+            add_note!(report, "data_summary", "Loaded nodal plant type availability data", location)
+        catch e
+            add_error!(report, "file_parsing", "Failed to parse nodal availability data: $(string(e))", location)
         end
+    else
+        try
+            for file in readdir(path, join = true)
+                df = read_csv(file)
+                 # call level 1 function
+                add_avail_planttype_nodal!(params, df, report, location)
+            end
+
+            add_note!(report, "data_summary", "Loaded nodal plant type availability data", location)
+        catch e
+            add_error!(report, "file_parsing", "Failed to parse nodal availability data: $(string(e))", location)
+        end 
+
     end
 end
 
-function add_avail_planttype_zonal!(params::Parameters, df::AbstractDataFrame)
+#############################################
+##### Zonal Availability Data #####################
+#############################################
+
+
+# Load zonal plant type availability data from DataFrame into Parameters structure (Level 1)
+# warning: assumes zone in first column, plant types in header row!
+# warining: assumes only one zone per file!
+function add_avail_planttype_zonal!(params::Parameters, df::AbstractDataFrame, report::DataReport, location::String="zonal plant type availability data")
+    if unique(df[!, 1]) |> length != 1
+        add_error!(report, "invalid_zonal_availability_data",
+                  "Zonal plant type availability data must contain exactly one zone per file, found: $(unique(df[!, 1]))", location)
+        return
+    end
     for col in pairs(eachcol(df))
         zone = first(df[!, 1])
         plant_type = string(col[1])
@@ -881,7 +716,35 @@ function add_avail_planttype_zonal!(params::Parameters, df::AbstractDataFrame)
     end
 end
 
-function add_ntc!(params::Parameters, df_ntc::AbstractDataFrame)
+# Wrapper function to load zonal plant type availability data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_avail_planttype_zonal!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if isfile(path)
+        try
+            df = read_csv(path)
+            add_avail_planttype_zonal!(params, df, report, location)
+            add_note!(report, "data_summary", "Loaded zonal plant type availability data", location)
+        catch e
+            add_error!(report, "file_parsing", "Failed to parse zonal availability data: $(string(e))", location)
+        end
+    else
+        for file in readdir(path, join = true)
+            try
+                df = read_csv(file)
+                add_avail_planttype_zonal!(params, df, report, location)
+            catch e
+                add_error!(report, "file_parsing", "Failed to parse zonal availability data in file $file: $(string(e))", location)
+            end
+        end
+    end
+end
+
+
+#############################################
+##### NTC Data #############################
+#############################################
+
+# Load NTC data from DataFrame into Parameters structure (Level 1)
+function add_ntc!(params::Parameters, df_ntc::AbstractDataFrame, report::DataReport, location::String="NTC data")
     for row in eachrow(df_ntc)
         i, j = row[:zone_i], row[:zone_j]
         push!(params.sets.NTC, (i, j))
@@ -889,80 +752,181 @@ function add_ntc!(params::Parameters, df_ntc::AbstractDataFrame)
     end
 end
 
-function add_ntc!(params::Parameters, path::AbstractString)
-    df = read_csv(path)
-    return add_ntc!(params, df)
-end
-
-function add_inflow!(params::Parameters, df_inflow::AbstractDataFrame)
-    for col in pairs(eachcol(df_inflow))
-        params.inflow[string(col[1])] = HourlyProfile(col[2])
+# Wrapper function to load NTC data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_ntc!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "NTC file")
+        return
     end
-end
-
-function add_inflow!(params::Parameters, arr::Vector{<:AbstractString})
-    for file in arr
-        add_inflow!(params, file)
-    end
-end
-
-function add_inflow!(params::Parameters, path::AbstractString)
-    if isfile(path)
+    
+    try
         df = read_csv(path)
-        add_inflow!(params, df)
-    else
-        for file in readdir(path, join = true)
-            df = read_csv(file)
-            add_inflow!(params, df)
-        end
+        # Call level 1 function
+        add_ntc!(params, df, report, location)
+        add_note!(report, "data_summary", "Loaded NTC data", location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse NTC file: $(string(e))", location)
     end
 end
 
-function add_fixed_exchange!(params::Parameters, path::AbstractString)
-    df = read_csv(path)
-    disallowmissing!(df)
-    return add_fixed_exchange!(params, df)
-end
 
-function add_fixed_exchange!(params::Parameters, df::AbstractDataFrame)
+#############################################
+##### Fixed Exchange Data ###################
+#############################################
+## WARNING: Assumes one target zone and a file that contains exchange flows in reference to that zone!!!
+
+# Load fixed exchange data from DataFrame into Parameters structure (Level 1)
+function add_fixed_exchange!(params::Parameters, df::AbstractDataFrame, report::DataReport, location::String)
     for col in pairs(eachcol(df))
         params.fixed_exchange[string(col[1])] = HourlyProfile(Vector(col[2]))
     end
 end
 
-function add_fuel_prices!(params::Parameters, path::AbstractString)
-    df = read_csv(path)
-    disallowmissing!(df)
-    return add_fuel_prices!(params, df)
+# Wrapper function to load fixed exchange data from file path into DataFrames structure (Level 2) and pass it to Level 1 function   
+function add_fixed_exchange!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "fixed exchange file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        disallowmissing!(df)
+        # Call original function  
+        add_fixed_exchange!(params, df, report, location)
+        add_note!(report, "data_summary", "Loaded fixed exchange data", location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse fixed exchange file: $(string(e))", location)
+    end
 end
 
-function add_fuel_prices!(params::Parameters, df::AbstractDataFrame)
+
+#############################################
+##### Storage Inflow Data ###################
+#############################################
+
+# Load storage inflow data from DataFrame into Parameters structure (Level 1)
+function add_inflow!(params::Parameters, df_inflow::AbstractDataFrame, report::DataReport, location::String="inflow data")
+    for col in pairs(eachcol(df_inflow))
+        params.inflow[string(col[1])] = HourlyProfile(col[2])
+    end
+end
+
+# Wrapper function to load storage inflow data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_inflow!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_path_exists(report, path, "inflow file or directory")
+        return
+    end
+    if isfile(path)    
+        try
+            df = read_csv(path)
+            # Call level 1 function (handles both file and directory)
+            add_inflow!(params, df, report, location)
+            add_note!(report, "data_summary", "Loaded inflow data", location)
+        catch e
+            add_error!(report, "file_parsing", "Failed to parse inflow data: $(string(e))", location)
+        end
+    elseif isdir(path)
+        try
+            for file in readdir(path, join = true)
+                df = read_csv(file)
+                 # Call level 1 function
+                add_inflow!(params, df, report, location)
+            end
+        catch e
+            add_error!(report, "file_parsing", "Failed to parse inflow data: $(string(e))", location)
+        end
+    end
+end
+
+# Wrapper function to load storage inflow data from multiple file paths into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_inflow!(params::Parameters, arr::Vector{<:AbstractString}, report::DataReport, location::String)
+    for file in arr
+        add_inflow!(params, file, report, location)
+    end
+end
+
+#############################################
+##### Fuel Price Data #######################
+#############################################
+
+# Load fuel price data from DataFrame into Parameters structure (Level 1)
+function add_fuel_prices!(params::Parameters, df::AbstractDataFrame, report::DataReport, location::String)
     for col in pairs(eachcol(df))
         params.fuel_price[string(col[1])] = HourlyProfile(Vector(col[2]))
     end
 end
 
-function add_historical_generation!(params::Parameters, path::AbstractString)
-    df = read_csv(path)
-    disallowmissing!(df)
-    return add_historical_generation!(params, df)
+function add_fuel_prices!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "fuel prices file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        disallowmissing!(df)
+        # Call level 1 function
+        add_fuel_prices!(params, df, report, location)
+        add_note!(report, "data_summary", "Loaded fuel prices data", location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse fuel prices file: $(string(e))", location)
+    end
 end
 
-function add_historical_generation!(params::Parameters, df::AbstractDataFrame)
+
+#############################################
+##### Historical Generation Data ############
+#############################################
+##### WARNING: Assumes one target zone and a file that contains historical generation on zonal level!!!
+
+# Load historical generation data from DataFrame into Parameters structure (Level 1)
+function add_historical_generation!(params::Parameters, df::AbstractDataFrame, report::DataReport, location::String="historical generation data")
     for col in pairs(eachcol(df))
         params.historical_generation[string(col[1])] = HourlyProfile(Vector(col[2]))
     end
 end
 
-function add_min_generation!(params::Parameters, path::AbstractString)
-    df = read_csv(path)
-    disallowmissing!(df)
-    return add_min_generation!(params, df)
+#  Wrapper function to load historical generation data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
+function add_historical_generation!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "historical generation file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        disallowmissing!(df)
+        # Call level 1 function
+        add_historical_generation!(params, df, report, location)
+        add_note!(report, "data_summary", "Loaded historical generation data", location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse historical generation file: $(string(e))", location)
+    end
 end
 
-function add_min_generation!(params::Parameters, df::AbstractDataFrame)
+
+#############################################
+##### Minimum Generation Data ###############
+#############################################
+##### WARNING: Assumes one target zone and a file that contains minimum generation on zonal level!!!
+
+# Load minimum generation data from DataFrame into Parameters structure (Level 1)
+function add_min_generation!(params::Parameters, df::AbstractDataFrame, report::DataReport, location::String="minimum generation data")
     for col in pairs(eachcol(df))
         params.min_generation[string(col[1])] = HourlyProfile(Vector(col[2]))
+    end
+end
+
+function add_min_generation!(params::Parameters, path::AbstractString, report::DataReport, location::String)
+    if !validate_file_exists(report, path, "minimum generation file")
+        return
+    end
+    
+    try
+        df = read_csv(path)
+        disallowmissing!(df)
+        # Call level 1 function
+        add_min_generation!(params, df, report, location)
+        add_note!(report, "data_summary", "Loaded minimum generation data", location)
+    catch e
+        add_error!(report, "file_parsing", "Failed to parse minimum generation file: $(string(e))", location)
     end
 end
 
