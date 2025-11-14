@@ -965,7 +965,7 @@ function create_lineplot(
             colormap = ColorSchemes.lajolla,
             limits = (0, maximum(Array(results.LINEFLOW.Time))),
         )
-        ax.xlabel = "Linecolor based on count, where line utls. >= $threshhold"
+        ax.xlabel = "Line color indicates count of timesteps in which the line's utilization [%] exceeds a $threshhold % threshold"
     elseif type == "avg"
 
         for row in eachrow(df_line_util)
@@ -976,7 +976,7 @@ function create_lineplot(
         end
 
         Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla, limits = (0.0, 100))
-        ax.xlabel = "Linecolor based on avarage line utls. in selected timeframe"
+        ax.xlabel = "Line color based on average line utilization in selected timeframe"
     end
 
     for row in keys(node_lonlat)
