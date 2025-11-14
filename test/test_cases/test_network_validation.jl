@@ -299,6 +299,10 @@
         
         params, report = POMATWO.load_data_with_report(data)
         
+        # Test data should load without errors
+        @test !report.has_errors
+        @test params !== nothing
+        
         # Test data should load without network topology errors
         # (assuming test data is valid)
         topology_errors = filter(e -> e.category == "network_topology", 

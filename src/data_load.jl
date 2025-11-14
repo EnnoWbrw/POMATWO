@@ -1101,7 +1101,10 @@ function load_data_with_report(data::Dict)
             add_error!(report, "post_processing_error", "Failed during post-processing: $(string(e))", "post-processing")
         end
     end
-
+    if get_errors(report) != []
+    @warn("Data loading completed with errors. View report for details. You can use print_report(report) to get an overview of 'errors', 'warnings', and 'notes' that were generated during loading.")
+    return nothing, report
+    end
     return params, report
 end
 

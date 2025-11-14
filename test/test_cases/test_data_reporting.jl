@@ -117,17 +117,18 @@ function test_data_reporting()
             
             # Test new reporting function
             params, report = load_data_with_report(data_files)
-            
             @test !report.has_errors
-            @test length(params.sets.P) > 0
-            @test length(params.sets.N) > 0
-            @test length(params.sets.Z) > 0
-            
+            @test params !== nothing
+            if params !== nothing
+                @test length(params.sets.P) > 0
+                @test length(params.sets.N) > 0
+                @test length(params.sets.Z) > 0
+            end
         else
             @warn "Sample data not found, skipping integration test"
         end
     end
-    
+
     @testset "Error Handling" begin
         # Test with missing required files
         bad_data_files = Dict{Symbol,String}(
@@ -137,13 +138,28 @@ function test_data_reporting()
             :demand => "nonexistent_demand.csv",
             :types => "nonexistent_types.csv"
         )
-        
+
         params, report = load_data_with_report(bad_data_files)
         @test report.has_errors
         @test length(get_errors(report)) > 0
-        
+        @test params === nothing 
+
         # Test that load_data throws an error with bad data
         @test_throws ErrorException load_data(bad_data_files)
+    end
+
+    @testset "load_data_with_report returns nothing on error" begin
+        # Explicit test for new behavior
+        bad_data = Dict{Symbol,String}(
+            :plants => "bad.csv",
+            :nodes => "bad.csv",
+            :zones => "bad.csv",
+            :demand => "bad.csv",
+            :types => "bad.csv"
+        )
+        params, report = load_data_with_report(bad_data)
+        @test report.has_errors
+        @test params === nothing
     end
 end
 
