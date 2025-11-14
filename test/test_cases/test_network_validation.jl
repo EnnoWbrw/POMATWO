@@ -286,7 +286,7 @@
     
     @testset "Integration with load_data_with_report" begin
         # Use test data
-        test_data_path = joinpath(@__DIR__, "..", "data", "test_data_3_nodes_prosumer")
+        test_data_path = joinpath(@__DIR__, "data", "test_data_3_nodes_prosumer")
         
         data = Dict(
             :plants => joinpath(test_data_path, "plants.csv"),
@@ -302,16 +302,12 @@
         # Test data should load without errors
         @test !report.has_errors
         @test params !== nothing
-        
+        print_report(report)
         # Test data should load without network topology errors
         # (assuming test data is valid)
         topology_errors = filter(e -> e.category == "network_topology", 
                                 POMATWO.get_errors(report))
-        
-        # If there are topology errors in test data, that's a problem
-        if !isempty(topology_errors)
-            @warn "Test data has topology issues:" topology_errors
-        end
+        @test isempty(topology_errors)
     end
     
     @testset "Validate network_topology function directly" begin
