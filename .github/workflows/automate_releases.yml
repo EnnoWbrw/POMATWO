@@ -1,0 +1,100 @@
+name: Release from Project.toml
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Project.toml"
+      - ".github/workflows/release-from-project-toml.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # we need full history and tags
+
+      - name: Install Julia
+        uses: julia-actions/setup-julia@v1
+        with:
+          version: '1'  # or a specific Julia version if you prefer
+
+      - name: Extract SemVer from Project.toml
+        id: get_version
+        run: |
+          julia -e '
+          using TOML
+          project = TOML.parsefile("Project.toml")
+          version_str = project["version"]
+          ver = VersionNumber(version_str)
+          println("VERSION=$version_str")
+          println("MAJOR=$(ver.major)")
+          println("MINOR=$(ver.minor)")
+          println("PATCH=$(ver.patch)")
+          open(ENV["GITHUB_OUTPUT"], "a") do io
+              println(io, "version=$version_str")
+              println(io, "major=$(ver.major)")
+              println(io, "minor=$(ver.minor)")
+              println(io, "patch=$(ver.patch)")
+          end
+          '
+
+      - name: Show detected version
+        run: |
+          echo "Detected version: ${{ steps.get_version.outputs.version }}"
+          echo "Major: ${{ steps.get_version.outputs.major }}"
+          echo "Minor: ${{ steps.get_version.outputs.minor }}"
+          echo "Patch: ${{ steps.get_version.outputs.patch }}"
+
+      - name: Determine tag name
+        id: tag_name
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          TAG="${{ steps.tag_name.outputs.tag }}"
+          echo "Checking if tag $TAG exists..."
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop if tag already exists
+        if: steps.check_tag.outputs.exists == 'true'
+        run: |
+          echo "Tag ${{ steps.tag_name.outputs.tag }} already exists. Nothing to do."
+          exit 0
+
+      - name: Create tag locally
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.tag_name.outputs.tag }}"
+          echo "Creating tag $TAG at HEAD"
+          git tag "$TAG"
+
+      - name: Push tag to origin
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.tag_name.outputs.tag }}"
+          git push origin "$TAG"
+
+      - name: Create GitHub release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag_name.outputs.tag }}
+          name: ${{ steps.tag_name.outputs.tag }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
