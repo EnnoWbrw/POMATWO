@@ -974,7 +974,7 @@ function load_data_with_report(data::Dict)
         try
             add_lines!(params, data[:lines], report, data[:lines])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load lines: $(string(e))", data[:lines])
+            add_error!(report, "optional_data_error", "Failed to load lines: $(string(e))", data[:lines])
         end
     end
 
@@ -982,7 +982,7 @@ function load_data_with_report(data::Dict)
         try
             add_dclines!(params, data[:dclines], report, data[:dclines])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load dclines: $(string(e))", data[:dclines])
+            add_error!(report, "optional_data_error", "Failed to load dclines: $(string(e))", data[:dclines])
         end
     end
 
@@ -990,7 +990,7 @@ function load_data_with_report(data::Dict)
         try
             add_prs_demand!(params, data[:prs_demand], report, data[:prs_demand])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load prosumer demand: $(string(e))", data[:prs_demand])
+            add_error!(report, "optional_data_error", "Failed to load prosumer demand: $(string(e))", data[:prs_demand])
         end
     end
 
@@ -998,7 +998,7 @@ function load_data_with_report(data::Dict)
         try
             add_avail!(params, data[:avail], report, data[:avail])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load availability: $(string(e))", data[:avail])
+            add_error!(report, "optional_data_error", "Failed to load availability: $(string(e))", data[:avail])
         end
     end
 
@@ -1006,7 +1006,7 @@ function load_data_with_report(data::Dict)
         try
             add_avail_planttype_nodal!(params, data[:avail_planttype_nodal], report, data[:avail_planttype_nodal])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load nodal availability: $(string(e))", data[:avail_planttype_nodal])
+            add_error!(report, "optional_data_error", "Failed to load nodal availability: $(string(e))", data[:avail_planttype_nodal])
         end
     end
 
@@ -1014,7 +1014,7 @@ function load_data_with_report(data::Dict)
         try
             add_avail_planttype_zonal!(params, data[:avail_planttype_zonal], report, data[:avail_planttype_zonal])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load zonal availability: $(string(e))", data[:avail_planttype_zonal])
+            add_error!(report, "optional_data_error", "Failed to load zonal availability: $(string(e))", data[:avail_planttype_zonal])
         end
     end
 
@@ -1022,7 +1022,7 @@ function load_data_with_report(data::Dict)
         try
             add_ntc!(params, data[:ntc], report, data[:ntc])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load NTC: $(string(e))", data[:ntc])
+            add_error!(report, "optional_data_error", "Failed to load NTC: $(string(e))", data[:ntc])
         end
     end
 
@@ -1030,7 +1030,7 @@ function load_data_with_report(data::Dict)
         try
             add_fixed_exchange!(params, data[:fixed_exchange], report, data[:fixed_exchange])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load fixed exchange: $(string(e))", data[:fixed_exchange])
+            add_error!(report, "optional_data_error", "Failed to load fixed exchange: $(string(e))", data[:fixed_exchange])
         end
     end
 
@@ -1038,7 +1038,7 @@ function load_data_with_report(data::Dict)
         try
             add_inflow!(params, data[:inflow], report, data[:inflow])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load inflow: $(string(e))", data[:inflow])
+            add_error!(report, "optional_data_error", "Failed to load inflow: $(string(e))", data[:inflow])
         end
     end
 
@@ -1046,7 +1046,7 @@ function load_data_with_report(data::Dict)
         try
             add_fuel_prices!(params, data[:fuel_prices], report, data[:fuel_prices])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load fuel prices: $(string(e))", data[:fuel_prices])
+            add_error!(report, "optional_data_error", "Failed to load fuel prices: $(string(e))", data[:fuel_prices])
         end
     end
 
@@ -1054,7 +1054,7 @@ function load_data_with_report(data::Dict)
         try
             add_historical_generation!(params, data[:historical_generation], report, data[:historical_generation])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load historical generation: $(string(e))", data[:historical_generation])
+            add_error!(report, "optional_data_error", "Failed to load historical generation: $(string(e))", data[:historical_generation])
         end
     end
 
@@ -1062,7 +1062,7 @@ function load_data_with_report(data::Dict)
         try
             add_min_generation!(params, data[:min_generation], report, data[:min_generation])
         catch e
-            add_warning!(report, "optional_data_error", "Failed to load min generation: $(string(e))", data[:min_generation])
+            add_error!(report, "optional_data_error", "Failed to load min generation: $(string(e))", data[:min_generation])
         end
     end
     
