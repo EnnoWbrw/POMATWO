@@ -251,3 +251,93 @@ function summarize_result(result_table)
     summary = DataFrames.combine(result_table, All() .=> sum .=> identity)
     return summary
 end
+
+"""
+    get_redispatch_by_type_node(results::DataFiles)
+
+Calculates the difference between day-ahead generation (GEN) and redispatch generation (GEN_REDISP) 
+for each technology type at each node across all time steps.
+
+# Arguments
+- `results::DataFiles`: DataFiles object containing generation data, redispatch data, and parameters.
+
+# Returns
+A DataFrame with the following columns:
+- `Time`: Time step
+- `node`: Node identifier
+- `type`: Technology/plant type
+- `GEN`: Day-ahead generation value
+- `GEN_REDISP`: Redispatch generation value
+- `difference`: The difference (GEN_REDISP - GEN), representing redispatch adjustments
+
+Positive differences indicate upward redispatch, negative values indicate downward redispatch.
+
+# Notes
+- Only includes plants that appear in both GEN and REDISP data.
+- Results are grouped by Time, node, and technology type.
+- Empty DataFrames for GEN or REDISP will result in an empty output DataFrame.
+
+# Example
+```julia
+julia> redispatch_diff = get_redispatch_by_type_node(results)
+100×6 DataFrame
+ Row │ Time   node    type     GEN      GEN_REDISP  difference
+     │ Int64  String  String   Float64  Float64     Float64
+─────┼──────────────────────────────────────────────────────────
+   1 │     1  N1      wind      60.0        65.0         5.0
+   2 │     1  N1      coal       0.0         0.0         0.0
+   3 │     2  N2      gas       50.0        45.0        -5.0
+  ⋮  │   ⋮      ⋮       ⋮        ⋮          ⋮           ⋮
+```
+"""
+function get_redispatch_by_type_node(results::DataFiles)
+    # Check if GEN and REDISP data are available
+    if isempty(results.GEN) || isempty(results.REDISP)
+        @warn "GEN or REDISP data is empty. Returning empty DataFrame."
+        return DataFrame(
+            Time = Int[],
+            node = String[],
+            type = String[],
+            GEN = Float64[],
+            GEN_REDISP = Float64[],
+            difference = Float64[]
+        )
+    end
+
+    # Process GEN data: add node and type information
+    gen_by_node_type = @chain results.GEN begin
+        transform!(
+            :index => ByRow(x -> results.params.plant2node[x]) => :node,
+            :index => ByRow(x -> results.params.plant_type[x]) => :type
+        )
+        select(:Time, :node, :type, :index, :GEN)
+        groupby([:Time, :node, :type])
+        DataFrames.combine(:GEN => sum => :GEN)
+    end
+
+    # Process REDISP data: add node and type information
+    redisp_by_node_type = @chain results.REDISP begin
+        transform!(
+            :index => ByRow(x -> results.params.plant2node[x]) => :node,
+            :index => ByRow(x -> results.params.plant_type[x]) => :type
+        )
+        select(:Time, :node, :type, :index, :GEN_REDISP)
+        groupby([:Time, :node, :type])
+        DataFrames.combine(:GEN_REDISP => sum => :GEN_REDISP)
+    end
+
+    # Join the two dataframes and calculate difference
+    result = leftjoin(gen_by_node_type, redisp_by_node_type, 
+                     on = [:Time, :node, :type])
+    
+    # Replace missing values with 0.0 (in case some nodes/types only appear in one dataset)
+    result.GEN_REDISP = coalesce.(result.GEN_REDISP, 0.0)
+    
+    # Calculate the difference (redispatch adjustment)
+    result.difference = result.GEN_REDISP .- result.GEN
+    
+    # Sort for better readability
+    sort!(result, [:Time, :node, :type])
+    
+    return result
+end

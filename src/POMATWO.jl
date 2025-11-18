@@ -72,6 +72,7 @@ export load_data,
     load_data_with_report,
     get_errors,
     get_warnings,
-    get_notes
+    get_notes,
+    get_redispatch_by_type_node
 
 end # module POMATWO

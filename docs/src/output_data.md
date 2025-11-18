@@ -11,3 +11,6 @@ transform_results_by_type
 ```@docs
 summarize_result
 ```
+```@docs
+get_redispatch_by_type_node
+```
