@@ -119,6 +119,58 @@ fig = create_lineplot(results_path, datafiles, "max", false, 0.95)
 fig = create_lineplot(results_path, datafiles, "avg")
 ```
 
-```@docs
-POMATWO.plot_market_statistics
+### `plot_market_statistics(results::DataFiles, zone::String="DE"; save_path=nothing)`
+
+Create a comprehensive multi-panel visualization of market statistics for a specified zone.
+
+Generates a 3×3 grid figure displaying time series, distribution histograms, box plots, 
+and summary statistics for exchange flows, lost load events, and market prices. The 
+visualization provides both temporal dynamics and statistical distributions of key 
+market parameters.
+
+**Arguments**
+- `results::DataFiles`: DataFiles object containing model results with EXCHANGE and ZonalMarketBalance data.
+- `zone::String="DE"`: Zone identifier for which to create visualizations. Defaults to "DE".
+- `save_path=nothing`: (keyword) Optional file path to save the figure (e.g., "market_stats.png"). 
+  If `nothing`, the figure is not saved to disk.
+
+**Plot Layout**
+
+The figure consists of a 3×3 grid:
+
+- **Row 1 - Time Series:**
+  - Exchange flow over time (MW)
+  - Lost Load events over time (MW)
+  - Market prices over time (€/MWh)
+
+- **Row 2 - Distributions:**
+  - Exchange histogram with mean line
+  - Lost Load histogram with mean line
+  - Price histogram with mean line
+
+- **Row 3 - Statistical Summary:**
+  - Box plots of all three parameters (Z-score normalized for comparability)
+  - Text summary panel with key statistics (mean, median, std, min, max, sum, event count)
+
+**Returns**
+- `Figure`: A Makie Figure object (1800×1200 pixels) containing all visualization panels.
+
+**Notes**
+- Time series use sequential indices to avoid gaps in visualization.
+- Box plots are Z-score normalized to enable comparison across different scales.
+- Colors are consistent across all panels: steelblue (Exchange), coral (Lost Load), 
+  mediumseagreen (Price).
+- If `save_path` is provided, the figure is saved and a confirmation message is printed.
+
+**Example**
+```julia
+using GLMakie, Tyler, ColorSchemes
+
+results = DataFiles("path/to/results")
+
+# Display the figure interactively
+fig = plot_market_statistics(results, "DE")
+
+# Save to file
+fig = plot_market_statistics(results, "FR"; save_path="france_market_stats.png")
 ```

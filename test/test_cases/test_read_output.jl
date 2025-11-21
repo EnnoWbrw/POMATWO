@@ -318,6 +318,9 @@ function test_read_output()
                     
                     # This should trigger the empty data warning
                     stats_df, timeseries_df = get_market_statistics(results, fake_zone)
+
+                    @test isempty(stats_df)
+                    @test isempty(timeseries_df)
                     
                     # Should return empty DataFrames with correct structure
                     @test stats_df isa DataFrame
