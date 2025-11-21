@@ -8,7 +8,7 @@ using DataFramesMeta
 using CSV
 using Statistics
 
-using ..POMATWO: DataFiles
+using ..POMATWO: DataFiles, get_market_statistics
 
 include("plots/plotting_functions.jl")
 

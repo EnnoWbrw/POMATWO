@@ -1324,9 +1324,23 @@ Figure saved to: france_market_stats.png
 ```
 """
 function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; save_path=nothing)
-    
+
     # Get statistics and time series
-    stats_df, timeseries_df = POMATWO.get_market_statistics(results, zone)
+    stats_df = get_market_statistics(results, zone)
+    
+    # Extract time series data
+    exchange_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Exchange", :value][1]
+    ll_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Lost_Load", :value][1]
+    price_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Price", :value][1]
+    time_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Time", :value][1]
+    
+    # Create a DataFrame for easier handling
+    timeseries_df = DataFrame(
+        Time = time_series,
+        Exchange = exchange_series,
+        Lost_Load = ll_series,
+        Price = price_series
+    )
     
     # Sort by time to ensure proper plotting order
     sort!(timeseries_df, :Time)

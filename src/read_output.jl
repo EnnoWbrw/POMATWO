@@ -362,13 +362,7 @@ A tuple containing two DataFrames:
    the presence of time series data. Columns are:
    - `metric::String`: The statistical measure or "timeseries"
    - `parameter::String`: The parameter name (Exchange, Lost_Load, or Price)
-   - `value::Float64`: The computed statistical value (or NaN for timeseries markers)
-
-2. **Time Series DataFrame**: Contains time-indexed data for the zone. Columns are:
-   - `Time`: Time step identifier
-   - `Exchange::Float64`: Exchange flow values for each time step
-   - `Lost_Load::Float64`: Lost load values for each time step
-   - `Price::Float64`: Market clearing prices for each time step
+   - `value::Float64`: The computed statistical value (or value vector for timeseries markers)
 
 If EXCHANGE or ZonalMarketBalance data is empty, returns empty DataFrames with appropriate structure.
 
@@ -380,7 +374,7 @@ If EXCHANGE or ZonalMarketBalance data is empty, returns empty DataFrames with a
 
 # Example
 ```julia
-julia> stats_df, ts_df = get_market_statistics(results, "DE")
+julia> stats_df = get_market_statistics(results, "DE")
 
 julia> stats_df
 18×3 DataFrame
@@ -391,26 +385,15 @@ julia> stats_df
    2 │ median          Exchange     145.0
    3 │ std             Exchange      45.2
    ⋮  │       ⋮             ⋮          ⋮
-
-julia> ts_df
-168×4 DataFrame
- Row │ Time   Exchange  Lost_Load  Price   
-     │ Int64  Float64   Float64    Float64 
-─────┼──────────────────────────────────────
-   1 │     1     120.5        0.0     45.3
-   2 │     2     135.2        0.0     48.1
-   ⋮  │   ⋮        ⋮          ⋮        ⋮
-```
 """
 function get_market_statistics(results::DataFiles, zone::String="DE")
-
     if isempty(results.EXCHANGE) || isempty(results.ZonalMarketBalance)
-        @warn "EXCHANGE or ZonalMarketBalance data is empty. Returning empty DataFrame."
+        @warn "EXCHANGE or ZonalMarketBalance data is empty. Returning empty DataFrame. Nodal market statistics currently not available."
         return DataFrame(
             metric = String[],
             parameter = String[],
             value = Float64[]
-        ), DataFrame()
+        )
     end
 
     if !(zone in results.params.sets.Z)
@@ -419,7 +402,7 @@ function get_market_statistics(results::DataFiles, zone::String="DE")
             metric = String[],
             parameter = String[],
             value = Float64[]
-        ), DataFrame()
+        )
     end
     # Extract Exchange data for the specified zone
     zone_exchange = filter(row -> row.index == zone, results.EXCHANGE)
@@ -436,10 +419,10 @@ function get_market_statistics(results::DataFiles, zone::String="DE")
     price_series = market_zone.MarketBalance
     
     # Create statistical summary DataFrame
-    stats_df = DataFrame(
+    stats_df = POMATWO.DataFrame(
         metric = String[],
         parameter = String[],
-        value = Float64[]
+        value = Union{Vector{Int64},Float64, Vector{Float64}}[]
     )
     
     # Exchange statistics
@@ -467,17 +450,9 @@ function get_market_statistics(results::DataFiles, zone::String="DE")
     push!(stats_df, ("max", "Price", maximum(price_series)))
     
     # Add time series as a single row
-    push!(stats_df, ("timeseries", "Exchange", NaN))
-    push!(stats_df, ("timeseries", "Lost_Load", NaN))
-    push!(stats_df, ("timeseries", "Price", NaN))
-    
-    # Create a separate DataFrame for time series (optional, for easier access)
-    timeseries_df = DataFrame(
-        Time = market_zone.Time,
-        Exchange = exchange_series,
-        Lost_Load = ll_series,
-        Price = price_series
-    )
-    
-    return stats_df, timeseries_df
+    push!(stats_df, ("timeseries", "Exchange", exchange_series))
+    push!(stats_df, ("timeseries", "Lost_Load", ll_series))
+    push!(stats_df, ("timeseries", "Price", price_series))
+    push!(stats_df, ("timeseries", "Time", market_zone.Time))
+    return stats_df
 end

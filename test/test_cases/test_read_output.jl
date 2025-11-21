@@ -231,23 +231,27 @@ function test_read_output()
                 )
                 
                 # Test with Zone1
-                stats_df, timeseries_df = get_market_statistics(mock_results, "Zone1")
+                stats_df = get_market_statistics(mock_results, "Zone1")
                 
-                # Test return types
+                # Test return type
                 @test stats_df isa DataFrame
-                @test timeseries_df isa DataFrame
                 @test !isempty(stats_df)
-                @test !isempty(timeseries_df)
                 
                 # Check required columns
                 @test "metric" in names(stats_df)
                 @test "parameter" in names(stats_df)
                 @test "value" in names(stats_df)
                 
-                @test "Time" in names(timeseries_df)
-                @test "Exchange" in names(timeseries_df)
-                @test "Lost_Load" in names(timeseries_df)
-                @test "Price" in names(timeseries_df)
+                # Extract timeseries data from the stats_df
+                exchange_ts = filter(row -> row.metric == "timeseries" && row.parameter == "Exchange", stats_df)
+                ll_ts = filter(row -> row.metric == "timeseries" && row.parameter == "Lost_Load", stats_df)
+                price_ts = filter(row -> row.metric == "timeseries" && row.parameter == "Price", stats_df)
+                time_ts = filter(row -> row.metric == "timeseries" && row.parameter == "Time", stats_df)
+                
+                @test nrow(exchange_ts) == 1
+                @test nrow(ll_ts) == 1
+                @test nrow(price_ts) == 1
+                @test nrow(time_ts) == 1
                 
                 # Test Exchange statistics (should have real values now)
                 exchange_mean = filter(row -> row.metric == "mean" && row.parameter == "Exchange", stats_df)
@@ -256,7 +260,8 @@ function test_read_output()
                 @test exchange_mean[1, :value] ≈ 125.0  # Mean of [100, 150, 120, 130]
                 
                 # Test that statistics match timeseries data
-                @test exchange_mean[1, :value] ≈ mean(timeseries_df.Exchange) atol=1e-10
+                exchange_series = exchange_ts[1, :value]
+                @test exchange_mean[1, :value] ≈ mean(exchange_series) atol=1e-10
                 
                 # Test Lost_Load statistics
                 ll_mean = filter(row -> row.metric == "mean" && row.parameter == "Lost_Load", stats_df)
@@ -273,9 +278,8 @@ function test_read_output()
                 @test price_mean[1, :value] ≈ 48.75  # Mean of [45, 52, 48, 50]
                 
                 # Test with Zone2
-                stats_df2, timeseries_df2 = get_market_statistics(mock_results, "Zone2")
+                stats_df2 = get_market_statistics(mock_results, "Zone2")
                 @test !isempty(stats_df2)
-                @test !isempty(timeseries_df2)
                 
                 # Zone2 should have negative exchange (importing)
                 exchange_mean2 = filter(row -> row.metric == "mean" && row.parameter == "Exchange", stats_df2)
@@ -296,12 +300,10 @@ function test_read_output()
                     
                     if !isempty(results.params.sets.Z)
                         zone = results.params.sets.Z[1]
-                        stats_df, timeseries_df = get_market_statistics(results, zone)
+                        stats_df = get_market_statistics(results, zone)
                         
-                        # Should work with nodal market data
+                        # Should return empty for nodal market (no ZonalMarketBalance)
                         @test isempty(stats_df)
-                        @test isempty(timeseries_df)
-
                     end
                 end
             end
@@ -317,16 +319,14 @@ function test_read_output()
                     fake_zone = "NONEXISTENT_ZONE_XYZ"
                     
                     # This should trigger the empty data warning
-                    stats_df, timeseries_df = get_market_statistics(results, fake_zone)
+                    stats_df = get_market_statistics(results, fake_zone)
 
                     @test isempty(stats_df)
-                    @test isempty(timeseries_df)
                     
-                    # Should return empty DataFrames with correct structure
+                    # Should return empty DataFrame with correct structure
                     @test stats_df isa DataFrame
-                    @test timeseries_df isa DataFrame
                     
-                    # Check that empty dataframes have the expected columns
+                    # Check that empty dataframe has the expected columns
                     @test "metric" in names(stats_df)
                     @test "parameter" in names(stats_df)
                     @test "value" in names(stats_df)
