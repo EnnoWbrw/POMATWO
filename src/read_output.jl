@@ -341,3 +341,143 @@ function get_redispatch_by_type_node(results::DataFiles)
     
     return result
 end
+
+"""
+    get_market_statistics(results::DataFiles, zone::String="DE")
+
+Calculate statistical overview of key market parameters for a specified zone.
+
+Computes descriptive statistics (mean, median, standard deviation, min, max, sum) 
+for exchange flows, lost load events, and market prices in the given zone. Returns 
+both a summary statistics table and a time series dataframe for detailed analysis.
+
+# Arguments
+- `results::DataFiles`: DataFiles object containing model results with EXCHANGE and ZonalMarketBalance data.
+- `zone::String="DE"`: Zone identifier for which to calculate statistics. Defaults to "DE".
+
+# Returns
+A tuple containing two DataFrames:
+1. **Statistics DataFrame**: Contains rows for each statistic (mean, median, std, min, max, sum) 
+   for three parameters (Exchange, Lost_Load, Price). Additional rows with `NaN` values mark 
+   the presence of time series data. Columns are:
+   - `metric::String`: The statistical measure or "timeseries"
+   - `parameter::String`: The parameter name (Exchange, Lost_Load, or Price)
+   - `value::Float64`: The computed statistical value (or NaN for timeseries markers)
+
+2. **Time Series DataFrame**: Contains time-indexed data for the zone. Columns are:
+   - `Time`: Time step identifier
+   - `Exchange::Float64`: Exchange flow values for each time step
+   - `Lost_Load::Float64`: Lost load values for each time step
+   - `Price::Float64`: Market clearing prices for each time step
+
+If EXCHANGE or ZonalMarketBalance data is empty, returns empty DataFrames with appropriate structure.
+
+# Notes
+- Lost Load statistics include a `count_positive` metric indicating the number of time steps 
+  with positive lost load events.
+- Exchange values represent net flows for the specified zone.
+- Prices are extracted from the MarketBalance column of ZonalMarketBalance.
+
+# Example
+```julia
+julia> stats_df, ts_df = get_market_statistics(results, "DE")
+
+julia> stats_df
+18×3 DataFrame
+ Row │ metric          parameter   value    
+     │ String          String      Float64  
+─────┼─────────────────────────────────────
+   1 │ mean            Exchange     150.5
+   2 │ median          Exchange     145.0
+   3 │ std             Exchange      45.2
+   ⋮  │       ⋮             ⋮          ⋮
+
+julia> ts_df
+168×4 DataFrame
+ Row │ Time   Exchange  Lost_Load  Price   
+     │ Int64  Float64   Float64    Float64 
+─────┼──────────────────────────────────────
+   1 │     1     120.5        0.0     45.3
+   2 │     2     135.2        0.0     48.1
+   ⋮  │   ⋮        ⋮          ⋮        ⋮
+```
+"""
+function get_market_statistics(results::DataFiles, zone::String="DE")
+
+    if isempty(results.EXCHANGE) || isempty(results.ZonalMarketBalance)
+        @warn "EXCHANGE or ZonalMarketBalance data is empty. Returning empty DataFrame."
+        return DataFrame(
+            metric = String[],
+            parameter = String[],
+            value = Float64[]
+        ), DataFrame()
+    end
+
+    if !(zone in results.params.sets.Z)
+        @warn "Zone '$zone' not found in EXCHANGE data. Returning empty DataFrame."
+        return DataFrame(
+            metric = String[],
+            parameter = String[],
+            value = Float64[]
+        ), DataFrame()
+    end
+    # Extract Exchange data for the specified zone
+    zone_exchange = filter(row -> row.index == zone, results.EXCHANGE)
+    
+    # Extract market balance data for the specified zone
+    market_zone = filter(row -> row.Zone == zone, results.ZonalMarketBalance)
+    
+    # Filter for positive lost load events
+    LL_zone = filter(row -> row.LL > 0, market_zone)
+    
+    # Extract time series
+    exchange_series = zone_exchange.EXCHANGE
+    ll_series = market_zone.LL
+    price_series = market_zone.MarketBalance
+    
+    # Create statistical summary DataFrame
+    stats_df = DataFrame(
+        metric = String[],
+        parameter = String[],
+        value = Float64[]
+    )
+    
+    # Exchange statistics
+    push!(stats_df, ("mean", "Exchange", mean(exchange_series)))
+    push!(stats_df, ("median", "Exchange", median(exchange_series)))
+    push!(stats_df, ("std", "Exchange", std(exchange_series)))
+    push!(stats_df, ("min", "Exchange", minimum(exchange_series)))
+    push!(stats_df, ("max", "Exchange", maximum(exchange_series)))
+    push!(stats_df, ("sum", "Exchange", sum(exchange_series)))
+    
+    # Lost Load statistics
+    push!(stats_df, ("mean", "Lost_Load", mean(ll_series)))
+    push!(stats_df, ("median", "Lost_Load", median(ll_series)))
+    push!(stats_df, ("std", "Lost_Load", std(ll_series)))
+    push!(stats_df, ("min", "Lost_Load", minimum(ll_series)))
+    push!(stats_df, ("max", "Lost_Load", maximum(ll_series)))
+    push!(stats_df, ("sum", "Lost_Load", sum(ll_series)))
+    push!(stats_df, ("count_positive", "Lost_Load", Float64(nrow(LL_zone))))
+    
+    # Price statistics
+    push!(stats_df, ("mean", "Price", mean(price_series)))
+    push!(stats_df, ("median", "Price", median(price_series)))
+    push!(stats_df, ("std", "Price", std(price_series)))
+    push!(stats_df, ("min", "Price", minimum(price_series)))
+    push!(stats_df, ("max", "Price", maximum(price_series)))
+    
+    # Add time series as a single row
+    push!(stats_df, ("timeseries", "Exchange", NaN))
+    push!(stats_df, ("timeseries", "Lost_Load", NaN))
+    push!(stats_df, ("timeseries", "Price", NaN))
+    
+    # Create a separate DataFrame for time series (optional, for easier access)
+    timeseries_df = DataFrame(
+        Time = market_zone.Time,
+        Exchange = exchange_series,
+        Lost_Load = ll_series,
+        Price = price_series
+    )
+    
+    return stats_df, timeseries_df
+end

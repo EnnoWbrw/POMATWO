@@ -118,3 +118,7 @@ fig = create_lineplot(results_path, datafiles, "max", false, 0.95)
 # Visualize lines by average utilization
 fig = create_lineplot(results_path, datafiles, "avg")
 ```
+
+```@docs
+POMATWO.plot_market_statistics
+```

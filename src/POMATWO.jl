@@ -18,10 +18,11 @@ using JuMP,
     LinearAlgebra
 
 function plot_DA_w_Redisp_interactive end
-function plot_market_interactive end, 
+function plot_market_interactive end
 function plot_network end 
 function plot_total_gen_interactive end
 function create_lineplot end
+function plot_market_statistics end
 
 include("market_definitions.jl")
 include("model_structs.jl")
@@ -73,6 +74,8 @@ export load_data,
     get_errors,
     get_warnings,
     get_notes,
-    get_redispatch_by_type_node
+    get_redispatch_by_type_node,
+    get_market_statistics,
+    plot_market_statistics
 
 end # module POMATWO

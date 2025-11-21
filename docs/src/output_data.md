@@ -14,3 +14,6 @@ summarize_result
 ```@docs
 get_redispatch_by_type_node
 ```
+```@docs
+get_market_statistics
+```

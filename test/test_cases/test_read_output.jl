@@ -201,5 +201,135 @@ function test_read_output()
                 end
             end
         end
+        
+        @testset "get_market_statistics" begin
+            expected_dir = joinpath(@__DIR__, "expected_results")
+            
+            @testset "Test with mock two-zone data" begin
+                # Create mock DataFiles with proper exchange data
+                # Using specific values for predictable test results
+                exchange_data = DataFrame(
+                    Time = repeat(1:4, 2),
+                    index = vcat(fill("Zone1", 4), fill("Zone2", 4)),
+                    EXCHANGE = vcat([100.0, 150.0, 120.0, 130.0], [-100.0, -150.0, -120.0, -130.0])
+                )
+                
+                zonal_balance = DataFrame(
+                    Time = repeat(1:4, 2),
+                    Zone = vcat(fill("Zone1", 4), fill("Zone2", 4)),
+                    MarketBalance = vcat([45.0, 52.0, 48.0, 50.0], [46.0, 53.0, 49.0, 51.0]),
+                    LL = vcat([0.0, 0.0, 5.0, 0.0], [0.0, 10.0, 0.0, 15.0])
+                )
+                
+                mock_results = create_mock_datafiles(
+                    zones=["Zone1", "Zone2"],
+                    nodes=["N1", "N2"],
+                    plants=["P1", "P2"],
+                    n_timesteps=4,
+                    exchange_data=exchange_data,
+                    zonal_balance_data=zonal_balance
+                )
+                
+                # Test with Zone1
+                stats_df, timeseries_df = get_market_statistics(mock_results, "Zone1")
+                
+                # Test return types
+                @test stats_df isa DataFrame
+                @test timeseries_df isa DataFrame
+                @test !isempty(stats_df)
+                @test !isempty(timeseries_df)
+                
+                # Check required columns
+                @test "metric" in names(stats_df)
+                @test "parameter" in names(stats_df)
+                @test "value" in names(stats_df)
+                
+                @test "Time" in names(timeseries_df)
+                @test "Exchange" in names(timeseries_df)
+                @test "Lost_Load" in names(timeseries_df)
+                @test "Price" in names(timeseries_df)
+                
+                # Test Exchange statistics (should have real values now)
+                exchange_mean = filter(row -> row.metric == "mean" && row.parameter == "Exchange", stats_df)
+                @test nrow(exchange_mean) == 1
+                @test isfinite(exchange_mean[1, :value])
+                @test exchange_mean[1, :value] ≈ 125.0  # Mean of [100, 150, 120, 130]
+                
+                # Test that statistics match timeseries data
+                @test exchange_mean[1, :value] ≈ mean(timeseries_df.Exchange) atol=1e-10
+                
+                # Test Lost_Load statistics
+                ll_mean = filter(row -> row.metric == "mean" && row.parameter == "Lost_Load", stats_df)
+                @test nrow(ll_mean) == 1
+                @test ll_mean[1, :value] ≈ 1.25  # Mean of [0, 0, 5, 0]
+                
+                ll_count = filter(row -> row.metric == "count_positive" && row.parameter == "Lost_Load", stats_df)
+                @test nrow(ll_count) == 1
+                @test ll_count[1, :value] == 1.0  # Only 1 positive LL event in Zone1
+                
+                # Test Price statistics
+                price_mean = filter(row -> row.metric == "mean" && row.parameter == "Price", stats_df)
+                @test nrow(price_mean) == 1
+                @test price_mean[1, :value] ≈ 48.75  # Mean of [45, 52, 48, 50]
+                
+                # Test with Zone2
+                stats_df2, timeseries_df2 = get_market_statistics(mock_results, "Zone2")
+                @test !isempty(stats_df2)
+                @test !isempty(timeseries_df2)
+                
+                # Zone2 should have negative exchange (importing)
+                exchange_mean2 = filter(row -> row.metric == "mean" && row.parameter == "Exchange", stats_df2)
+                @test exchange_mean2[1, :value] ≈ -125.0
+                
+                # Zone2 has 2 positive LL events
+                ll_count2 = filter(row -> row.metric == "count_positive" && row.parameter == "Lost_Load", stats_df2)
+                @test ll_count2[1, :value] == 2.0
+            end
+        
+            @testset "Test with NodalMarket data" begin
+                # Test with nodal market (testcase_13 is NodalMarket_NoProsumer)
+                # Note: NodalMarket doesn't have ZonalMarketBalance, so it will return empty data
+                testcase_nodal = joinpath(expected_dir, "testcase_13_NodalMarket_NoProsumer")
+                
+                if isdir(testcase_nodal)
+                    results = DataFiles(testcase_nodal)
+                    
+                    if !isempty(results.params.sets.Z)
+                        zone = results.params.sets.Z[1]
+                        stats_df, timeseries_df = get_market_statistics(results, zone)
+                        
+                        # Should work with nodal market data
+                        @test isempty(stats_df)
+                        @test isempty(timeseries_df)
+
+                    end
+                end
+            end
+
+            @testset "Empty data handling" begin
+                # Test with non-existent zone (should filter to empty)
+                testcase_dir = joinpath(expected_dir, "testcase_1_ZonalMarket_NoProsumer")
+                
+                if isdir(testcase_dir)
+                    results = DataFiles(testcase_dir)
+                    
+                    # Test with non-existent zone
+                    fake_zone = "NONEXISTENT_ZONE_XYZ"
+                    
+                    # This should trigger the empty data warning
+                    stats_df, timeseries_df = get_market_statistics(results, fake_zone)
+                    
+                    # Should return empty DataFrames with correct structure
+                    @test stats_df isa DataFrame
+                    @test timeseries_df isa DataFrame
+                    
+                    # Check that empty dataframes have the expected columns
+                    @test "metric" in names(stats_df)
+                    @test "parameter" in names(stats_df)
+                    @test "value" in names(stats_df)
+                end
+            end
+        end
     end
 end
+

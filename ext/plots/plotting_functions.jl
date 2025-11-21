@@ -1267,3 +1267,209 @@ end
 
     return fig
 end
+
+"""
+    plot_market_statistics(results::DataFiles, zone::String="DE"; save_path=nothing)
+
+Create a comprehensive multi-panel visualization of market statistics for a specified zone.
+
+Generates a 3×3 grid figure displaying time series, distribution histograms, box plots, 
+and summary statistics for exchange flows, lost load events, and market prices. The 
+visualization provides both temporal dynamics and statistical distributions of key 
+market parameters.
+
+# Arguments
+- `results::DataFiles`: DataFiles object containing model results with EXCHANGE and ZonalMarketBalance data.
+- `zone::String="DE"`: Zone identifier for which to create visualizations. Defaults to "DE".
+- `save_path=nothing`: (keyword) Optional file path to save the figure (e.g., "market_stats.png"). 
+  If `nothing`, the figure is not saved to disk.
+
+# Plot Layout
+The figure consists of a 3×3 grid:
+
+**Row 1 - Time Series:**
+- Exchange flow over time (MW)
+- Lost Load events over time (MW)
+- Market prices over time (€/MWh)
+
+**Row 2 - Distributions:**
+- Exchange histogram with mean line
+- Lost Load histogram with mean line
+- Price histogram with mean line
+
+**Row 3 - Statistical Summary:**
+- Box plots of all three parameters (Z-score normalized for comparability)
+- Text summary panel with key statistics (mean, median, std, min, max, sum, event count)
+
+# Returns
+- `Figure`: A Makie Figure object (1800×1200 pixels) containing all visualization panels.
+
+# Notes
+- Time series use sequential indices to avoid gaps in visualization.
+- Box plots are Z-score normalized to enable comparison across different scales.
+- Colors are consistent across all panels: steelblue (Exchange), coral (Lost Load), 
+  mediumseagreen (Price).
+- If `save_path` is provided, the figure is saved and a confirmation message is printed.
+
+# Example
+```julia
+julia> results = DataFiles("path/to/results")
+
+# Display the figure interactively
+julia> fig = plot_market_statistics(results, "DE")
+
+# Save to file
+julia> fig = plot_market_statistics(results, "FR"; save_path="france_market_stats.png")
+Figure saved to: france_market_stats.png
+```
+"""
+function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; save_path=nothing)
+    
+    # Get statistics and time series
+    stats_df, timeseries_df = POMATWO.get_market_statistics(results, zone)
+    
+    # Sort by time to ensure proper plotting order
+    sort!(timeseries_df, :Time)
+    
+    # Create a sequential index for x-axis (avoids diagonal lines from time gaps)
+    time_index = 1:nrow(timeseries_df)
+    
+    # Create figure with 3x3 layout
+    fig = Figure(size=(1800, 1200), fontsize=14)
+    
+    # Define colors for consistency
+    colors = Dict(
+        "Exchange" => :steelblue,
+        "Lost_Load" => :coral,
+        "Price" => :mediumseagreen
+    )
+    
+    # Row 1: Time Series Plots
+    # Exchange time series
+    ax1 = Axis(fig[1, 1], 
+               xlabel="Time Step", 
+               ylabel="Exchange (MW)", 
+               title="$(zone) Exchange Over Time")
+    lines!(ax1, time_index, timeseries_df.Exchange, 
+           color=colors["Exchange"], linewidth=1)
+    hlines!(ax1, [0], color=:black, linestyle=:dash, linewidth=1)
+    
+    # Lost Load time series
+    ax2 = Axis(fig[1, 2], 
+               xlabel="Time Step", 
+               ylabel="Lost Load (MW)", 
+               title="$(zone) Lost Load Over Time")
+    lines!(ax2, time_index, timeseries_df.Lost_Load, 
+           color=colors["Lost_Load"], linewidth=1)
+    
+    # Price time series
+    ax3 = Axis(fig[1, 3], 
+               xlabel="Time Step", 
+               ylabel="Price (€/MWh)", 
+               title="$(zone) Market Price Over Time")
+    lines!(ax3, time_index, timeseries_df.Price, 
+           color=colors["Price"], linewidth=1)
+    
+    # Row 2: Distribution Plots (Histograms)
+    # Exchange distribution
+    ax4 = Axis(fig[2, 1], 
+               xlabel="Exchange (MW)", 
+               ylabel="Frequency", 
+               title="Exchange Distribution")
+    hist!(ax4, timeseries_df.Exchange, 
+          bins=50, color=(colors["Exchange"], 0.7))
+    vlines!(ax4, [mean(timeseries_df.Exchange)], 
+            color=:red, linestyle=:dash, linewidth=2, label="Mean")
+    axislegend(ax4, position=:rt)
+    
+    # Lost Load distribution
+    ax5 = Axis(fig[2, 2], 
+               xlabel="Lost Load (MW)", 
+               ylabel="Frequency", 
+               title="Lost Load Distribution")
+    hist!(ax5, timeseries_df.Lost_Load, 
+          bins=50, color=(colors["Lost_Load"], 0.7))
+    vlines!(ax5, [mean(timeseries_df.Lost_Load)], 
+            color=:red, linestyle=:dash, linewidth=2, label="Mean")
+    axislegend(ax5, position=:rt)
+    
+    # Price distribution
+    ax6 = Axis(fig[2, 3], 
+               xlabel="Price (€/MWh)", 
+               ylabel="Frequency", 
+               title="Price Distribution")
+    hist!(ax6, timeseries_df.Price, 
+          bins=50, color=(colors["Price"], 0.7))
+    vlines!(ax6, [mean(timeseries_df.Price)], 
+            color=:red, linestyle=:dash, linewidth=2, label="Mean")
+    axislegend(ax6, position=:rt)
+    
+    # Row 3: Box Plots and Summary Statistics
+    # Box plots
+    ax7 = Axis(fig[3, 1:2], 
+               xlabel="Parameter", 
+               ylabel="Standardized Value (Z-score)", 
+               title="Statistical Summary (Box Plots) - Z-score Normalized",
+               xticks=(1:3, ["Exchange", "Lost Load", "Price"]))
+    
+    # Normalize data for comparable visualization using Z-score normalization
+    # Z-score = (x - μ) / σ, where μ is mean and σ is standard deviation
+    # This transforms data to have mean=0 and std=1, making different scales comparable
+    # Interpretation: values show how many standard deviations away from the mean
+    exchange_norm = (timeseries_df.Exchange .- mean(timeseries_df.Exchange)) ./ std(timeseries_df.Exchange)
+    ll_norm = (timeseries_df.Lost_Load .- mean(timeseries_df.Lost_Load)) ./ std(timeseries_df.Lost_Load)
+    price_norm = (timeseries_df.Price .- mean(timeseries_df.Price)) ./ std(timeseries_df.Price)
+    
+    boxplot!(ax7, fill(1, length(exchange_norm)), exchange_norm, 
+             color=(colors["Exchange"], 0.7), width=0.5)
+    boxplot!(ax7, fill(2, length(ll_norm)), ll_norm, 
+             color=(colors["Lost_Load"], 0.7), width=0.5)
+    boxplot!(ax7, fill(3, length(price_norm)), price_norm, 
+             color=(colors["Price"], 0.7), width=0.5)
+    hlines!(ax7, [0], color=:black, linestyle=:dash, linewidth=1)
+    
+    # Summary statistics table
+    ax8 = Axis(fig[3, 3], 
+               title="Key Statistics Summary")
+    hidedecorations!(ax8)
+    hidespines!(ax8)
+    
+    # Create text summary
+    exchange_stats = filter(row -> row.parameter == "Exchange", stats_df)
+    ll_stats = filter(row -> row.parameter == "Lost_Load", stats_df)
+    price_stats = filter(row -> row.parameter == "Price", stats_df)
+    
+    summary_text = """
+    Exchange:
+      Mean: $(round(exchange_stats[exchange_stats.metric .== "mean", :value][1], digits=2)) MW
+      Median: $(round(exchange_stats[exchange_stats.metric .== "median", :value][1], digits=2)) MW
+      Std: $(round(exchange_stats[exchange_stats.metric .== "std", :value][1], digits=2)) MW
+      Sum: $(round(exchange_stats[exchange_stats.metric .== "sum", :value][1]/1000, digits=2)) GWh
+    
+    Lost Load:
+      Mean: $(round(ll_stats[ll_stats.metric .== "mean", :value][1], digits=2)) MW
+      Max: $(round(ll_stats[ll_stats.metric .== "max", :value][1], digits=2)) MW
+      Sum: $(round(ll_stats[ll_stats.metric .== "sum", :value][1]/1000, digits=2)) GWh
+      Events: $(Int(ll_stats[ll_stats.metric .== "count_positive", :value][1]))
+    
+    Price:
+      Mean: $(round(price_stats[price_stats.metric .== "mean", :value][1], digits=2)) €/MWh
+      Median: $(round(price_stats[price_stats.metric .== "median", :value][1], digits=2)) €/MWh
+      Min: $(round(price_stats[price_stats.metric .== "min", :value][1], digits=2)) €/MWh
+      Max: $(round(price_stats[price_stats.metric .== "max", :value][1], digits=2)) €/MWh
+    """
+    
+    text!(ax8, 0.1, 0.5, text=summary_text, align=(:left, :center), fontsize=12)
+    
+    # Add overall title
+    Label(fig[0, :], "Market Statistics Overview - Zone: $(zone)", 
+          fontsize=20, font=:bold)
+    
+    # Save if path provided
+    if !isnothing(save_path)
+        save(save_path, fig)
+        println("Figure saved to: $(save_path)")
+    end
+    
+    return fig
+end
