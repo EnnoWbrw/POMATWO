@@ -422,7 +422,7 @@ function get_market_statistics(results::DataFiles, zone::String="DE")
     stats_df = POMATWO.DataFrame(
         metric = String[],
         parameter = String[],
-        value = Union{Vector{Int64},Float64, Vector{Float64}}[]
+        value = Union{Int64, Vector{Int64},Float64, Vector{Float64}}[]
     )
     
     # Exchange statistics
