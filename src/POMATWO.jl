@@ -72,6 +72,8 @@ export load_data,
     load_data_with_report,
     get_errors,
     get_warnings,
-    get_notes
+    get_notes,
+    build_gsk,
+    zonal_ptdf
 
 end # module POMATWO
