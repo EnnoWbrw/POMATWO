@@ -90,8 +90,8 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
     bvector = Containers.DenseAxisArray(zeros(Float64, length(L)), L)
 
     for l in L
-        incidence[l, line_start[l]] = -1
-        incidence[l, line_end[l]] = 1
+        incidence[l, line_start[l]] = 1
+        incidence[l, line_end[l]] = -1
         if haskey(params.bvector, l)
             bvector[l] = params.bvector[l]
         else
@@ -101,8 +101,8 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
     end
 
     for dc in DC
-        dcincidence[dc, dc_start[dc]] = -1
-        dcincidence[dc, dc_end[dc]] = 1
+        dcincidence[dc, dc_start[dc]] = 1
+        dcincidence[dc, dc_end[dc]] = -1
     end
 
     h = bvector.data .* incidence.data
@@ -245,6 +245,53 @@ function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{S
     for l in eachindex(L), n in eachindex(N)
         params.ptdf[(L[l], N[n])] = ptdf[l, n]
     end
+end
+
+
+"""
+    zonal_ptdf(PTDF, GSK) -> Matrix
+
+Compute zonal PTDF (l×z) as PTDF(l×n) * GSK(n×z).
+
+Assumes that the columns of PTDF correspond to `nodes` in the same order
+used to build GSK.
+"""
+function zonal_ptdf(PTDF::AbstractMatrix, GSK::AbstractMatrix)
+    @assert size(PTDF, 2) == size(GSK, 1) "PTDF is l×n, GSK must be n×z"
+    PTDF * GSK
+end
+
+"""
+    zone_to_zone_ptdf(PTDFz; zones=nothing, exclude_self=true)
+
+Build the zone→zone PTDF for all ordered pairs (z_export, z_import).
+
+- `PTDFz` is l×z (from `zonal_ptdf`).
+- If `zones` is provided (vector of zone labels in the same order as PTDFz columns),
+  a tuple vector `pairs` of labels is returned alongside the matrix.
+- Returns `(PTDFzz, pairs)` where:
+   * `PTDFzz` is l×m with m = z*(z-1) if `exclude_self` (default), else z*z
+   * `pairs[k]` = (z_export, z_import) for column k
+"""
+function zone_to_zone_ptdf(PTDFz::AbstractMatrix; zones=nothing, exclude_self::Bool=true)
+    l, z = size(PTDFz)
+    m = exclude_self ? z*(z-1) : z*z
+    T = eltype(PTDFz)
+    M = Matrix{T}(undef, l, m)
+    pairs = Vector{Tuple}(undef, m)
+    k = 1
+    @inbounds for zi in 1:z          # importer
+        for zo in 1:z                # exporter
+            if exclude_self && zo == zi
+                continue
+            end
+            # column = PTDFz[:, importer] - PTDFz[:, exporter]
+            @views M[:, k] = PTDFz[:, zi] .- PTDFz[:, zo]
+            pairs[k] = zones === nothing ? (zo, zi) : (zones[zo], zones[zi])
+            k += 1
+        end
+    end
+    return M, pairs
 end
 
 function calc_mc!(params)

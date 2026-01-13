@@ -27,6 +27,7 @@ function plot_market_statistics end
 include("market_definitions.jl")
 include("model_structs.jl")
 include("data_report.jl")
+include("utils/GSK_strategies.jl")
 include("utils/data_load_utils.jl")
 include("utils/df_utils.jl")
 include("utils/time_utils.jl")
@@ -76,6 +77,12 @@ export load_data,
     get_notes,
     get_redispatch_by_type_node,
     get_market_statistics,
-    plot_market_statistics
+    plot_market_statistics,
+    build_gsk,
+    zonal_ptdf,
+    GSKStrategy,
+    FlatGSK,
+    GmaxGSK,
+    CustomWeightsGSK
 
 end # module POMATWO
