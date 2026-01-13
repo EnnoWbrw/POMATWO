@@ -26,6 +26,7 @@ function create_lineplot end
 include("market_definitions.jl")
 include("model_structs.jl")
 include("data_report.jl")
+include("utils/GSK_strategies.jl")
 include("utils/data_load_utils.jl")
 include("utils/df_utils.jl")
 include("utils/time_utils.jl")
@@ -74,6 +75,10 @@ export load_data,
     get_warnings,
     get_notes,
     build_gsk,
-    zonal_ptdf
+    zonal_ptdf,
+    GSKStrategy,
+    FlatGSK,
+    GmaxGSK,
+    CustomWeightsGSK
 
 end # module POMATWO

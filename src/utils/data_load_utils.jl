@@ -90,8 +90,8 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
     bvector = Containers.DenseAxisArray(zeros(Float64, length(L)), L)
 
     for l in L
-        incidence[l, line_start[l]] = -1
-        incidence[l, line_end[l]] = 1
+        incidence[l, line_start[l]] = 1
+        incidence[l, line_end[l]] = -1
         if haskey(params.bvector, l)
             bvector[l] = params.bvector[l]
         else
@@ -101,8 +101,8 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
     end
 
     for dc in DC
-        dcincidence[dc, dc_start[dc]] = -1
-        dcincidence[dc, dc_end[dc]] = 1
+        dcincidence[dc, dc_start[dc]] = 1
+        dcincidence[dc, dc_end[dc]] = -1
     end
 
     h = bvector.data .* incidence.data
@@ -245,103 +245,6 @@ function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{S
     for l in eachindex(L), n in eachindex(N)
         params.ptdf[(L[l], N[n])] = ptdf[l, n]
     end
-end
-
-"""
-    build_gsk(params; node_order=nothing, zone_order=nothing, weights=:flat, normalize_empty=:zero)
-
-Construct a Generation Shift Key matrix G (n×z) that maps zonal net injections to nodal injections.
-
-- `params` must contain `sets.N` (nodes), `sets.Z` (zones) and `node2zone` mappings.
-- `node_order` (Vector) controls the node order used for columns of PTDF(l×n). 
-   If `nothing`, a stable default is used (sorted nodes).
-- `zone_order` (Vector) controls the zone columns order of G; default = sorted zones.
-- `weights`:
-    * `:flat` → equal split within each zone
-    * `:gmax` → proportional to available capacity per node (sum of `g_max` of plants at that node)
-      (uses `params.plant2node` and `params.gmax`)
-    * or a numeric vector of length n (precomputed nodal weights)
-- `normalize_empty` for zones with zero total weight:
-    * `:zero` → column of zeros
-    * `:flat` → uniform across members of that zone
-
-Returns `(G::Matrix{Float64}, node_order::Vector, zone_order::Vector)`.
-Column sums of G are 1 (except empty zones when `:zero`).
-"""
-function build_gsk(params;
-                   node_order::Union{Nothing,AbstractVector}=nothing,
-                   zone_order::Union{Nothing,AbstractVector}=nothing,
-                   weights::Union{Symbol,AbstractVector}=:flat,
-                   normalize_empty::Symbol=:zero)
-
-    # --- choose a deterministic order that matches calc_PTDF ---
-    nodes = node_order === nothing ? sort!(collect(params.sets.N)) : collect(node_order)
-    zones = zone_order === nothing ? sort!(collect(params.sets.Z)) : collect(zone_order)
-
-    n = length(nodes)
-    z = length(zones)
-
-    # map zone label -> 1..z
-    zidx = Dict(zones[i] => i for i in 1:z)
-
-    # node_to_zone index vector aligned with `nodes`
-    node_to_zone = Vector{Int}(undef, n)
-    for (i, nlabel) in enumerate(nodes)
-        zlabel = params.node2zone[nlabel]  # zone label from data loading
-        @assert haskey(zidx, zlabel) "Zone $(zlabel) of node $(nlabel) not found in zone_order"
-        node_to_zone[i] = zidx[zlabel]
-    end
-
-    # --- build nodal weights ---
-    w = zeros(Float64, n)
-
-    if weights === :flat
-        w .= 1.0
-    elseif weights === :gmax
-        # sum of g_max per node via plant mapping
-        # (params.plant2node :: Dict{plant => node}, params.gmax :: Dict{plant => Float64})
-        nodemap = Dict(nlabel => 0.0 for nlabel in nodes)
-        for (p, node_lbl) in params.plant2node
-            if haskey(nodemap, node_lbl) && haskey(params.gmax, p)
-                nodemap[node_lbl] += params.gmax[p]
-            end
-        end
-        for (i, nlabel) in enumerate(nodes)
-            w[i] = nodemap[nlabel]
-        end
-    elseif weights isa AbstractVector
-        @assert length(weights) == n "custom weights must have length n"
-        w .= Float64.(weights)
-    else
-        error("`weights` must be :flat, :gmax, or a numeric vector")
-    end
-
-    # --- aggregate per zone and normalize ---
-    sums   = zeros(Float64, z)
-    counts = zeros(Int, z)
-    @inbounds for i in 1:n
-        j = node_to_zone[i]
-        sums[j]   += w[i]
-        counts[j] += 1
-    end
-
-    G = zeros(Float64, n, z)
-    @inbounds for i in 1:n
-        j = node_to_zone[i]
-        if sums[j] > 0
-            G[i, j] = w[i] / sums[j]
-        else
-            if normalize_empty === :flat
-                G[i, j] = counts[j] == 0 ? 0.0 : 1.0 / counts[j]
-            elseif normalize_empty === :zero
-                G[i, j] = 0.0
-            else
-                error("normalize_empty must be :zero or :flat")
-            end
-        end
-    end
-
-    return G, nodes, zones
 end
 
 

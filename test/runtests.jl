@@ -50,8 +50,10 @@ end
     include(joinpath("test_cases", "test_network_validation.jl"))
     include(joinpath("test_cases", "test_ptdf_omission.jl"))
     include(joinpath("test_cases", "test_data_load_validations.jl"))
+    include(joinpath("test_cases", "test_zonal_ptdf.jl"))
     test_data_load()
     test_model_creation()
     test_data_reporting()
+    test_zonal_ptdf()
 end
  
