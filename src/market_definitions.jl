@@ -20,7 +20,24 @@ abstract type ExchangeFormulation end
 Net Transfer Capacity formulation. Represents fixed interzonal capacity limits.
 """
 struct NTC <: ExchangeFormulation end
-struct FlowBased <: ExchangeFormulation end
+
+"""
+    FlowBased <: ExchangeFormulation
+
+Flow-based market coupling formulation.
+
+# Fields
+- `GSKStrategy::GSKStrategy`: Generation Shift Key strategy (defaults to `FlatGSK()`).
+
+# Constructors
+- `FlowBased()`: Uses `FlatGSK()` as default.
+- `FlowBased(strategy::GSKStrategy)`: Uses provided GSK strategy.
+"""
+struct FlowBased <: ExchangeFormulation 
+    GSKStrategy::GSKStrategy
+end
+
+FlowBased() = FlowBased(FlatGSK())
 
 ### MarketTypes
 """
@@ -45,15 +62,22 @@ Zonal market definition parameterized by an exchange formulation.
 
 # Fields
 - `XF`: Type of the exchange formulation, e.g., `NTC` or `FlowBased`.
+- `exchange_formulation`: Instance of the exchange formulation (for accessing configuration like GSKStrategy).
 
 # Constructors
-- `ZonalMarket()`: Uses `NTC` as default.
-- `ZonalMarket(XF::Type{<:ExchangeFormulation})`: Specify exchange formulation type.
+- `ZonalMarket()`: Uses `NTC()` as default.
+- `ZonalMarket(FlowBased())`: Uses provided FlowBased instance with custom GSKStrategy.
 """
-struct ZonalMarket{XF<:ExchangeFormulation} <: ZonalMarketType end
+struct ZonalMarket{XF<:ExchangeFormulation} <: ZonalMarketType
+    exchange_formulation::XF
+    
+    # Inner constructor
+    ZonalMarket{XF}(xf::XF) where {XF<:ExchangeFormulation} = new{XF}(xf)
+end
 
-ZonalMarket() = ZonalMarket{NTC}()
-ZonalMarket(::Type{XF}) where {XF<:ExchangeFormulation} = ZonalMarket{XF}()
+# Outer constructors
+ZonalMarket() = ZonalMarket{NTC}(NTC())
+ZonalMarket(xf::XF) where {XF<:ExchangeFormulation} = ZonalMarket{XF}(xf)
 
 abstract type NodalMarketType <: MarketType end
 
@@ -176,10 +200,18 @@ Represents the day-ahead market stage.
 
 # Fields
 - `Time::UnitRange{Int}`: Time horizon covered by the day-ahead market model.
+- `fbmc_params::Union{Dict,Nothing}`: Optional flow-based market coupling parameters (only used for FlowBased exchange formulation).
+
+# Constructors
+- `DayAhead(T::UnitRange{Int})`: Creates DayAhead without fbmc_params (for NTC and other formulations).
+- `DayAhead(T::UnitRange{Int}, fbmc_params::Dict)`: Creates DayAhead with fbmc_params (for FlowBased formulation).
 """
 struct DayAhead <: MarketState
     Time::UnitRange{Int}
+    fbmc_params::Union{Dict,Nothing}
 end
+
+DayAhead(T::UnitRange{Int}) = DayAhead(T, nothing)
 
 """
     ProsumerOptimizationState <: MarketState
@@ -207,4 +239,14 @@ Represents the redispatch stage after the day-ahead market.
 struct Redispatch <: MarketState
     Time::UnitRange{Int}
     da_market_result::Dict
+end
+
+"""
+    TwoDayAhead <: MarketState
+Represents a two-day-ahead market stage. Also referred to as base-case for flow-based markets.
+# Fields
+- `Time::UnitRange{Int}`: Time horizon for the two-day-ahead market.
+"""
+struct TwoDayAhead <: MarketState
+    Time::UnitRange{Int}
 end

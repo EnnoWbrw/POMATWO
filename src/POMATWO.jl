@@ -1,6 +1,7 @@
 module POMATWO
 import MathOptInterface as MOI
 using JuMP,
+    JuMP.Containers,
     DataFrames,
     DataFramesMeta,
     Dates,
@@ -24,10 +25,11 @@ function plot_total_gen_interactive end
 function create_lineplot end
 function plot_market_statistics end
 
+include("utils/GSK_strategies.jl")
 include("market_definitions.jl")
 include("model_structs.jl")
 include("data_report.jl")
-include("utils/GSK_strategies.jl")
+include("utils/fbmc_utils.jl")
 include("utils/data_load_utils.jl")
 include("utils/df_utils.jl")
 include("utils/time_utils.jl")
@@ -58,6 +60,7 @@ export load_data,
     PhaseAngle,
     ExchangeFormulation,
     NTC,
+    FlowBased,
     optimizer_with_attributes,
     MOI,
     summarize_result,
@@ -83,6 +86,7 @@ export load_data,
     GSKStrategy,
     FlatGSK,
     GmaxGSK,
+    DispOnlyGSK,
     CustomWeightsGSK
 
 end # module POMATWO

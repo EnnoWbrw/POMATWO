@@ -42,6 +42,9 @@ struct CustomWeightsGSK <: GSKStrategy
     weights::Vector{Float64}
 end
 
+struct DispOnlyGSK <: GSKStrategy
+end
+
 # ==================== Weight Computation Dispatch ====================
 
 """
@@ -73,6 +76,27 @@ function compute_nodal_weights(strategy::GmaxGSK, params, nodes)
     return weights
 end
 
+
+function compute_nodal_weights(strategy::DispOnlyGSK, params, nodes)
+    n = length(nodes)
+    weights = zeros(Float64, n)
+    
+    # Aggregate g_max per node
+    nodemap = Dict(nlabel => 0.0 for nlabel in nodes)
+    for (p, node_lbl) in params.plant2node
+        if haskey(nodemap, node_lbl) && haskey(params.gmax, p) && (p in params.sets.DISP)
+            nodemap[node_lbl] += params.gmax[p]
+        end
+    end
+    
+    for (i, nlabel) in enumerate(nodes)
+        weights[i] = nodemap[nlabel]
+    end
+    
+    return weights
+end
+
+
 function compute_nodal_weights(strategy::CustomWeightsGSK, params, nodes)
     n = length(nodes)
     @assert length(strategy.weights) == n "Custom weights must have length n=$n, got $(length(strategy.weights))"
@@ -102,21 +126,22 @@ Construct a Generation Shift Key matrix G (n×z) that maps zonal net injections 
   * `:flat` → uniform distribution across zone members
 
 # Returns
-- `G::Matrix{Float64}`: GSK matrix (n×z) where column sums are 1 (or 0 for empty zones)
-- `nodes::Vector{String}`: Node labels in matrix row order
-- `zones::Vector{String}`: Zone labels in matrix column order
+- `G::DenseAxisArray{Float64,2}`: GSK matrix (n×z) indexed by nodes and zones, where column sums are 1 (or 0 for empty zones)
 
 # Examples
 ```julia
 # Equal distribution
-G, nodes, zones = build_gsk(params, FlatGSK())
+G = build_gsk(params, FlatGSK())
 
 # Capacity-weighted
-G, nodes, zones = build_gsk(params, GmaxGSK())
+G = build_gsk(params, GmaxGSK())
 
 # Custom weights
 custom_w = [0.5, 0.3, 0.2]
-G, nodes, zones = build_gsk(params, CustomWeightsGSK(custom_w))
+G = build_gsk(params, CustomWeightsGSK(custom_w))
+
+# Access by label
+G["node1", "zone1"]
 ```
 """
 function build_gsk(params, strategy::GSKStrategy=FlatGSK();
@@ -142,9 +167,12 @@ function build_gsk(params, strategy::GSKStrategy=FlatGSK();
     end
     
     # Delegate to strategy-specific method
-    G = build_gsk_matrix(strategy, params, nodes, zones, node_to_zone, normalize_empty)
+    G_matrix = build_gsk_matrix(strategy, params, nodes, zones, node_to_zone, normalize_empty)
     
-    return G, nodes, zones
+    # Convert to DenseAxisArray
+    G = Containers.DenseAxisArray(G_matrix, nodes, zones)
+    
+    return G
 end
 
 """

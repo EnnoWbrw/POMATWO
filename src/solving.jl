@@ -153,3 +153,54 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptim
         finish!(prog, desc = "Subrun -> Done")
     end
 end
+
+"""
+    _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsumer, RD<:RedispatchType}
+
+Runs the market simulation for flow-based zonal markets with redispatch and no prosumer optimization.
+Performs TwoDayAhead basecase optimization, calculates FBMC parameters, then day-ahead and redispatch optimization, storing results for each time split.
+"""
+function _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsumer, RD<:RedispatchType}
+    for T in split(mr.setup.TimeHorizon)
+        @info "Starting subrun for period from $(T[1]) to $(T[end])"
+        # Basecase / TwoDayAhead optimization
+        prog = ProgressUnknown(desc = "TwoDayAhead - Basecase", spinner = true, dt = 0.1)
+        market_state = TwoDayAhead(T)
+        ProgressMeter.update!(prog, desc = "TwoDayAhead -> Building Model")
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "TwoDayAhead -> Optimizing")
+        @suppress optimize!(sr)
+        ProgressMeter.update!(prog, desc = "TwoDayAhead -> Fetching Results")
+        fetch_results(sr)
+        write_results_2DA(sr)
+        TwoDayAhead_results = prev_results_for_fbmc(sr)
+        # Calculate FBMC parameters from TwoDayAhead basecase
+        fbmc_params = calc_fbmc_params(sr,mr.params, TwoDayAhead_results)
+        @show fbmc_params
+        # Zonal flow-based market optimization
+        ProgressMeter.update!(prog, desc = "DayAhead -> Building Model")
+        market_state = DayAhead(T, fbmc_params)
+
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
+        @suppress optimize!(sr)
+        ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
+        fetch_results(sr)
+        write_results(sr)
+        da_results = prev_results_for_redispatch(sr)
+        # Redispatch optimization
+        ProgressMeter.update!(prog, desc = "Redispatch -> Building Model")
+        market_state = Redispatch(T, da_results)
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "Redispatch -> Optimizing")
+        @suppress optimize!(sr)
+        ProgressMeter.update!(prog, desc = "Redispatch -> Fetching Results")
+        if termination_status(sr.optigraph) != MOI.OPTIMAL
+            @show termination_status(sr.optigraph)
+        end
+        fetch_results(sr)
+        write_results(sr)
+        finish!(prog, desc = "Subrun -> Done")
+    end
+end
+

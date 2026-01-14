@@ -748,6 +748,11 @@ function add_ntc!(params::Parameters, df_ntc::AbstractDataFrame, report::DataRep
     for row in eachrow(df_ntc)
         i, j = row[:zone_i], row[:zone_j]
         push!(params.sets.NTC, (i, j))
+        if :ntc ∉ names(row) || ismissing(row[:ntc])
+            add_warning!(report, "incomplete_data", 
+                        "Skipping NTC row with missing ntc value", location)
+            continue
+        end
         params.ntc[i, j] = row[:ntc]
     end
 end

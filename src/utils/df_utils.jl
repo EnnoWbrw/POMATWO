@@ -214,3 +214,15 @@ function prev_results_for_redispatch(sr::SubRun)
         :sto_charge => value.(d[:sto][:CHARGE]),
     )
 end
+
+function prev_results_for_fbmc(sr::SubRun)
+    d = sr.vars
+
+    return Dict(
+        :disp_generation => value.(d[:disp][:GEN]),
+        :ndisp_cu => value.(d[:ndisp][:CU]),
+        :sto_generation => value.(d[:sto][:GEN]),
+        :sto_charge => value.(d[:sto][:CHARGE]),
+        :lineflows => value.(d[:network][:LINEFLOW]),
+    )
+end

@@ -37,6 +37,28 @@ function write_results(sr::SubRun; format = "arrow")
     end
 end
 
+function write_results_2DA(sr::SubRun; format = "arrow")
+    scen_dir = sr.modelrun.scen_dir
+    t1, tend = sr.market_state.Time[[1, end]]
+    sr_dir = mkpath(joinpath(scen_dir, "subrun_t$(t1)-t$(tend)"))
+
+    for (varname, df) in sr.results
+
+        filename = joinpath(sr_dir, "2DA" * string(varname) * "." * format)
+
+        if format == "arrow"
+            try
+                Arrow.write(filename, df)
+            catch e
+                @error "Could not write Arrow file" first(df, 25)
+            end
+        elseif format == "csv"
+            CSV.write(filename, df)
+        end
+    end
+end
+
+
 
 function add_module!(m::OptiGraph, label::String)
     n = OptiNode()

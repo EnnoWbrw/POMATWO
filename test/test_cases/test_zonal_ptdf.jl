@@ -1,6 +1,3 @@
-using Test
-using POMATWO
-
 # Helper to create minimal params for GSK testing
 function create_gsk_test_params(nodes::Vector{String}, zones::Vector{String}, node_zone_map::Dict{String,String})
     # Create Parameters directly with node2zone field populated
