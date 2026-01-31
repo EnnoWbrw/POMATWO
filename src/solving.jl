@@ -176,7 +176,6 @@ function _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsume
         TwoDayAhead_results = prev_results_for_fbmc(sr)
         # Calculate FBMC parameters from TwoDayAhead basecase
         fbmc_params = calc_fbmc_params(sr,mr.params, TwoDayAhead_results)
-        @show fbmc_params
         # Zonal flow-based market optimization
         ProgressMeter.update!(prog, desc = "DayAhead -> Building Model")
         market_state = DayAhead(T, fbmc_params)
