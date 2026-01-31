@@ -46,7 +46,7 @@ This struct supports keyword-based construction using default values where provi
 ```julia
 ModelSetup(;
     TimeHorizon = TimeHorizon(; offset = 0, split = 24, stop = 48),
-    MarketType = NodalMarketh(PhaseAngle),
+    MarketType = NodalMarket(PhaseAngle),
     ProsumerSetup = NoProsumer(),
     RedispatchSetup = NoRedispatch(),
     
