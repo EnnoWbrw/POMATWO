@@ -25,7 +25,7 @@ params = load_data(data_files)
 scen_name = "3_nodes"
 
 # define output path for data transfer
-output_path = "results/"
+output_path = "results_example"
 
 ### Defining a test setup for a model run that stops after 4 timesteps
 setup = ModelSetup(;
@@ -38,7 +38,7 @@ setup = ModelSetup(;
 
 solver = HiGHS.Optimizer
 
-mr = ModelRun(params, setup, solver; scenarioname = "3_nodes",overwrite=true )
+mr = ModelRun(params, setup, solver; scenarioname = scen_name, resultdir = output_path)
 
 POMATWO.run(mr)
 

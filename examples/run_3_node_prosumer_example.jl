@@ -25,8 +25,6 @@ params = load_data(data_files)
 # set scenario name 
 scen_name = "3_nodes_prosumer"
 
-# define output path for data transfer
-output_path = "results/"
 
 ### Defining a test setup for a model run that stops after 4 timesteps
 setup = ModelSetup(;
