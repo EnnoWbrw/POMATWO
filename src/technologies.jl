@@ -962,9 +962,16 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     # Flow-based constraints: for each line, the zonal exchange weighted by PTDF must respect RAM
     @constraint(
         m, 
-        FBMC[l = L, t = T], 
-        sum(fbmc_params[:PTDFz][l, z] * EXCHANGE[z, t] for z in Z) <= fbmc_params[:RAM][l]
+        FBMC_pos[l = L, t = T], 
+        sum(fbmc_params[:PTDFz][l, z] * EXCHANGE[z, t] for z in Z) <= fbmc_params[:RAM][l] 
     )
+
+        @constraint(
+        m, 
+        FBMC_neg[l = L, t = T], 
+       - sum(fbmc_params[:PTDFz][l, z] * EXCHANGE[z, t] for z in Z) <= fbmc_params[:RAM][l] 
+    )
+
 
     ### to dataframe
     df_ntc(sr.results)
