@@ -28,12 +28,16 @@ function all_setups()
     [(mt, ps, rd, th) for mt in market_types for rd in redispatch_setups for ps in prosumer_setups for th in timehorizons]
 end
 
-function compare_dataframes(df_actual, df_expected; atol=1e-6)
+function compare_dataframes(df_actual, df_expected; atol=1e-6, show = false)
     @test size(df_actual) == size(df_expected)
     for col in names(df_expected)
         @test col in names(df_actual)
         if eltype(df_expected[!, col]) <: AbstractFloat
             @test all(abs.(df_actual[!, col] .- df_expected[!, col]) .<= atol)
+            if show
+                @show df_actual[!, col]
+                @show df_expected[!, col]
+            end
         else
             @test df_actual[!, col] == df_expected[!, col]
         end
@@ -76,21 +80,51 @@ function test_model_creation()
                         expected_dir = joinpath(@__DIR__, "expected_results")
                         results_expected = DataFiles(joinpath(expected_dir, scenarioname))
                         @testset "Compare results for $scenarioname" begin
-                        compare_dataframes(results_actual.GEN, results_expected.GEN)
-                        compare_dataframes(results_actual.REDISP, results_expected.REDISP)
-                        compare_dataframes(results_actual.CHARGE, results_expected.CHARGE)
-                        compare_dataframes(results_actual.EXCHANGE, results_expected.EXCHANGE)
-                        compare_dataframes(results_actual.FEEDIN, results_expected.FEEDIN)
-                        compare_dataframes(results_actual.PRS, results_expected.PRS)
-                        compare_dataframes(results_actual.LINEFLOW, results_expected.LINEFLOW)
-                        compare_dataframes(results_actual.DCLINEFLOW, results_expected.DCLINEFLOW)
-                        compare_dataframes(results_actual.NETINPUT, results_expected.NETINPUT)
-                        compare_dataframes(results_actual.NTC, results_expected.NTC)
-                        compare_dataframes(results_actual.STO_LVL, results_expected.STO_LVL)
-                        compare_dataframes(results_actual.STO_LVL_REDISP, results_expected.STO_LVL_REDISP)
-                        compare_dataframes(results_actual.ZonalMarketBalance, results_expected.ZonalMarketBalance)
-                        compare_dataframes(results_actual.NodalMarketBalance, results_expected.NodalMarketBalance)
-                        compare_dataframes(results_actual.NodalMarketRedispBalance, results_expected.NodalMarketRedispBalance)
+                            @testset "GEN" begin
+                                compare_dataframes(results_actual.GEN, results_expected.GEN)
+                            end
+                            @testset "REDISP" begin
+                                compare_dataframes(results_actual.REDISP, results_expected.REDISP)
+                            end
+                            @testset "CHARGE" begin
+                                compare_dataframes(results_actual.CHARGE, results_expected.CHARGE)
+                            end
+                            @testset "EXCHANGE" begin
+                                compare_dataframes(results_actual.EXCHANGE, results_expected.EXCHANGE)
+                            end
+                            @testset "FEEDIN" begin
+                                compare_dataframes(results_actual.FEEDIN, results_expected.FEEDIN)
+                            end
+                            @testset "PRS" begin
+                                compare_dataframes(results_actual.PRS, results_expected.PRS)
+                            end
+                            @testset "LINEFLOW" begin
+                                compare_dataframes(results_actual.LINEFLOW, results_expected.LINEFLOW)
+                            end
+                            @testset "DCLINEFLOW" begin
+                                compare_dataframes(results_actual.DCLINEFLOW, results_expected.DCLINEFLOW)
+                            end
+                            @testset "NETINPUT" begin
+                                compare_dataframes(results_actual.NETINPUT, results_expected.NETINPUT; show=true)
+                            end
+                            @testset "NTC" begin
+                                compare_dataframes(results_actual.NTC, results_expected.NTC)
+                            end
+                            @testset "STO_LVL" begin
+                                compare_dataframes(results_actual.STO_LVL, results_expected.STO_LVL)
+                            end
+                            @testset "STO_LVL_REDISP" begin
+                                compare_dataframes(results_actual.STO_LVL_REDISP, results_expected.STO_LVL_REDISP)
+                            end
+                            @testset "ZonalMarketBalance" begin
+                                compare_dataframes(results_actual.ZonalMarketBalance, results_expected.ZonalMarketBalance)
+                            end
+                            @testset "NodalMarketBalance" begin
+                                compare_dataframes(results_actual.NodalMarketBalance, results_expected.NodalMarketBalance)
+                            end
+                            @testset "NodalMarketRedispBalance" begin
+                                compare_dataframes(results_actual.NodalMarketRedispBalance, results_expected.NodalMarketRedispBalance)
+                            end
                         end
                     end
                     end

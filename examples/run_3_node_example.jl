@@ -17,9 +17,9 @@ data_files= Dict{Symbol,String}(
 #plot_network(dataCS)
 
 # load input data
-params = load_data(data_files)
+params, report = load_data_with_report(data_files)
 
-
+print_report(report)
 
 # set scenario name 
 scen_name = "3_nodes"
@@ -29,7 +29,6 @@ output_path = "results_example"
 
 ### Defining a test setup for a model run that stops after 4 timesteps
 setup = ModelSetup(;
-    Scenario = "TestSetup",
     TimeHorizon = TimeHorizon(stop = 4),
     MarketType = ZonalMarket(),
     ProsumerSetup = NoProsumer(),

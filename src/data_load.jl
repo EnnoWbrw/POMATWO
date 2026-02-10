@@ -460,28 +460,51 @@ function add_lines!(params::Parameters, df_lines::AbstractDataFrame, report::Dat
             params.circuits[row[:index]] = 1
         end
 
+        # Check what parameters are available
+        has_impedance_pu = haskey(row, :x_pu) && haskey(row, :r_pu)
+        has_impedance_abs = haskey(row, :x) && haskey(row, :r)
+        has_susceptance_pu = haskey(row, :b_pu)
+        has_susceptance_abs = haskey(row, :b)
+        has_voltage = haskey(row, :voltage)
+
+        # Check if any line parameters are provided
+        has_any_params = has_impedance_pu || has_impedance_abs || has_susceptance_pu || has_susceptance_abs
+        
+        if !has_any_params
+            add_error!(report, "missing_line_parameters",
+                      "Line $(row[:index]) has no power line parameters (x_pu & r_pu, or x & r, or b_pu, or b)", location)
+        end
+
+        # Check if voltage is required but missing
+        needs_voltage = (has_impedance_abs || has_susceptance_abs) && !has_voltage
+        if needs_voltage
+            add_error!(report, "missing_voltage",
+                      "Line $(row[:index]) has absolute parameters (x, r, or b) but voltage is missing", location)
+        end
+
         # Handle impedance parameters (resistance and reactance)
-        if haskey(row, :x_pu) && haskey(row, :r_pu)
-            params.resistance[row[:index]] = row[:r_pu]
-            params.reactance[row[:index]] = row[:x_pu]
-        elseif haskey(row, :x) && haskey(row, :r) && haskey(row, :voltage)
+        if has_impedance_pu
+            params.resistance[row[:index]] = row[:r_pu] / params.circuits[row[:index]]
+            params.reactance[row[:index]] = row[:x_pu] / params.circuits[row[:index]]
+        elseif has_impedance_abs && has_voltage
             params.resistance[row[:index]] =
                 row[:r] / zbase(row[:voltage]) / params.circuits[row[:index]]
             params.reactance[row[:index]] =
                 row[:x] / zbase(row[:voltage]) / params.circuits[row[:index]]
-        else
-            # Only error if neither per-unit nor absolute impedance values are available
-            if !haskey(row, :b)
-                add_warning!(report, "missing_line_parameters",
-                          "Line $(row[:index]) missing impedance parameters (x_pu & r_pu) or (x & r & voltage)", location)
-            end
         end
 
-        # Handle susceptance separately (can coexist with impedance)
-        if haskey(row, :b) && params.resistance[row[:index]] !== nothing && params.reactance[row[:index]] !== nothing
-            params.bvector[row[:index]] = row[:b]
+        # Handle susceptance parameters
+        if has_susceptance_pu
+            params.bvector[row[:index]] = row[:b_pu] * params.circuits[row[:index]]
+        elseif has_susceptance_abs && has_voltage
+            params.bvector[row[:index]] = row[:b] * zbase(row[:voltage]) * params.circuits[row[:index]]
+        end
+
+        # Warn if both impedance and susceptance are defined
+        if (has_impedance_pu || (has_impedance_abs && has_voltage)) && 
+           (has_susceptance_pu || (has_susceptance_abs && has_voltage))
             add_warning!(report, "line_parameters",
-                      "Line $(row[:index]) has susceptance 'b' defined along with impedance; ensure consistency. only susceptance 'b' will be used", location)
+                      "Line $(row[:index]) has both impedance (x, r) and susceptance (b) defined; ensure consistency. Only susceptance will be used", location)
         end
 
         if haskey(row, :voltage)
