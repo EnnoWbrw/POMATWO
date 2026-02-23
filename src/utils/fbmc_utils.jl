@@ -63,6 +63,106 @@ function zone_to_zone_ptdf(PTDFz::DenseAxisArray; exclude_self::Bool=true)
     return PTDFzz
 end
 
+
+
+"""
+    define_cne(params::Parameters, PTDFzz::DenseAxisArray; threshold::Float64=0.05)
+
+Identify Critical Network Elements (CNE) based on zone-to-zone PTDF values and store results in params.
+
+Filters the zone-to-zone PTDF matrix to retain only lines with absolute PTDF values 
+above the specified threshold for each zone pair. The cne_indicator results are saved
+to params.cne_indicator as a dictionary indexed by (line, (zone_export, zone_import)).
+
+# Arguments
+- `params::Parameters`: Parameters object where cne_indicator will be stored
+- `PTDFzz`: DenseAxisArray from `zone_to_zone_ptdf` (lines × zone pairs)
+- `threshold`: Absolute value threshold for PTDF selection (default 0.05)
+
+# Returns
+- `CNE`: DenseAxisArray with entries below threshold zeroed out
+
+# Side Effects
+- Updates `params.cne_indicator` with binary indicators (1 if above threshold, 0 otherwise)
+
+# Example
+```julia
+PTDFzz = zone_to_zone_ptdf(PTDFz)
+CNE = define_cne!(params, PTDFzz; threshold=0.05)
+```
+"""
+function define_cne(params::Parameters, PTDFzz::DenseAxisArray; threshold::Float64=0.05)
+    lines = axes(PTDFzz, 1)
+    pairs = axes(PTDFzz, 2)
+    
+    # Create a copy to avoid modifying original
+    CNE = Containers.DenseAxisArray(copy(PTDFzz.data), lines, pairs)
+    
+    # Zero out all entries with absolute value below threshold
+    CNE.data[abs.(CNE.data) .< threshold] .= 0
+    
+    # Store binary indicator matrix in params: 1 if above threshold, 0 otherwise
+    for (i, line) in enumerate(lines)
+        for (j, pair) in enumerate(pairs)
+            indicator = abs(PTDFzz.data[i, j]) >= threshold ? 1 : 0
+            params.cne_indicator[line, pair] = indicator
+        end
+    end
+    
+    return CNE
+end
+
+
+"""
+    calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFzz::DenseAxisArray)
+
+Build Reserve Available Margin (RAM) for transmission lines.
+
+For non-CNE lines, RAM equals the line capacity from params. For CNE lines, RAM is the maximum of:
+1. 70% of line capacity, or
+2. Line capacity minus current lineflow.
+
+# Arguments
+- `params::Parameters`: Parameters object containing acline_capacity and cne_indicator
+- `TwoDayAhead_results::Dict`: Results dictionary with :lineflows key containing lineflow data
+- `PTDFzz::DenseAxisArray`: Zone-to-zone PTDF matrix (lines × zone pairs)
+
+# Returns
+- `ram::Dict{String,Float64}`: Dictionary mapping line names to their RAM values
+"""
+function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFzz::DenseAxisArray)
+    lines = axes(PTDFzz, 1)
+    pairs = axes(PTDFzz, 2)
+    
+    # Initialize RAM dictionary
+    ram = Dict{String,Float64}()
+    
+    # Get lineflows from TwoDayAhead_results
+    lineflows = TwoDayAhead_results[:lineflows]
+    
+    # Process each line
+    for (i, line) in enumerate(lines)
+        # Check if this line is a CNE (any 1 in its row)
+        is_cne = any(get(params.cne_indicator, (line, pair), 0) == 1 for pair in pairs)
+        
+        # Get capacity from params
+        capacity = get(params.acline_capacity, line, 0.0)
+        
+        if is_cne
+            # For CNE lines: max of 70% capacity or (capacity - lineflow)
+            flow = abs(get(lineflows, line, 0.0))
+            option1 = 0.7 * capacity
+            option2 = capacity - flow
+            ram[line] = max(option1, option2)
+        else
+            # For non-CNE lines: full capacity
+            ram[line] = capacity
+        end
+    end   
+    return ram
+end
+
+
 function dict_to_matrix(d::Dict{Tuple{String, String}, Float64})
     # Extract unique row and column keys
     rows = sort(unique([k[1] for k in keys(d)]))
@@ -105,13 +205,6 @@ Calculate FBMC parameters: GSK, PTDFn, PTDFz, PTDFzz.
     * `:PTDFzz` => Zone-to-zone PTDF matrix (l×m)
     * `:RAM` => Dict mapping lines to remaining available margin
 """
-
-function  calc_ram(params, TwoDayAhead_result, PTDFzz)
-    # Placeholder RAM calculation
-    # In practice, this would involve detailed calculations based on network data
-    return Dict(zip(params.sets.L,[22, 32, 28]))   # Example fixed RAM factor
-end
-
 function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Dict ; zone_order=nothing, normalize_empty::Symbol=:flat)
     # Extract GSKStrategy from the market setup
     market_type = sr.modelrun.setup.MarketType

@@ -18,6 +18,10 @@ using JuMP,
     Statistics,
     LinearAlgebra
 
+# Fix for Plasmo 0.5.4 compatibility with JuMP 1.27+
+# Tell JuMP what variable reference type to use for OptiNode
+JuMP.variable_ref_type(::Type{Plasmo.OptiNode}) = JuMP.VariableRef
+
 function plot_DA_w_Redisp_interactive end
 function plot_market_interactive end
 function plot_network end 

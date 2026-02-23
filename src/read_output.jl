@@ -96,6 +96,12 @@ struct DataFiles
             for folder in subrun_folders
                 file = joinpath(folder, "$sname.arrow")
                 isfile(file) && push!(table_files, file)
+                
+                # If no regular file found, try with "2DA" prefix (for TwoDayAhead basecase results)
+                if !isfile(file)
+                    file_2da = joinpath(folder, "2DA" * "$sname.arrow")
+                    isfile(file_2da) && push!(table_files, file_2da)
+                end
             end
 
             if !isempty(table_files)
