@@ -908,7 +908,7 @@ function add_exchange(sr::SubRun, ::Type{NTC})
     df_exchange(sr.results)
 
     for (z, zz) in NTC, t in T
-        push!(sr.results[:NTC], (From = z, To = zz, Time = t, NTC = EX[(z, zz), t]))
+        push!(sr.results[:BIL_EXCHANGE], (From = z, To = zz, Time = t, BIL_EXCHANGE = EX[(z, zz), t]))
     end
 
     for z in Z, t in T
@@ -919,33 +919,40 @@ end
 
 function add_exchange(sr::SubRun, ::Type{FlowBased})
     T = sr.market_state.Time
-    @unpack Z, NTC, L = sr.modelrun.params.sets
-    @unpack importing_ntcs, exporting_ntcs, fixed_exchange = sr.modelrun.params
+    @unpack Z, L = sr.modelrun.params.sets
+    @unpack fixed_exchange = sr.modelrun.params
     fbmc_params = sr.market_state.fbmc_params
-    
+    connected_zones = find_connected_zones(sr.modelrun.params)
     # Check if fbmc_params were calculated
     if isnothing(fbmc_params)
         error("FlowBased market requires fbmc_params but none were provided. Flow-based markets require RedispatchType setup to run the TwoDayAhead basecase.")
     end
-    
+        importing::Dict{String,Vector{String}} = Dict{String,Vector{String}}()
+        exporting::Dict{String,Vector{String}} = Dict{String,Vector{String}}()
+    for z in Z
+        imp = [zz for zz in Z if (zz, z) in connected_zones]
+        isempty(imp) || (importing[z] = imp)
+        exp = [zz for zz in Z if (z, zz) in connected_zones]
+        isempty(exp) || (exporting[z] = exp)
+    end
     m = sr.network
 
-    @variable(m, 0 <= EX[(z, zz) = NTC, t = T])
+    @variable(m, 0 <= EX[(z, zz) = connected_zones, t = T])
 
     @expression(
         m,
         EXCHANGE[z = Z, t = T],
         0 +
         (
-            if haskey(importing_ntcs, z)
-                (sum(EX[(zz, z), t] for zz in importing_ntcs[z]))
+            if haskey(importing, z)
+                (sum(EX[(zz, z), t] for zz in importing[z]))
             else
                 0
             end
         ) +
         (
-            if haskey(exporting_ntcs, z)
-                (-sum(EX[(z, zz), t] for zz in exporting_ntcs[z]))
+            if haskey(exporting, z)
+                (-sum(EX[(z, zz), t] for zz in exporting[z]))
             else
                 0
             end
@@ -977,8 +984,8 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     df_ntc(sr.results)
     df_exchange(sr.results)
 
-    for (z, zz) in NTC, t in T
-        push!(sr.results[:NTC], (From = z, To = zz, Time = t, NTC = EX[(z, zz), t]))
+    for (z, zz) in connected_zones, t in T
+        push!(sr.results[:BIL_EXCHANGE], (From = z, To = zz, Time = t, BIL_EXCHANGE = EX[(z, zz), t]))
     end
 
     for z in Z, t in T

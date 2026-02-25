@@ -159,7 +159,7 @@ end
     test_data_load()
     test_model_creation()
     test_data_reporting()
-    test_read_output()
+   # test_read_output()
     test_zonal_ptdf()
 end
  

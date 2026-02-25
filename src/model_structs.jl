@@ -412,7 +412,7 @@ const results_value_cols = Dict(
     :LINEFLOW => [:LINEFLOW, :LINEINF],
     :DCLINEFLOW => [:DCLINEFLOW, :LINEINF],
     :EXCHANGE => :EXCHANGE,
-    :NTC => :NTC,
+    :BIL_EXCHANGE => :BIL_EXCHANGE,
     :REDISP => [
         :GEN_REDISP,
         :GEN_UP,

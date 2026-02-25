@@ -393,3 +393,30 @@ function create_subsets!(params::Parameters)
 end
 
 calc_gmax(params::Parameters, p::String, t::Int) = params.avail[p][t] * params.gmax[p]
+
+function find_connected_zones(params::Parameters)
+    @unpack L, DC = params.sets
+    @unpack line_start, line_end, dc_start, dc_end, node2zone = params
+    
+    connected_zones = Set{Tuple{String, String}}()
+    
+    # Check AC lines for inter-zonal connections
+    for l in L
+        z_start = node2zone[line_start[l]]
+        z_end = node2zone[line_end[l]]
+        if z_start != z_end
+            push!(connected_zones, (z_start, z_end))
+        end
+    end
+    
+    # Check DC lines for inter-zonal connections
+    for dc in DC
+        z_start = node2zone[dc_start[dc]]
+        z_end = node2zone[dc_end[dc]]
+        if z_start != z_end
+            push!(connected_zones, (z_start, z_end))
+        end
+    end
+    
+    return collect(connected_zones)
+end

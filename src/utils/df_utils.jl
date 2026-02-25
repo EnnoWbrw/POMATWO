@@ -121,13 +121,13 @@ function df_exchange(dict)
 end
 
 """
-Initializes the :NTC DataFrame in the results dictionary if it does not exist.
-Stores NTC results for each zone pair and time period.
+Initializes the :BIL_EXCHANGE DataFrame in the results dictionary if it does not exist.
+Stores bilateral exchange results for each zone pair and time period.
 """
 function df_ntc(dict)
-    if !haskey(dict, :NTC)
-        dict[:NTC] =
-            DataFrame(; From = String[], To = String[], Time = Int[], NTC = VariableRef[])
+    if !haskey(dict, :BIL_EXCHANGE)
+        dict[:BIL_EXCHANGE] =
+            DataFrame(; From = String[], To = String[], Time = Int[], BIL_EXCHANGE = VariableRef[])
     end
 end
 

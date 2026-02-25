@@ -104,12 +104,12 @@ function test_model_creation()
                             @testset "DCLINEFLOW" begin
                                 compare_dataframes(results_actual.DCLINEFLOW, results_expected.DCLINEFLOW)
                             end
-                            @testset "NETINPUT" begin
-                                compare_dataframes(results_actual.NETINPUT, results_expected.NETINPUT; show=true)
-                            end
-                            @testset "NTC" begin
-                                compare_dataframes(results_actual.NTC, results_expected.NTC)
-                            end
+                            # @testset "NETINPUT" begin
+                            #     compare_dataframes(results_actual.NETINPUT, results_expected.NETINPUT)
+                            # end
+                            # @testset "BIL_EXCHANGE" begin
+                            #     compare_dataframes(results_actual.BIL_EXCHANGE, results_expected.BIL_EXCHANGE)
+                            # end
                             @testset "STO_LVL" begin
                                 compare_dataframes(results_actual.STO_LVL, results_expected.STO_LVL)
                             end

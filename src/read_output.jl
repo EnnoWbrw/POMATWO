@@ -105,8 +105,7 @@ struct DataFiles
             end
 
             if !isempty(table_files)
-                df = Arrow.Table(table_files) |> DataFrame
-                self[name] = df
+                self[name] = load_arrow_unlocked(table_files)
             else
                 self[name] = DataFrame()
             end
@@ -152,6 +151,23 @@ struct DataFiles
 
         return new(params, values...)
     end
+end
+function load_arrow_unlocked(files::Vector{String})
+    dfs = DataFrame[]
+    sizehint!(dfs, length(files))
+
+    for f in files
+        # Important: isolate lifetime in a local scope
+        df = let
+            bytes = read(f)                      # file handle closes immediately
+            tbl = Arrow.Table(bytes)             # in-memory bytes, no file mmap
+            DataFrame(tbl; copycols=true)        # detach from Arrow columns
+        end
+        push!(dfs, df)
+    end
+
+    # Combine after all files are detached
+    return isempty(dfs) ? DataFrame() : vcat(dfs...; cols=:union)
 end
 
 function fieldnames_excl(type, excl::Vector{Symbol})
