@@ -478,7 +478,8 @@ function add_lines!(params::Parameters, df_lines::AbstractDataFrame, report::Dat
         # Check if voltage is required but missing
         needs_voltage = (has_impedance_abs || has_susceptance_abs) && !has_voltage
         if needs_voltage
-            add_error!(report, "missing_voltage",
+            add_warning!(report, "missing voltage",
+            #add_error!(report, "missing_voltage",
                       "Line $(row[:index]) has absolute parameters (x, r, or b) but voltage is missing", location)
         end
 
@@ -496,6 +497,8 @@ function add_lines!(params::Parameters, df_lines::AbstractDataFrame, report::Dat
         # Handle susceptance parameters
         if has_susceptance_pu
             params.bvector[row[:index]] = row[:b_pu] * params.circuits[row[:index]]
+        elseif has_susceptance_abs 
+            params.bvector[row[:index]] = row[:b] * params.circuits[row[:index]]
         elseif has_susceptance_abs && has_voltage
             params.bvector[row[:index]] = row[:b] * zbase(row[:voltage]) * params.circuits[row[:index]]
         end

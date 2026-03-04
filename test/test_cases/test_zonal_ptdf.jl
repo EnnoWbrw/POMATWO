@@ -1,3 +1,6 @@
+using Test
+using JuMP.Containers
+
 # Helper to create minimal params for GSK testing
 function create_gsk_test_params(nodes::Vector{String}, zones::Vector{String}, node_zone_map::Dict{String,String}; 
                                 acline_capacity::Dict{String,Float64}=Dict{String,Float64}())
@@ -109,6 +112,50 @@ function test_zonal_ptdf()
         @test G[1, 1] ≈ 100/400
         @test G[2, 1] ≈ 300/400
         @test G[3, 2] ≈ 1.0
+    end
+
+    @testset "dict_to_matrix: Convert Dict to DenseAxisArray" begin
+        # Test with simple dictionary
+        test_dict = Dict(
+            ("row1", "col1") => 1.0,
+            ("row1", "col2") => 2.0,
+            ("row2", "col1") => 3.0,
+            ("row2", "col2") => 4.0,
+            ("row3", "col1") => 5.0,
+            ("row3", "col2") => 6.0
+        )
+        
+        result = POMATWO.dict_to_matrix(test_dict)
+        
+        # Check type and size
+        @test result isa JuMP.Containers.DenseAxisArray
+        @test size(result) == (3, 2)
+        
+        # Check axes are sorted
+        @test axes(result, 1) == ["row1", "row2", "row3"]
+        @test axes(result, 2) == ["col1", "col2"]
+        
+        # Check values are correctly placed
+        @test result["row1", "col1"] == 1.0
+        @test result["row1", "col2"] == 2.0
+        @test result["row2", "col1"] == 3.0
+        @test result["row2", "col2"] == 4.0
+        @test result["row3", "col1"] == 5.0
+        @test result["row3", "col2"] == 6.0
+        
+        # Test with unsorted keys
+        unsorted_dict = Dict(
+            ("z_row", "z_col") => 9.0,
+            ("a_row", "a_col") => 1.0,
+            ("m_row", "m_col") => 5.0
+        )
+        
+        result_unsorted = POMATWO.dict_to_matrix(unsorted_dict)
+        @test axes(result_unsorted, 1) == ["a_row", "m_row", "z_row"]
+        @test axes(result_unsorted, 2) == ["a_col", "m_col", "z_col"]
+        @test result_unsorted["a_row", "a_col"] == 1.0
+        @test result_unsorted["m_row", "m_col"] == 5.0
+        @test result_unsorted["z_row", "z_col"] == 9.0
     end
 
     @testset "zonal_ptdf: PTDF(l×n) * G(n×z) = PTDFz(l×z)" begin
@@ -299,6 +346,11 @@ function test_zonal_ptdf()
             )
         )
         
+        # Print intermediate input parameters for calc_ram
+        println("\nINPUT PARAMETERS FOR calc_ram():")
+        println("TwoDayAhead_results[:lineflows]: ", TwoDayAhead_results[:lineflows])
+        println("params.acline_capacity: ", params.acline_capacity)
+        
         # Calculate RAM
         ram = POMATWO.calc_ram(params, TwoDayAhead_results, PTDFzz)
         
@@ -345,5 +397,92 @@ function test_zonal_ptdf()
         results_high = Dict(:lineflows => Dict("L1" => 50.0))
         ram_high = POMATWO.calc_ram(params, results_high, PTDFzz)
         @test ram_high["L1"] == 70.0  # max(70, 100-50) = 70
+    end
+
+    @testset "calc_fbmc_params: Integration test" begin
+        # This test verifies that calc_fbmc_params correctly orchestrates all
+        # the individual functions and returns a complete dictionary
+        
+        # Note: calc_fbmc_params requires a SubRun object which is complex to mock
+        # Instead, we test that we can manually recreate what it does
+        
+        # Set up test data
+        nodes = ["N1", "N2", "N3"]
+        zones = ["Z1", "Z2"]
+        node_zone_map = Dict("N1" => "Z1", "N2" => "Z1", "N3" => "Z2")
+        
+        # Create params with line capacities
+        lines = ["L1", "L2"]
+        acline_cap = Dict("L1" => 100.0, "L2" => 200.0)
+        params = create_gsk_test_params(nodes, zones, node_zone_map; acline_capacity=acline_cap)
+        
+        # Create mock PTDF dictionary
+        ptdf_dict = Dict(
+            ("L1", "N1") => 0.3,
+            ("L1", "N2") => 0.4,
+            ("L1", "N3") => -0.7,
+            ("L2", "N1") => 0.2,
+            ("L2", "N2") => 0.1,
+            ("L2", "N3") => -0.3
+        )
+        params.ptdf = ptdf_dict
+        
+        # Build GSK
+        GSK = POMATWO.build_gsk(params, POMATWO.FlatGSK())
+        
+        # Convert PTDF to matrix
+        PTDFn = POMATWO.dict_to_matrix(params.ptdf)
+        
+        # Calculate zonal PTDF
+        PTDFz = POMATWO.zonal_ptdf(PTDFn, GSK)
+        
+        # Calculate zone-to-zone PTDF
+        PTDFzz = POMATWO.zone_to_zone_ptdf(PTDFz; exclude_self=true)
+        
+        # Define CNEs
+        CNE = POMATWO.define_cne(params, PTDFzz; threshold=0.05)
+        
+        # Create mock TwoDayAhead results
+        TwoDayAhead_results = Dict(
+            :lineflows => Dict("L1" => 20.0, "L2" => 50.0)
+        )
+        
+        # Calculate RAM
+        RAM = POMATWO.calc_ram(params, TwoDayAhead_results, PTDFzz)
+        
+        # Verify that we can create the same structure as calc_fbmc_params
+        fbmc_params = Dict(
+            :GSK => GSK,
+            :PTDFn => PTDFn,
+            :PTDFz => PTDFz,
+            :PTDFzz => PTDFzz,
+            :RAM => RAM
+        )
+        
+        # Test that all expected keys exist
+        @test haskey(fbmc_params, :GSK)
+        @test haskey(fbmc_params, :PTDFn)
+        @test haskey(fbmc_params, :PTDFz)
+        @test haskey(fbmc_params, :PTDFzz)
+        @test haskey(fbmc_params, :RAM)
+        
+        # Test dimensions
+        @test size(fbmc_params[:GSK]) == (3, 2)  # nodes × zones
+        @test size(fbmc_params[:PTDFn]) == (2, 3)  # lines × nodes
+        @test size(fbmc_params[:PTDFz]) == (2, 2)  # lines × zones
+        @test size(fbmc_params[:PTDFzz]) == (2, 2)  # lines × (z*(z-1)) zone pairs
+        @test length(fbmc_params[:RAM]) == 2  # one entry per line
+        
+        # Test that GSK columns sum to 1
+        @test all(abs.(sum(fbmc_params[:GSK].data, dims=1) .- 1) .< 1e-12)
+        
+        # Test that RAM values are positive
+        @test all(v > 0 for v in values(fbmc_params[:RAM]))
+        
+        # Test that RAM respects capacity constraints
+        for (line, ram_val) in fbmc_params[:RAM]
+            capacity = params.acline_capacity[line]
+            @test ram_val <= capacity
+        end
     end
 end

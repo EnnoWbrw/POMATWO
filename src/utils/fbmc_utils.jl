@@ -139,6 +139,23 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFzz::DenseAx
     
     # Get lineflows from TwoDayAhead_results
     lineflows = TwoDayAhead_results[:lineflows]
+
+    get_lineflow(line::String) = if lineflows isa AbstractDict
+        abs(get(lineflows, line, 0.0))
+    elseif lineflows isa DenseAxisArray
+        line_idx = findfirst(==(line), axes(lineflows, 1))
+        isnothing(line_idx) && return 0.0
+
+        if ndims(lineflows) == 1
+            abs(lineflows.data[line_idx])
+        elseif ndims(lineflows) == 2
+            maximum(abs, @view lineflows.data[line_idx, :])
+        else
+            error("Unsupported lineflows dimensions in calc_ram: $(ndims(lineflows)). Expected 1D or 2D.")
+        end
+    else
+        error("Unsupported lineflows container type in calc_ram: $(typeof(lineflows)).")
+    end
     
     # Process each line
     for (i, line) in enumerate(lines)
@@ -150,7 +167,7 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFzz::DenseAx
         
         if is_cne
             # For CNE lines: max of 70% capacity or (capacity - lineflow)
-            flow = abs(get(lineflows, line, 0.0))
+            flow = get_lineflow(line)
             option1 = 0.7 * capacity
             option2 = capacity - flow
             ram[line] = max(option1, option2)
@@ -214,6 +231,7 @@ function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Di
     PTDFn = dict_to_matrix(params.ptdf) 
     PTDFz = zonal_ptdf(PTDFn, GSK)
     PTDFzz = zone_to_zone_ptdf(PTDFz; exclude_self=true)
+    CNE = define_cne(params, PTDFzz; threshold=0.05)
     RAM = calc_ram(params, TwoDayAhead_result, PTDFzz)
     fbmc_params = Dict(
         :GSK => GSK,
