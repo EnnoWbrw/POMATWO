@@ -81,7 +81,11 @@ struct DataFiles
     NodalMarketBalance::DataFrame
     NodalMarketRedispBalance::DataFrame
 
-    function DataFiles(dir)
+    function DataFiles(dir;type="")
+        if !(type in ["", "2DA"])
+            @error "Type '$type' not recognized. Defaulting to empty string. Supported types are: '' for regular results and '2DA' for TwoDayAhead basecase results."           
+        end
+
         folders = filter(isdir, readdir(dir, join = true))
         subrun_folders = filter(x -> occursin(r"subrun", x), folders)
 
@@ -94,7 +98,7 @@ struct DataFiles
             sname = string(name)
 
             for folder in subrun_folders
-                file = joinpath(folder, "$sname.arrow")
+                file = joinpath(folder, "$type$sname.arrow")
                 isfile(file) && push!(table_files, file)
                 
                 # If no regular file found, try with "2DA" prefix (for TwoDayAhead basecase results)
