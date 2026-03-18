@@ -981,7 +981,7 @@ function load_data_with_report(data::Dict)
     if !isempty(missing_keys)
         add_error!(report, "missing_configuration", 
                   "Missing required data keys: $(join(missing_keys, ", "))", "data configuration")
-        return params, report
+        return nothing, report
     end
     
     # Load required data with validation
@@ -997,7 +997,7 @@ function load_data_with_report(data::Dict)
         add_types!(params, data[:types], report, data[:types])
     catch e
         add_error!(report, "critical_error", "Failed to load required data: $(string(e))", "core data loading")
-        return params, report
+        return nothing, report
     end
     
     # Load optional data with validation
