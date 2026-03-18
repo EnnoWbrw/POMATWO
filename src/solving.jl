@@ -203,3 +203,64 @@ function _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsume
     end
 end
 
+"""
+    _run_intraday(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}, fbmc_params::Dict) where {PS<:NoProsumer, RD<:RedispatchType}
+
+Runs the intraday market simulation for flow-based zonal markets with redispatch.
+Uses pre-calculated FBMC parameters (from redispatch results) and updated availability data.
+Performs day-ahead and redispatch optimization for intraday market, storing results for each time split.
+
+# Arguments
+- `mr::ModelRun`: The intraday model run with updated parameters and availability data (including avail_plants_ID.csv)
+- `fbmc_params::Dict`: Pre-calculated FBMC parameters (typically extracted from previous day's redispatch results)
+
+# Example
+```julia
+# After DA + Redispatch run, get redispatch results:
+# (sr is the SubRun object from the redispatch optimization)
+redispatch_results = prev_results_for_fbmc(sr)
+fbmc_params_intraday = calc_fbmc_params(sr, mr.params, redispatch_results)
+
+# Create intraday ModelRun with updated availability and run
+data_files_intraday = Dict(
+    # ... other files ...
+    :avail => "avail_plants_ID.csv",  # Updated to ID version
+)
+params_intraday, _ = load_data_with_report(data_files_intraday)
+mr_intraday = ModelRun(params_intraday, setup_intraday, solver;
+                       scenarioname="intraday", resultdir=output_path, overwrite=true)
+_run_intraday(mr_intraday, fbmc_params_intraday)
+```
+"""
+function _run_intraday(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}, fbmc_params::Dict) where {PS<:NoProsumer, RD<:RedispatchType}
+    for T in split(mr.setup.TimeHorizon)
+        @info "Starting intraday subrun for period from $(T[1]) to $(T[end])"
+        prog = ProgressUnknown(desc = "Intraday - DayAhead", spinner = true, dt = 0.1)
+        
+        # Zonal flow-based market optimization with updated FBMC params and availability
+        ProgressMeter.update!(prog, desc = "Intraday DayAhead -> Building Model")
+        market_state = DayAhead(T, fbmc_params)
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "Intraday DayAhead -> Optimizing")
+        @suppress optimize!(sr)
+        ProgressMeter.update!(prog, desc = "Intraday DayAhead -> Fetching Results")
+        fetch_results(sr)
+        write_results(sr)
+        da_results = prev_results_for_redispatch(sr)
+        
+        # Redispatch optimization
+        ProgressMeter.update!(prog, desc = "Intraday Redispatch -> Building Model")
+        market_state = Redispatch(T, da_results)
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "Intraday Redispatch -> Optimizing")
+        @suppress optimize!(sr)
+        ProgressMeter.update!(prog, desc = "Intraday Redispatch -> Fetching Results")
+        if termination_status(sr.optigraph) != MOI.OPTIMAL
+            @show termination_status(sr.optigraph)
+        end
+        fetch_results(sr)
+        write_results(sr)
+        finish!(prog, desc = "Intraday Subrun -> Done")
+    end
+end
+
