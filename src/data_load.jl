@@ -1105,7 +1105,7 @@ function load_data_with_report(data::Dict)
                 if report.has_errors
                     add_note!(report, "processing_incomplete", 
                              "Skipping PTDF calculation due to network topology errors", "post-processing")
-                    return params, report
+                    return nothing, report
                 end
             end
             
