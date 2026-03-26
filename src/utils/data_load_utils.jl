@@ -1,12 +1,4 @@
 """
-    isinvertible(A::Matrix{Float64}) -> Bool
-
-Check if matrix A is invertible by computing its determinant with high precision.
-Uses BigFloat arithmetic to avoid numerical errors, with tolerance 1e-18.
-"""
-isinvertible(A::Matrix{Float64}) = !isapprox(det(BigFloat.(A)), 0, atol = 1e-18)
-
-"""
     diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String})
 
 Diagnostic function to identify why a matrix is singular.
@@ -78,6 +70,89 @@ function diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector
         end
     end
     
+    println("="^60 * "\n")
+end
+
+"""
+    diagnose_missing_slacks(included_nodes, slack_list, params)
+
+Identify disconnected AC islands among nodes included in the PTDF calculation and
+report which islands are missing a slack bus. Suggests a candidate slack node for
+each island that currently lacks one.
+
+Called automatically when the B-matrix is found to be singular.
+"""
+function diagnose_missing_slacks(island_nodes::Vector{String}, slack_list::Vector{String}, params::Parameters)
+    island_node_set = Set(island_nodes)
+    L = params.sets.L
+
+    # Build AC-only adjacency restricted to included nodes
+    adjacency = Dict{String, Vector{String}}(n => String[] for n in island_nodes)
+    for l in L
+        s = get(params.line_start, l, nothing)
+        e = get(params.line_end,   l, nothing)
+        if !isnothing(s) && !isnothing(e) && s in island_node_set && e in island_node_set
+            push!(adjacency[s], e)
+            push!(adjacency[e], s)
+        end
+    end
+
+    # DFS to find connected components
+    visited = Set{String}()
+    islands = Vector{Vector{String}}()
+    for start in island_nodes
+        if !(start in visited)
+            island = String[]
+            stack = [start]
+            while !isempty(stack)
+                node = pop!(stack)
+                if !(node in visited)
+                    push!(visited, node)
+                    push!(island, node)
+                    for nb in adjacency[node]
+                        !(nb in visited) && push!(stack, nb)
+                    end
+                end
+            end
+            push!(islands, island)
+        end
+    end
+
+    slack_set = Set(slack_list)
+
+    println("\n" * "="^60)
+    println("ISLAND SLACK DIAGNOSTICS")
+    println("="^60)
+    println("Found $(length(islands)) AC island(s) among $(length(island_nodes)) nodes.")
+    println("Each island requires exactly 1 slack bus (set slack=1 in nodes.csv).\n")
+
+    n_missing = 0
+    for (i, island) in enumerate(sort(islands, by=length, rev=true))
+        slack_in_island = filter(n -> n in slack_set, island)
+        has_slack = !isempty(slack_in_island)
+
+        if has_slack
+            println("  Island $i ($(length(island)) nodes): OK — slack: $(join(slack_in_island, ", "))")
+        else
+            n_missing += 1
+            candidate = first(sort(island))
+            sample = join(sort(island)[1:min(5, length(island))], ", ")
+            suffix = length(island) > 5 ? ", ..." : ""
+            println("  Island $i ($(length(island)) nodes): *** NO SLACK ***")
+            println("    → Suggested slack candidate: $candidate")
+            println("    → Sample nodes: $sample$suffix")
+        end
+    end
+
+    println()
+    if n_missing > 0
+        println("ACTION REQUIRED: Add slack=1 to $n_missing more node(s) in nodes.csv.")
+        println("Choose one node per missing island (the suggested candidate is the first alphabetically).")
+        println("Any electrically sensible reference bus in each island is acceptable.")
+    else
+        println("All islands already have a slack node.")
+        println("Singularity is likely caused by zero/near-zero line reactances — check line parameters.")
+    end
     println("="^60 * "\n")
 end
 
@@ -173,62 +248,49 @@ function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{S
     else
         # Create reduced B-matrix (excluding slack and omitted nodes)
         b_red = b[included_idx, included_idx]
+        b_red_inv = zeros(size(b_red))
 
-        if !isinvertible(b_red)
-            # Matrix is singular - try to provide helpful diagnostic
-            @warn """
-            B-matrix is singular (determinant is zero).
-            This typically indicates:
-            - Isolated network sections (islands)
-            - Missing or zero line reactances
-            - Duplicate or contradictory line definitions
-            
-            Network topology issues:
-            - Total nodes: $(length(N))
-            - Slack nodes: $(length(slack_idx)) at $(slack_list)
-            - Omitted nodes: $(length(omit_idx))
-            - Nodes in calculation: $(length(included_idx))
-            - Lines: $(length(L))
-            
-            Attempting pseudoinverse for PTDF calculation (may produce inaccurate results).
-            """
-            
-            # Run detailed diagnostics
-            included_nodes = N[included_idx]
-            diagnose_singular_matrix(b_red, included_nodes)
-            
-            # Add warning to report
-            if !isnothing(report)
-                add_warning!(report, "ptdf_calculation", 
-                            "B-matrix is singular - using pseudoinverse (may produce inaccurate PTDF values). See console output for detailed diagnostics.", 
-                            "PTDF calculation")
-            end
-            
-            # Use pseudoinverse as fallback
-            b_red_inv = pinv(b_red)
-        else
-            # Try regular inversion, catch singularity errors
-            try
-                b_red_inv = inv(b_red)
-            catch e
-                if e isa LinearAlgebra.SingularException
-                    @warn """
-                    Matrix inversion failed despite full rank.
-                    This may indicate numerical conditioning issues.
-                    Using pseudoinverse as fallback.
-                    """
-                    
-                    # Add warning to report
-                    if !isnothing(report)
-                        add_warning!(report, "ptdf_calculation", 
-                                    "Matrix inversion failed despite determinant check - using pseudoinverse due to numerical conditioning issues", 
-                                    "PTDF calculation")
-                    end
-                    
-                    b_red_inv = pinv(b_red)
-                else
-                    rethrow(e)
+        # Try regular inversion first. This avoids expensive and numerically fragile
+        # determinant checks on very large matrices.
+        try
+            b_red_inv = inv(b_red)
+        catch e
+            if e isa LinearAlgebra.SingularException
+                @warn """
+                B-matrix inversion failed (singular matrix).
+                This typically indicates:
+                - Isolated network sections (islands)
+                - Missing or zero line reactances
+                - Duplicate or contradictory line definitions
+                
+                Network topology issues:
+                - Total nodes: $(length(N))
+                - Slack nodes: $(length(slack_idx)) at $(slack_list)
+                - Omitted nodes: $(length(omit_idx))
+                - Nodes in calculation: $(length(included_idx))
+                - Lines: $(length(L))
+                
+                Attempting pseudoinverse for PTDF calculation (may produce inaccurate results).
+                """
+
+                # Run detailed diagnostics on reduced matrix
+                included_nodes = N[included_idx]
+                diagnose_singular_matrix(b_red, included_nodes)
+
+                # For island-slack diagnostics include slack buses (omit only PTDF-omitted nodes)
+                island_nodes_idx = setdiff(1:length(N), omit_idx)
+                island_nodes = N[island_nodes_idx]
+                diagnose_missing_slacks(island_nodes, slack_list, params)
+
+                if !isnothing(report)
+                    add_warning!(report, "ptdf_calculation", 
+                                "B-matrix is singular - using pseudoinverse (may produce inaccurate PTDF values). See console output for detailed diagnostics.", 
+                                "PTDF calculation")
                 end
+
+                b_red_inv = pinv(b_red)
+            else
+                rethrow(e)
             end
         end
 

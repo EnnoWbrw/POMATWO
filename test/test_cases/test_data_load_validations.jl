@@ -391,4 +391,49 @@ Test suite for data load validations including:
         @test any(w -> occursin("p1", w.message) && occursin("exceeding", w.message), warnings)
         @test any(w -> occursin("s1", w.message) && occursin("exceeding", w.message), warnings)
     end
+
+    @testset "Plant Node Reference Validation" begin
+        params = create_test_params(
+            nodes=["n1"],
+            plants=["p1", "p2"],
+            slack=["n1"]
+        )
+        params.plant2node["p1"] = "n1"
+        params.plant2node["p2"] = "missing_node"
+        params.nodal_load["n1"] = POMATWO.HourlyProfile([10.0, 20.0])
+
+        report = POMATWO.validate_params(params)
+
+        @test report.has_errors
+        errors = POMATWO.get_errors(report)
+        @test any(e -> occursin("plant_node_reference", e.category) && occursin("missing_node", e.message) && occursin("p2", e.message), errors)
+    end
+
+    @testset "Multi-file Nodal Availability Loading" begin
+        temp_dir = mktempdir()
+        solar_path = joinpath(temp_dir, "solar.csv")
+        wind_path = joinpath(temp_dir, "wind.csv")
+
+        CSV.write(solar_path, DataFrame(
+            plant_type=["SolarPV", "SolarPV"],
+            n1=[0.1, 0.2],
+            n2=[0.3, 0.4],
+        ))
+        CSV.write(wind_path, DataFrame(
+            plant_type=["WindOnshore", "WindOnshore"],
+            n2=[0.5, 0.6],
+        ))
+
+        params = create_test_params(nodes=["n1", "n2"], slack=["n1"])
+        report = POMATWO.DataReport()
+
+        POMATWO.add_avail_planttype_nodal!(params, [solar_path, wind_path], report, "test multi-file nodal availability")
+
+        @test !report.has_errors
+        @test haskey(params.avail_planttype_nodal, ("SolarPV", "n1"))
+        @test haskey(params.avail_planttype_nodal, ("SolarPV", "n2"))
+        @test haskey(params.avail_planttype_nodal, ("WindOnshore", "n2"))
+        @test params.avail_planttype_nodal[("SolarPV", "n1")].val == [0.1, 0.2]
+        @test params.avail_planttype_nodal[("WindOnshore", "n2")].val == [0.5, 0.6]
+    end
 end

@@ -141,8 +141,8 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
     # Validate slack column values (should be 0 or 1)
     if hasproperty(df_nodes, :slack)
         slack_data = skipmissing(df_nodes[!, :slack])
-        if !all(x -> x in [0, 1], slack_data)
-            invalid_count = count(x -> !(x in [0, 1]), slack_data)
+        if !all(x -> x in [0, 1, 0.0, 1.0], slack_data)
+            invalid_count = count(x -> !(x in [0, 1, 0.0, 1.0]), slack_data)
             add_error!(report, "range_validation", 
                       "Column 'slack' has $invalid_count values not in {0, 1}", location)
         end
@@ -176,7 +176,8 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
         end
         
         push!(params.sets.N, row[:index])
-        if row[:slack] == 1 
+        # Handle both Int and Float slack values (CSV may read as 1.0)
+        if row[:slack] == 1 || row[:slack] == 1.0
             push!(params.slack, row[:index])
             slack_count += 1
         end
@@ -210,6 +211,11 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
     elseif slack_count > 1
         add_warning!(report, "configuration_warning", 
                     "Multiple slack buses defined ($slack_count), this may cause issues", location)
+    end
+    
+    # Debug: print slack nodes to console
+    if !isempty(params.slack)
+        @info "Slack buses loaded from CSV: $(join(sort(params.slack), ", "))"
     end
     
     add_note!(report, "data_summary", 
@@ -718,6 +724,25 @@ function add_avail_planttype_nodal!(params::Parameters, path::AbstractString, re
     end
 end
 
+function add_avail_planttype_nodal!(params::Parameters, files::Vector{<:AbstractString}, report::DataReport, location::String)
+    for file in files
+        if !validate_file_exists(report, file, "nodal availability file")
+            continue
+        end
+
+        try
+            df = read_csv(file)
+            add_avail_planttype_nodal!(params, df, report, file)
+        catch e
+            add_error!(report, "file_parsing", "Failed to parse nodal availability data: $(string(e))", file)
+        end
+    end
+
+    add_note!(report, "data_summary", "Loaded nodal plant type availability data", location)
+end
+
+nodal_availability_location(data) = data isa AbstractString ? data : "nodal plant type availability data"
+
 #############################################
 ##### Zonal Availability Data #####################
 #############################################
@@ -1031,10 +1056,11 @@ function load_data_with_report(data::Dict)
     end
 
     if haskey(data, :avail_planttype_nodal)
+        location = nodal_availability_location(data[:avail_planttype_nodal])
         try
-            add_avail_planttype_nodal!(params, data[:avail_planttype_nodal], report, data[:avail_planttype_nodal])
+            add_avail_planttype_nodal!(params, data[:avail_planttype_nodal], report, location)
         catch e
-            add_error!(report, "optional_data_error", "Failed to load nodal availability: $(string(e))", data[:avail_planttype_nodal])
+            add_error!(report, "optional_data_error", "Failed to load nodal availability: $(string(e))", location)
         end
     end
 
@@ -1097,6 +1123,14 @@ function load_data_with_report(data::Dict)
     # Continue with post-processing only if no critical errors
     if !report.has_errors
         try
+            validate_plant_node_references(report, params, "plant node validation")
+
+            if report.has_errors
+                add_note!(report, "processing_incomplete",
+                         "Skipping post-processing due to invalid plant-to-node references", "post-processing")
+                return params, report
+            end
+
             # Validate network topology before attempting PTDF calculation
             if !isempty(params.sets.L)
                 validate_network_topology(report, params, "network topology validation")
@@ -1234,6 +1268,8 @@ function validate_params(params::Parameters)
     if isempty(params.sets.P)
         add_error!(report, "missing_data", "No plants defined", "basic validation")
     end
+
+    validate_plant_node_references(report, params, "plant node validation")
     
     # Validate network topology if lines are defined
     if !isempty(params.sets.L)

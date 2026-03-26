@@ -226,12 +226,44 @@ function prepare_redisp_plot_data(results, scalefactor, time_horizon)
     return prices_by_zone, load_by_zone, dispatch_by_zone
 end
 
+function _common_times(time_horizon, dfs...)
+    requested = collect(time_horizon)
+    sets = map(df -> Set(df.Time), dfs)
+    return [t for t in requested if all(s -> t in s, sets)]
+end
+
+function _align_for_plot(disp_df, load_df, price_df, time_horizon)
+    common_times = _common_times(time_horizon, disp_df, load_df, price_df)
+    if isempty(common_times)
+        error("No overlapping timesteps found for dispatch, load, and price in selected time_horizon.")
+    end
+
+    disp_aligned = @chain disp_df begin
+        @rsubset :Time in common_times
+        @orderby :Time
+    end
+    load_aligned = @chain load_df begin
+        @rsubset :Time in common_times
+        @orderby :Time
+    end
+    price_aligned = @chain price_df begin
+        @rsubset :Time in common_times
+        @orderby :Time
+    end
+
+    return common_times, disp_aligned, load_aligned, price_aligned
+end
+
 # Function to update the plot based on the observables
 function update_plot!(fig, ax, ax2, disp, load, price, time_horizon, colors)
-    start = time_horizon[1]
-    nd = time_horizon[end]
-    pos_types, pos_mat = stack_vals(disp[], "pos")
-    neg_types, neg_mat = stack_vals(disp[], "neg")
+    time_axis, disp_aligned, load_aligned, price_aligned =
+        _align_for_plot(disp[], load[], price[], time_horizon)
+
+    pos_types, pos_mat = stack_vals(disp_aligned, "pos")
+    neg_types, neg_mat = stack_vals(disp_aligned, "neg")
+
+    # Keep the time axis consistent with stacked dispatch rows.
+    time_axis = time_axis[1:size(pos_mat, 1)]
 
     empty!(ax)
     empty!(ax2)
@@ -250,7 +282,7 @@ function update_plot!(fig, ax, ax2, disp, load, price, time_horizon, colors)
         prev = i == 1 ? 0 : pos_mat[:, i-1]
         type = pos_types[i]
         color = colors[type]
-        band = band!(ax, start:nd, prev, pos_mat[:, i], color = color, label = type)
+        band = band!(ax, time_axis, prev, pos_mat[:, i], color = color, label = type)
         push!(handles, band)
         push!(labels, type)
     end
@@ -259,15 +291,15 @@ function update_plot!(fig, ax, ax2, disp, load, price, time_horizon, colors)
         prev = i == 1 ? 0 : neg_mat[:, i-1]
         type = neg_types[i]
         color = colors[type]
-        band = band!(ax, start:nd, prev, neg_mat[:, i], color = color)
+        band = band!(ax, time_axis, prev, neg_mat[:, i], color = color)
         # push!(handles, band)
         #  push!(labels, type)
     end
 
     load_line = lines!(
         ax,
-        start:nd,
-        load[].orig_load[start:end],
+        time_axis,
+        load_aligned.orig_load,
         color = :black,
         linestyle = :dash,
         label = "original load",
@@ -277,8 +309,8 @@ function update_plot!(fig, ax, ax2, disp, load, price, time_horizon, colors)
 
     price_line = lines!(
         ax2,
-        start:nd,
-        price[].MarketBalance[start:end],
+        time_axis,
+        price_aligned.MarketBalance,
         color = :black,
         linestyle = :dot,
         label = "price",
@@ -329,6 +361,9 @@ function POMATWO.plot_market_interactive(
     table = kind == :DA ? results.GEN : results.REDISP
     if time_horizon === nothing
         time_horizon = 1:maximum(table.Time)
+    elseif time_horizon isa Tuple
+        # Convert tuple (start, stop) to range
+        time_horizon = time_horizon[1]:time_horizon[2]
     end
 
     data_prep = kind == :DA ? prepare_disp_plot_data : prepare_redisp_plot_data
@@ -389,13 +424,20 @@ function update_plot_comb!(
     time_horizon,
     colors,
 )
-    start = time_horizon[1]
-    nd = time_horizon[end]
-    pos_types, pos_mat = stack_vals(disp[], "pos")
-    neg_types, neg_mat = stack_vals(disp[], "neg")
+    time_axis, disp_aligned, load_aligned, price_aligned =
+        _align_for_plot(disp[], load[], price[], time_horizon)
+    time_axis_d, disp_aligned_d, load_aligned_d, price_aligned_d =
+        _align_for_plot(disp_d[], load_d[], price_d[], time_horizon)
 
-    pos_types_d, pos_mat_d = stack_vals(disp_d[], "pos")
-    neg_types_d, neg_mat_d = stack_vals(disp_d[], "neg")
+    pos_types, pos_mat = stack_vals(disp_aligned, "pos")
+    neg_types, neg_mat = stack_vals(disp_aligned, "neg")
+
+    pos_types_d, pos_mat_d = stack_vals(disp_aligned_d, "pos")
+    neg_types_d, neg_mat_d = stack_vals(disp_aligned_d, "neg")
+
+    # Keep time axes consistent with stacked dispatch rows.
+    time_axis = time_axis[1:size(pos_mat, 1)]
+    time_axis_d = time_axis_d[1:size(pos_mat_d, 1)]
 
     empty!(ax)
     empty!(ax2)
@@ -418,7 +460,7 @@ function update_plot_comb!(
         prev = i == 1 ? 0 : pos_mat[:, i-1]
         type = pos_types[i]
         color = colors[type]
-        band = band!(ax, start:nd, prev, pos_mat[:, i], color = color, label = type)
+        band = band!(ax, time_axis, prev, pos_mat[:, i], color = color, label = type)
         push!(handles, band)
         push!(labels, type)
     end
@@ -427,7 +469,7 @@ function update_plot_comb!(
         prev = i == 1 ? 0 : neg_mat[:, i-1]
         type = neg_types[i]
         color = colors[type]
-        band = band!(ax, start:nd, prev, neg_mat[:, i], color = color)
+        band = band!(ax, time_axis, prev, neg_mat[:, i], color = color)
         # push!(handles, band)
         #  push!(labels, type)
     end
@@ -436,7 +478,7 @@ function update_plot_comb!(
         prev = i == 1 ? 0 : pos_mat_d[:, i-1]
         type = pos_types_d[i]
         color = colors[type]
-        band = band!(ax3, start:nd, prev, pos_mat_d[:, i], color = color, label = type)
+        band = band!(ax3, time_axis_d, prev, pos_mat_d[:, i], color = color, label = type)
         push!(handles_d, band)
         push!(labels_d, type)
     end
@@ -445,15 +487,15 @@ function update_plot_comb!(
         prev = i == 1 ? 0 : neg_mat_d[:, i-1]
         type = neg_types_d[i]
         color = colors[type]
-        band = band!(ax3, start:nd, prev, neg_mat_d[:, i], color = color)
+        band = band!(ax3, time_axis_d, prev, neg_mat_d[:, i], color = color)
         # push!(handles, band)
         #  push!(labels, type)
     end
 
     load_line = lines!(
         ax,
-        start:nd,
-        load[].orig_load,
+        time_axis,
+        load_aligned.orig_load,
         color = :black,
         linestyle = :dash,
         label = "original load",
@@ -463,8 +505,8 @@ function update_plot_comb!(
 
     load_line_d = lines!(
         ax3,
-        start:nd,
-        load_d[].orig_load,
+        time_axis_d,
+        load_aligned_d.orig_load,
         color = :black,
         linestyle = :dash,
         label = "original load",
@@ -474,8 +516,8 @@ function update_plot_comb!(
 
     price_line = lines!(
         ax2,
-        start:nd,
-        price[].MarketBalance,
+        time_axis,
+        price_aligned.MarketBalance,
         color = :black,
         linestyle = :dot,
         label = "Day-Ahead Price",
@@ -485,8 +527,8 @@ function update_plot_comb!(
 
     price_line_d = lines!(
         ax4,
-        start:nd,
-        price_d[].MarketBalance,
+        time_axis_d,
+        price_aligned_d.MarketBalance,
         color = :black,
         linestyle = :dot,
         label = "Day-Ahead Price",
@@ -534,6 +576,9 @@ fig = plot_DA_w_Redisp_interactive(results)
 function POMATWO.plot_DA_w_Redisp_interactive(results; time_horizon = nothing, scalefactor = 1/1000)
     if time_horizon === nothing
         time_horizon = 1:maximum(results.GEN.Time)
+    elseif time_horizon isa Tuple
+        # Convert tuple (start, stop) to range
+        time_horizon = time_horizon[1]:time_horizon[2]
     end
 
     prices_by_zone, load_by_zone, dispatch_by_zone =
@@ -922,15 +967,25 @@ end
 function create_lineplot_layout(figsize = (800, 1000))
     GLMakie.activate!(inline = false)
     #figsize = (800, 1000)
-    cutout = (5.5, 15, 47, 55)
+    #cutout = (5.5, 15, 47, 55)#for Germany
+    #cutout = (-8, 24, 42, 70)#for NorthSea
+    cutout = (-6, 18, 47, 63)#reduced northSea
     provider = CartoDB()
 
-    fig = Figure(; size = figsize)
-    ax = Axis(fig[1, 1])
     extent = Extent(X = (cutout[1], cutout[2]), Y = (cutout[3], cutout[4]))
-    tm = Tyler.Map(extent; provider, figure = fig, axis = ax)
-    wait(tm)
-    return fig, ax
+    try
+        fig = Figure(; size = figsize)
+        ax = Axis(fig[1, 1])
+        tm = Tyler.Map(extent; provider, figure = fig, axis = ax)
+        wait(tm)
+        return fig, ax
+    catch err
+        # Fallback to a plain axis if tile rendering fails in GLMakie/VS Code.
+        @warn "Tyler basemap rendering failed; falling back to plain lineplot axis." exception = (err, catch_backtrace())
+        fig = Figure(; size = figsize)
+        ax = Axis(fig[1, 1])
+        return fig, ax
+    end
 
 end
 
@@ -1325,14 +1380,43 @@ Figure saved to: france_market_stats.png
 """
 function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; save_path=nothing)
 
+    _finite_values(v) = [x for x in skipmissing(v) if isfinite(x)]
+    function _safe_zscore(v)
+        vals = _finite_values(v)
+        if isempty(vals)
+            return Float64[]
+        end
+        sigma = std(vals)
+        if !isfinite(sigma) || sigma == 0
+            return zeros(Float64, length(vals))
+        end
+        return (vals .- mean(vals)) ./ sigma
+    end
+
     # Get statistics and time series
     stats_df = get_market_statistics(results, zone)
-    
+    if isempty(stats_df)
+        available_zones = try
+            join(sort(collect(unique(results.ZonalMarketBalance.Zone))), ", ")
+        catch
+            "<unknown>"
+        end
+        error("No market statistics available for zone '$zone'. Available zones in results: $available_zones")
+    end
+
+    function _value_or_error(df, metric::String, parameter::String)
+        rows = df[(df.metric .== metric) .&& (df.parameter .== parameter), :]
+        if nrow(rows) == 0
+            error("Missing statistic '$metric' for parameter '$parameter' in zone '$zone'.")
+        end
+        return rows.value[1]
+    end
+
     # Extract time series data
-    exchange_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Exchange", :value][1]
-    ll_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Lost_Load", :value][1]
-    price_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Price", :value][1]
-    time_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Time", :value][1]
+    exchange_series = _value_or_error(stats_df, "timeseries", "Exchange")
+    ll_series = _value_or_error(stats_df, "timeseries", "Lost_Load")
+    price_series = _value_or_error(stats_df, "timeseries", "Price")
+    time_series = _value_or_error(stats_df, "timeseries", "Time")
     
     # Create a DataFrame for easier handling
     timeseries_df = DataFrame(
@@ -1344,6 +1428,10 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
     
     # Sort by time to ensure proper plotting order
     sort!(timeseries_df, :Time)
+
+    exchange_vals = _finite_values(timeseries_df.Exchange)
+    ll_vals = _finite_values(timeseries_df.Lost_Load)
+    price_vals = _finite_values(timeseries_df.Price)
     
     # Create a sequential index for x-axis (avoids diagonal lines from time gaps)
     time_index = 1:nrow(timeseries_df)
@@ -1392,8 +1480,10 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
                title="Exchange Distribution")
     hist!(ax4, timeseries_df.Exchange, 
           bins=50, color=(colors["Exchange"], 0.7))
-    vlines!(ax4, [mean(timeseries_df.Exchange)], 
+        if !isempty(exchange_vals)
+        vlines!(ax4, [mean(exchange_vals)], 
             color=:red, linestyle=:dash, linewidth=2, label="Mean")
+        end
     axislegend(ax4, position=:rt)
     
     # Lost Load distribution
@@ -1403,8 +1493,10 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
                title="Lost Load Distribution")
     hist!(ax5, timeseries_df.Lost_Load, 
           bins=50, color=(colors["Lost_Load"], 0.7))
-    vlines!(ax5, [mean(timeseries_df.Lost_Load)], 
+        if !isempty(ll_vals)
+        vlines!(ax5, [mean(ll_vals)], 
             color=:red, linestyle=:dash, linewidth=2, label="Mean")
+        end
     axislegend(ax5, position=:rt)
     
     # Price distribution
@@ -1414,8 +1506,10 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
                title="Price Distribution")
     hist!(ax6, timeseries_df.Price, 
           bins=50, color=(colors["Price"], 0.7))
-    vlines!(ax6, [mean(timeseries_df.Price)], 
+        if !isempty(price_vals)
+        vlines!(ax6, [mean(price_vals)], 
             color=:red, linestyle=:dash, linewidth=2, label="Mean")
+        end
     axislegend(ax6, position=:rt)
     
     # Row 3: Box Plots and Summary Statistics
@@ -1430,16 +1524,22 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
     # Z-score = (x - μ) / σ, where μ is mean and σ is standard deviation
     # This transforms data to have mean=0 and std=1, making different scales comparable
     # Interpretation: values show how many standard deviations away from the mean
-    exchange_norm = (timeseries_df.Exchange .- mean(timeseries_df.Exchange)) ./ std(timeseries_df.Exchange)
-    ll_norm = (timeseries_df.Lost_Load .- mean(timeseries_df.Lost_Load)) ./ std(timeseries_df.Lost_Load)
-    price_norm = (timeseries_df.Price .- mean(timeseries_df.Price)) ./ std(timeseries_df.Price)
+    exchange_norm = _safe_zscore(timeseries_df.Exchange)
+    ll_norm = _safe_zscore(timeseries_df.Lost_Load)
+    price_norm = _safe_zscore(timeseries_df.Price)
     
-    boxplot!(ax7, fill(1, length(exchange_norm)), exchange_norm, 
-             color=(colors["Exchange"], 0.7), width=0.5)
-    boxplot!(ax7, fill(2, length(ll_norm)), ll_norm, 
-             color=(colors["Lost_Load"], 0.7), width=0.5)
-    boxplot!(ax7, fill(3, length(price_norm)), price_norm, 
-             color=(colors["Price"], 0.7), width=0.5)
+    if !isempty(exchange_norm)
+        boxplot!(ax7, fill(1, length(exchange_norm)), exchange_norm, 
+                 color=(colors["Exchange"], 0.7), width=0.5)
+    end
+    if !isempty(ll_norm)
+        boxplot!(ax7, fill(2, length(ll_norm)), ll_norm, 
+                 color=(colors["Lost_Load"], 0.7), width=0.5)
+    end
+    if !isempty(price_norm)
+        boxplot!(ax7, fill(3, length(price_norm)), price_norm, 
+                 color=(colors["Price"], 0.7), width=0.5)
+    end
     hlines!(ax7, [0], color=:black, linestyle=:dash, linewidth=1)
     
     # Summary statistics table
@@ -1452,25 +1552,40 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
     exchange_stats = filter(row -> row.parameter == "Exchange", stats_df)
     ll_stats = filter(row -> row.parameter == "Lost_Load", stats_df)
     price_stats = filter(row -> row.parameter == "Price", stats_df)
+
+    exch_mean = _value_or_error(exchange_stats, "mean", "Exchange")
+    exch_median = _value_or_error(exchange_stats, "median", "Exchange")
+    exch_std = _value_or_error(exchange_stats, "std", "Exchange")
+    exch_sum = _value_or_error(exchange_stats, "sum", "Exchange")
+
+    ll_mean = _value_or_error(ll_stats, "mean", "Lost_Load")
+    ll_max = _value_or_error(ll_stats, "max", "Lost_Load")
+    ll_sum = _value_or_error(ll_stats, "sum", "Lost_Load")
+    ll_count = _value_or_error(ll_stats, "count_positive", "Lost_Load")
+
+    price_mean = _value_or_error(price_stats, "mean", "Price")
+    price_median = _value_or_error(price_stats, "median", "Price")
+    price_min = _value_or_error(price_stats, "min", "Price")
+    price_max = _value_or_error(price_stats, "max", "Price")
     
     summary_text = """
     Exchange:
-      Mean: $(round(exchange_stats[exchange_stats.metric .== "mean", :value][1], digits=2)) MW
-      Median: $(round(exchange_stats[exchange_stats.metric .== "median", :value][1], digits=2)) MW
-      Std: $(round(exchange_stats[exchange_stats.metric .== "std", :value][1], digits=2)) MW
-      Sum: $(round(exchange_stats[exchange_stats.metric .== "sum", :value][1]/1000, digits=2)) GWh
+            Mean: $(round(exch_mean, digits=2)) MW
+            Median: $(round(exch_median, digits=2)) MW
+            Std: $(round(exch_std, digits=2)) MW
+            Sum: $(round(exch_sum/1000, digits=2)) GWh
     
     Lost Load:
-      Mean: $(round(ll_stats[ll_stats.metric .== "mean", :value][1], digits=2)) MW
-      Max: $(round(ll_stats[ll_stats.metric .== "max", :value][1], digits=2)) MW
-      Sum: $(round(ll_stats[ll_stats.metric .== "sum", :value][1]/1000, digits=2)) GWh
-      Events: $(Int(ll_stats[ll_stats.metric .== "count_positive", :value][1]))
+            Mean: $(round(ll_mean, digits=2)) MW
+            Max: $(round(ll_max, digits=2)) MW
+            Sum: $(round(ll_sum/1000, digits=2)) GWh
+            Events: $(Int(ll_count))
     
     Price:
-      Mean: $(round(price_stats[price_stats.metric .== "mean", :value][1], digits=2)) €/MWh
-      Median: $(round(price_stats[price_stats.metric .== "median", :value][1], digits=2)) €/MWh
-      Min: $(round(price_stats[price_stats.metric .== "min", :value][1], digits=2)) €/MWh
-      Max: $(round(price_stats[price_stats.metric .== "max", :value][1], digits=2)) €/MWh
+            Mean: $(round(price_mean, digits=2)) €/MWh
+            Median: $(round(price_median, digits=2)) €/MWh
+            Min: $(round(price_min, digits=2)) €/MWh
+            Max: $(round(price_max, digits=2)) €/MWh
     """
     
     text!(ax8, 0.1, 0.5, text=summary_text, align=(:left, :center), fontsize=12)

@@ -259,6 +259,40 @@ function get_nodes_to_omit_for_ptdf(params)
 end
 
 """
+    validate_plant_node_references(report::DataReport, params, location::String="plant node validation")
+
+Validate that each plant references an existing node.
+
+# Returns
+- `Bool`: true if all plant node references are valid, false otherwise
+"""
+function validate_plant_node_references(report::DataReport, params, location::String="plant node validation")
+    missing_node_plants = Dict{String, Vector{String}}()
+
+    for plant in params.sets.P
+        node = get(params.plant2node, plant, nothing)
+
+        if isnothing(node)
+            add_error!(report, "plant_node_reference",
+                      "Plant '$plant' is missing a node assignment", location)
+            continue
+        end
+
+        if !(node in params.sets.N)
+            push!(get!(missing_node_plants, node, String[]), plant)
+        end
+    end
+
+    for (node, plants) in sort(collect(missing_node_plants); by=first)
+        add_error!(report, "plant_node_reference",
+                  "Found $(length(plants)) plant(s) assigned to unknown node '$node': $(join(sort(plants), ", "))",
+                  location)
+    end
+
+    return isempty(missing_node_plants)
+end
+
+"""
     build_adjacency_list(params, include_dc::Bool=true)
 
 Build adjacency list representation of the network graph.
