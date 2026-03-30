@@ -141,8 +141,8 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
     # Validate slack column values (should be 0 or 1)
     if hasproperty(df_nodes, :slack)
         slack_data = skipmissing(df_nodes[!, :slack])
-        if !all(x -> x in [0, 1], slack_data)
-            invalid_count = count(x -> !(x in [0, 1]), slack_data)
+        if !all(x -> x in [0, 1, 0.0, 1.0], slack_data)
+            invalid_count = count(x -> !(x in [0, 1, 0.0, 1.0]), slack_data)
             add_error!(report, "range_validation", 
                       "Column 'slack' has $invalid_count values not in {0, 1}", location)
         end
@@ -176,7 +176,8 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
         end
         
         push!(params.sets.N, row[:index])
-        if row[:slack] == 1 
+        # Handle both Int and Float slack values (CSV may read as 1.0)
+        if row[:slack] == 1 || row[:slack] == 1.0
             push!(params.slack, row[:index])
             slack_count += 1
         end
@@ -210,6 +211,11 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
     elseif slack_count > 1
         add_warning!(report, "configuration_warning", 
                     "Multiple slack buses defined ($slack_count), this may cause issues", location)
+    end
+    
+    # Debug: print slack nodes to console
+    if !isempty(params.slack)
+        @info "Slack buses loaded from CSV: $(join(sort(params.slack), ", "))"
     end
     
     add_note!(report, "data_summary", 
@@ -994,7 +1000,7 @@ function load_data_with_report(data::Dict)
         add_types!(params, data[:types], report, data[:types])
     catch e
         add_error!(report, "critical_error", "Failed to load required data: $(string(e))", "core data loading")
-        return nothing, report
+        return params, report
     end
     
     # Load optional data with validation
@@ -1105,7 +1111,7 @@ function load_data_with_report(data::Dict)
                 if report.has_errors
                     add_note!(report, "processing_incomplete", 
                              "Skipping PTDF calculation due to network topology errors", "post-processing")
-                    return nothing, report
+                    return params, report
                 end
             end
             
