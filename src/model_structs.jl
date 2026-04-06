@@ -238,6 +238,7 @@ Base.@kwdef struct Parameters
     h::Dict{Tuple{String,String},Float64} = Dict{Tuple{String,String},Float64}()
     ptdf::Dict{Tuple{String,String},Float64} = Dict{Tuple{String,String},Float64}()
     cne_indicator::Dict{Tuple{String,Tuple{String,String}},Int} = Dict{Tuple{String,Tuple{String,String}},Int}()
+    slack_zone::Dict{String,Vector{String}} = Dict{String,Vector{String}}()
 
     # dcline parameters
     dcline_capacity::Dict{String,Float64} = Dict{String,Float64}()

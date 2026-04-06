@@ -43,6 +43,12 @@ print_report(report)
 - `configuration_error`: Critical setup issues
 - `incomplete_data`: Rows with missing critical information
 
+## Exporting the Report to CSV
+```@docs
+export_report
+```
+
+
 ## Detailed Validations
 
 ### Plants Data Validation

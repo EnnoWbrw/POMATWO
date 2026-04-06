@@ -750,6 +750,7 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
     @unpack b,
     h,
     slack,
+    slack_zone,
     acline_capacity,
     dcline_capacity,
     dc_start,
@@ -805,6 +806,14 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
     @constraint(m, LineLimitPos[l = L, t = T], LINEFLOW[l, t] <= acline_capacity[l])
 
     @constraint(m, LineLimitNeg[l = L, t = T], -acline_capacity[l] <= LINEFLOW[l, t])
+
+    if !isempty(slack_zone)
+        @constraint(
+            m,
+            SlackZoneBalance[zs = keys(slack_zone), t = T],
+            sum(NETINPUT[n, t] for n in slack_zone[zs]) == 0
+        )
+    end
 
 
     ### to dataframe

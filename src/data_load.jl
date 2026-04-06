@@ -138,13 +138,27 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
         return
     end
     
-    # Validate slack column values (should be 0 or 1)
-    if hasproperty(df_nodes, :slack)
-        slack_data = skipmissing(df_nodes[!, :slack])
-        if !all(x -> x in [0, 1, 0.0, 1.0], slack_data)
-            invalid_count = count(x -> !(x in [0, 1, 0.0, 1.0]), slack_data)
-            add_error!(report, "range_validation", 
-                      "Column 'slack' has $invalid_count values not in {0, 1}", location)
+    # Determine whether slack column uses string references or numeric 0/1
+    slack_is_string = eltype(skipmissing(df_nodes[!, :slack])) <: AbstractString
+
+    if !slack_is_string
+        # Legacy behaviour: validate slack column values (should be 0 or 1)
+        if hasproperty(df_nodes, :slack)
+            slack_data = skipmissing(df_nodes[!, :slack])
+            if !all(x -> x in [0, 1, 0.0, 1.0], slack_data)
+                invalid_count = count(x -> !(x in [0, 1, 0.0, 1.0]), slack_data)
+                add_error!(report, "range_validation", 
+                          "Column 'slack' has $invalid_count values not in {0, 1}", location)
+            end
+        end
+    else
+        # String slack: each value must reference an existing node index
+        all_indices = Set(skipmissing(df_nodes[!, :index]))
+        for s in unique(skipmissing(df_nodes[!, :slack]))
+            if !(s in all_indices)
+                add_error!(report, "invalid_slack_reference",
+                          "Slack value '$s' does not match any node index", location)
+            end
         end
     end
     
@@ -176,11 +190,15 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
         end
         
         push!(params.sets.N, row[:index])
-        # Handle both Int and Float slack values (CSV may read as 1.0)
-        if row[:slack] == 1 || row[:slack] == 1.0
-            push!(params.slack, row[:index])
-            slack_count += 1
+
+        if !slack_is_string
+            # Legacy numeric slack: 1 marks the node itself as slack
+            if row[:slack] == 1 || row[:slack] == 1.0
+                push!(params.slack, row[:index])
+                slack_count += 1
+            end
         end
+
         params.node2zone[row[:index]] = row[:zone]
         
         if "lat" in names(row) && "lon" in names(row)
@@ -204,13 +222,27 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
         end
     end
     
+    if slack_is_string
+        # Populate slack list in-place (multiple nodes may reference the same slack bus)
+        append!(params.slack, unique(df_nodes.slack))
+        slack_count = length(params.slack)
+
+        # Build slack_zone mapping when more than one unique slack value exists
+        if slack_count > 1
+            for gdf in groupby(df_nodes, :slack)
+                s = first(gdf.slack)
+                params.slack_zone[s] = Vector{String}(gdf.index)
+            end
+        end
+    end
+
     # Validate slack bus configuration
     if slack_count == 0
         add_error!(report, "configuration_error", 
                   "No slack bus defined (need at least one node with slack=1)", location)
     elseif slack_count > 1
         add_warning!(report, "configuration_warning", 
-                    "Multiple slack buses defined ($slack_count), this may cause issues", location)
+                    "Multiple slack buses defined ($slack_count), please ensure this is intended", location)
     end
     
     # Debug: print slack nodes to console
@@ -593,7 +625,6 @@ function add_dclines!(params::Parameters, path::AbstractString, report::DataRepo
         add_error!(report, "file_parsing", "Failed to parse DC lines file: $(string(e))", location)
     end
 end
-
 
 #############################################
 ##### Prs Demand Data #############################
@@ -1000,7 +1031,7 @@ function load_data_with_report(data::Dict)
         add_types!(params, data[:types], report, data[:types])
     catch e
         add_error!(report, "critical_error", "Failed to load required data: $(string(e))", "core data loading")
-        return params, report
+        return nothing, report
     end
     
     # Load optional data with validation
@@ -1111,7 +1142,7 @@ function load_data_with_report(data::Dict)
                 if report.has_errors
                     add_note!(report, "processing_incomplete", 
                              "Skipping PTDF calculation due to network topology errors", "post-processing")
-                    return params, report
+                    return nothing, report
                 end
             end
             

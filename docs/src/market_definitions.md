@@ -32,6 +32,23 @@ Exchange formulations define how power exchanges between zones are handled in zo
 NTC
 ```
 
+```@docs
+FlowBased
+```
+
+## GSK Strategies
+
+Generation Shift Keys (GSKs) define how zonal net positions are distributed to individual nodes when computing zonal PTDFs for flow-based market coupling.
+
+```@docs
+GSKStrategy
+FlatGSK
+GmaxGSK
+CustomWeightsGSK
+build_gsk
+zonal_ptdf
+```
+
 ## Load Flow Formulations
 
 Load flow formulations are used in nodal market and redispatch settings to model physical power flows under DC approximations.

@@ -1,23 +1,21 @@
 """
-    diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String})
+    diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String}, report::DataReport, location::String)
 
 Diagnostic function to identify why a matrix is singular.
 Checks for network islands, zero rows/columns, and rank deficiency.
+Diagnostic results are written to `report` via the `DataReport` API.
 """
-function diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String})
+function diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String}, report::DataReport, location::String="singular matrix diagnostics")
     n = size(b_red, 1)
-    
-    println("\n" * "="^60)
-    println("SINGULAR MATRIX DIAGNOSTICS")
-    println("="^60)
     
     # Check determinant
     det_val = det(BigFloat.(b_red))
-    println("Determinant: ", det_val)
     
     # Check rank
     r = rank(b_red)
-    println("Rank: $r / $n (deficit: $(n - r))")
+    add_note!(report, "singular_matrix_diagnostics",
+              "Determinant: $det_val, Rank: $r / $n (deficit: $(n - r))",
+              location)
     
     # Check for zero or near-zero rows/columns
     row_norms = [norm(b_red[i, :]) for i in 1:n]
@@ -27,62 +25,69 @@ function diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector
     zero_cols = findall(x -> x < 1e-10, col_norms)
     
     if !isempty(zero_rows)
-        println("\nNodes with near-zero rows (likely isolated or faulty line data):")
-        for i in zero_rows
-            println("  - $(included_nodes[i]) (row $i, norm: $(row_norms[i]))")
-        end
+        nodes_str = join(["$(included_nodes[i]) (row $i, norm: $(row_norms[i]))" for i in zero_rows], ", ")
+        add_warning!(report, "singular_matrix_diagnostics",
+                     "Nodes with near-zero rows (likely isolated or faulty line data): $nodes_str",
+                     location)
     end
     
     if !isempty(zero_cols)
-        println("\nNodes with near-zero columns (likely isolated or faulty line data):")
-        for j in zero_cols
-            println("  - $(included_nodes[j]) (col $j, norm: $(col_norms[j]))")
-        end
+        nodes_str = join(["$(included_nodes[j]) (col $j, norm: $(col_norms[j]))" for j in zero_cols], ", ")
+        add_warning!(report, "singular_matrix_diagnostics",
+                     "Nodes with near-zero columns (likely isolated or faulty line data): $nodes_str",
+                     location)
     end
     
     # Check condition number
     cond_num = cond(b_red)
-    println("\nCondition number: $cond_num")
     if cond_num > 1e12
-        println("  ⚠️  Matrix is severely ill-conditioned!")
+        add_warning!(report, "singular_matrix_diagnostics",
+                     "Condition number: $cond_num — matrix is severely ill-conditioned!",
+                     location)
+    else
+        add_note!(report, "singular_matrix_diagnostics",
+                  "Condition number: $cond_num",
+                  location)
     end
     
     # Check for disconnected components (simplified check)
     # A connected network should have rank = n-1 for the Laplacian-like matrix
-    println("\nExpected rank for connected network: $(n-1)")
-    println("Actual rank: $r")
     if r < n - 1
-        println("  ⚠️  Network likely has $(n - r) disconnected islands!")
+        add_error!(report, "singular_matrix_diagnostics",
+                   "Expected rank for connected network: $(n-1), actual rank: $r — network likely has $(n - r) disconnected islands!",
+                   location)
+    else
+        add_note!(report, "singular_matrix_diagnostics",
+                  "Expected rank for connected network: $(n-1), actual rank: $r",
+                  location)
     end
     
     # Show diagonal values
     diag_vals = diag(b_red)
-    println("\nDiagonal value statistics:")
-    println("  Min: $(minimum(diag_vals))")
-    println("  Max: $(maximum(diag_vals))")
-    println("  Mean: $(sum(diag_vals) / n)")
+    add_note!(report, "singular_matrix_diagnostics",
+              "Diagonal value statistics — Min: $(minimum(diag_vals)), Max: $(maximum(diag_vals)), Mean: $(sum(diag_vals) / n)",
+              location)
     
     near_zero_diag = findall(x -> abs(x) < 1e-6, diag_vals)
     if !isempty(near_zero_diag)
-        println("\nNodes with near-zero diagonal (suspicious):")
-        for i in near_zero_diag
-            println("  - $(included_nodes[i]): $(diag_vals[i])")
-        end
+        nodes_str = join(["$(included_nodes[i]): $(diag_vals[i])" for i in near_zero_diag], ", ")
+        add_warning!(report, "singular_matrix_diagnostics",
+                     "Nodes with near-zero diagonal (suspicious): $nodes_str",
+                     location)
     end
-    
-    println("="^60 * "\n")
 end
 
 """
-    diagnose_missing_slacks(included_nodes, slack_list, params)
+    diagnose_missing_slacks(island_nodes, slack_list, params, report, location)
 
 Identify disconnected AC islands among nodes included in the PTDF calculation and
 report which islands are missing a slack bus. Suggests a candidate slack node for
 each island that currently lacks one.
 
 Called automatically when the B-matrix is found to be singular.
+Diagnostic results are written to `report` via the `DataReport` API.
 """
-function diagnose_missing_slacks(island_nodes::Vector{String}, slack_list::Vector{String}, params::Parameters)
+function diagnose_missing_slacks(island_nodes::Vector{String}, slack_list::Vector{String}, params::Parameters, report::DataReport, location::String="island slack diagnostics")
     island_node_set = Set(island_nodes)
     L = params.sets.L
 
@@ -120,11 +125,9 @@ function diagnose_missing_slacks(island_nodes::Vector{String}, slack_list::Vecto
 
     slack_set = Set(slack_list)
 
-    println("\n" * "="^60)
-    println("ISLAND SLACK DIAGNOSTICS")
-    println("="^60)
-    println("Found $(length(islands)) AC island(s) among $(length(island_nodes)) nodes.")
-    println("Each island requires exactly 1 slack bus (set slack=1 in nodes.csv).\n")
+    add_note!(report, "island_slack_diagnostics",
+              "Found $(length(islands)) AC island(s) among $(length(island_nodes)) nodes. Each island requires exactly 1 slack bus.",
+              location)
 
     n_missing = 0
     for (i, island) in enumerate(sort(islands, by=length, rev=true))
@@ -132,28 +135,27 @@ function diagnose_missing_slacks(island_nodes::Vector{String}, slack_list::Vecto
         has_slack = !isempty(slack_in_island)
 
         if has_slack
-            println("  Island $i ($(length(island)) nodes): OK — slack: $(join(slack_in_island, ", "))")
+            add_note!(report, "island_slack_diagnostics",
+                      "Island $i ($(length(island)) nodes): OK — slack: $(join(slack_in_island, ", "))",
+                      location)
         else
             n_missing += 1
             candidate = first(sort(island))
-            sample = join(sort(island)[1:min(5, length(island))], ", ")
-            suffix = length(island) > 5 ? ", ..." : ""
-            println("  Island $i ($(length(island)) nodes): *** NO SLACK ***")
-            println("    → Suggested slack candidate: $candidate")
-            println("    → Sample nodes: $sample$suffix")
+            add_error!(report, "island_slack_diagnostics",
+                       "Island $i ($(length(island)) nodes): NO SLACK — suggested candidate: $candidate",
+                       location)
         end
     end
 
-    println()
     if n_missing > 0
-        println("ACTION REQUIRED: Add slack=1 to $n_missing more node(s) in nodes.csv.")
-        println("Choose one node per missing island (the suggested candidate is the first alphabetically).")
-        println("Any electrically sensible reference bus in each island is acceptable.")
+        add_error!(report, "island_slack_diagnostics",
+                   "Identified $n_missing island(s) without a slack bus. Each island must have exactly 1 slack node defined in the input data to ensure a non-singular B-matrix. Check report for details and suggested candidate nodes for slack assignment.",
+                   location)
     else
-        println("All islands already have a slack node.")
-        println("Singularity is likely caused by zero/near-zero line reactances — check line parameters.")
+        add_note!(report, "island_slack_diagnostics",
+                  "All islands already have a slack node. Singularity is likely caused by zero/near-zero line reactances — check line parameters.",
+                  location)
     end
-    println("="^60 * "\n")
 end
 
 function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
@@ -185,11 +187,9 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
 
     if !issymmetric(b)
         @warn "B-matrix is not symmetric. This indicates a numerical or algorithmic issue."
-        if !isnothing(report)
             add_error!(report, "matrix_calculation", 
                         "B-matrix is not symmetric - indicates numerical or algorithmic issue", 
                         "PTDF calculation")
-        end
     end
 
     calc_PTDF!(h, b, slack, N, L, params, report)
@@ -275,19 +275,17 @@ function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{S
 
                 # Run detailed diagnostics on reduced matrix
                 included_nodes = N[included_idx]
-                diagnose_singular_matrix(b_red, included_nodes)
+           
+                diagnose_singular_matrix(b_red, included_nodes, report, "PTDF calculation")
+    
 
                 # For island-slack diagnostics include slack buses (omit only PTDF-omitted nodes)
                 island_nodes_idx = setdiff(1:length(N), omit_idx)
                 island_nodes = N[island_nodes_idx]
-                diagnose_missing_slacks(island_nodes, slack_list, params)
-
-                if !isnothing(report)
+                    diagnose_missing_slacks(island_nodes, slack_list, params, report, "PTDF calculation")
                     add_warning!(report, "ptdf_calculation", 
-                                "B-matrix is singular - using pseudoinverse (may produce inaccurate PTDF values). See console output for detailed diagnostics.", 
+                                "B-matrix is singular - using pseudoinverse (may produce inaccurate PTDF values). Check report for detailed island slack diagnostics.", 
                                 "PTDF calculation")
-                end
-
                 b_red_inv = pinv(b_red)
             else
                 rethrow(e)

@@ -1,6 +1,3 @@
-# import Pkg
-# Pkg.develop is not needed when running from within the POMATWO package directory
-# Pkg.develop(path =".../POMATWO_merged_main__zonal_ptdf")
 using POMATWO
 using HiGHS
 
@@ -17,9 +14,6 @@ data_files= Dict{Symbol,String}(
     :demand => joinpath(datapath, "nodal_load.csv"),
     :types => joinpath(datapath, "planttypes.csv"),
     :avail => joinpath(datapath, "avail.csv"),
-    #:avail_planttype_zonal => joinpath(datapath, "avail_planttype_zonal_PL.csv"),
-    #:avail_planttype_zonal => joinpath(datapath, "avail_planttype_zonal_DE.csv"),
-    #:ntc => joinpath(datapath, "ntc.csv")
 )
 
 
