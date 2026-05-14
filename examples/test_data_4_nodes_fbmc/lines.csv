@@ -1,0 +1,4 @@
+node_i,node_j,voltage,b,capacity,index
+n2,n1,220,1,40,l1
+n1,n3,220,1,100,l2
+n2,n3,220,2,60,l3

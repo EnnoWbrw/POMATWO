@@ -33,6 +33,7 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:NoProsumer, R
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "DayAhead")
         ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
         fetch_results(sr)
         write_results(sr)
@@ -55,6 +56,7 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptim
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "DayAhead")
         ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
         fetch_results(sr)
         write_results(sr)
@@ -66,6 +68,7 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptim
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "Prosumer -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "Prosumer")
         fetch_results(sr)
         write_results(sr)
         da_results[:prs_netinput] = value.(sr.vars[:prosumer][:PRS_NETINPUT])
@@ -98,10 +101,8 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:NoProsumer, R
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "Redispatch -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "Redispatch")
         ProgressMeter.update!(prog, desc = "Redispatch -> Fetching Results")
-        if termination_status(sr.optigraph) != MOI.OPTIMAL
-            @show termination_status(sr.optigraph)
-        end
         fetch_results(sr)
         write_results(sr)
         finish!(prog, desc = "Subrun -> Done")
@@ -123,6 +124,7 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptim
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "DayAhead")
         ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
         fetch_results(sr)
         write_results(sr)
@@ -135,6 +137,7 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptim
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "Prosumer -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "Prosumer")
         fetch_results(sr)
         write_results(sr)
         da_results[:prs_netinput] = value.(sr.vars[:prosumer][:PRS_NETINPUT])
@@ -144,10 +147,8 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:ProsumerOptim
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "Redispatch -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "Redispatch")
         ProgressMeter.update!(prog, desc = "Redispatch -> Fetching Results")
-        if termination_status(sr.optigraph) != MOI.OPTIMAL
-            @show termination_status(sr.optigraph)
-        end
         fetch_results(sr)
         write_results(sr)
         finish!(prog, desc = "Subrun -> Done")
@@ -170,6 +171,7 @@ function _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsume
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "TwoDayAhead -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "TwoDayAhead")
         ProgressMeter.update!(prog, desc = "TwoDayAhead -> Fetching Results")
         fetch_results(sr)
         write_results_2DA(sr)
@@ -183,6 +185,7 @@ function _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsume
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "DayAhead")
         ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
         fetch_results(sr)
         write_results(sr)
@@ -193,10 +196,45 @@ function _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsume
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "Redispatch -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "Redispatch")
         ProgressMeter.update!(prog, desc = "Redispatch -> Fetching Results")
-        if termination_status(sr.optigraph) != MOI.OPTIMAL
-            @show termination_status(sr.optigraph)
-        end
+        fetch_results(sr)
+        write_results(sr)
+        finish!(prog, desc = "Subrun -> Done")
+    end
+end
+
+"""
+    _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsumer, RD<:NoRedispatch}
+
+Runs the market simulation for flow-based zonal markets without redispatch and no prosumer optimization.
+Performs TwoDayAhead basecase optimization, calculates FBMC parameters, then day-ahead optimization only, storing results for each time split.
+"""
+function _run(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}) where {PS<:NoProsumer, RD<:NoRedispatch}
+    for T in split(mr.setup.TimeHorizon)
+        @info "Starting subrun for period from $(T[1]) to $(T[end])"
+        # Basecase / TwoDayAhead optimization
+        prog = ProgressUnknown(desc = "TwoDayAhead - Basecase", spinner = true, dt = 0.1)
+        market_state = TwoDayAhead(T)
+        ProgressMeter.update!(prog, desc = "TwoDayAhead -> Building Model")
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "TwoDayAhead -> Optimizing")
+        @suppress optimize!(sr)
+        log_status(sr, "TwoDayAhead")
+        ProgressMeter.update!(prog, desc = "TwoDayAhead -> Fetching Results")
+        fetch_results(sr)
+        write_results_2DA(sr)
+        TwoDayAhead_results = prev_results_for_fbmc(sr)
+        # Calculate FBMC parameters from TwoDayAhead basecase
+        @show fbmc_params = calc_fbmc_params(sr, mr.params, TwoDayAhead_results)
+        # Zonal flow-based market optimization
+        ProgressMeter.update!(prog, desc = "DayAhead -> Building Model")
+        market_state = DayAhead(T, fbmc_params)
+        sr = SubRun(mr, market_state)
+        ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
+        @suppress optimize!(sr)
+        log_status(sr, "DayAhead")
+        ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
         fetch_results(sr)
         write_results(sr)
         finish!(prog, desc = "Subrun -> Done")
@@ -243,6 +281,7 @@ function _run_intraday(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}, fbmc_params
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "Intraday DayAhead -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "Intraday DayAhead")
         ProgressMeter.update!(prog, desc = "Intraday DayAhead -> Fetching Results")
         fetch_results(sr)
         write_results(sr)
@@ -254,10 +293,8 @@ function _run_intraday(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}, fbmc_params
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "Intraday Redispatch -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "Intraday Redispatch")
         ProgressMeter.update!(prog, desc = "Intraday Redispatch -> Fetching Results")
-        if termination_status(sr.optigraph) != MOI.OPTIMAL
-            @show termination_status(sr.optigraph)
-        end
         fetch_results(sr)
         write_results(sr)
         finish!(prog, desc = "Intraday Subrun -> Done")

@@ -466,6 +466,7 @@ function find_connected_zones(params::Parameters)
         z_end = node2zone[line_end[l]]
         if z_start != z_end
             push!(connected_zones, (z_start, z_end))
+            push!(connected_zones, (z_end, z_start))
         end
     end
     
@@ -475,8 +476,27 @@ function find_connected_zones(params::Parameters)
         z_end = node2zone[dc_end[dc]]
         if z_start != z_end
             push!(connected_zones, (z_start, z_end))
+            push!(connected_zones, (z_end, z_start))
         end
     end
     
+    return collect(connected_zones)
+end
+
+function find_connected_zones_ac(params::Parameters)
+    @unpack L, DC = params.sets
+    @unpack line_start, line_end, dc_start, dc_end, node2zone = params
+    
+    connected_zones = Set{Tuple{String, String}}()
+    
+    # Check AC lines for inter-zonal connections
+    for l in L
+        z_start = node2zone[line_start[l]]
+        z_end = node2zone[line_end[l]]
+        if z_start != z_end
+            push!(connected_zones, (z_start, z_end))
+            push!(connected_zones, (z_end, z_start))
+        end
+    end
     return collect(connected_zones)
 end

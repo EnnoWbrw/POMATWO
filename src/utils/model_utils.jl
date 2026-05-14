@@ -72,4 +72,20 @@ function JuMP.optimize!(sr::SubRun)
     optimize!(sr.optigraph)
 end
 
+function log_status(sr::SubRun, label::String="")
+    status = termination_status(sr.optigraph)
+    prefix = isempty(label) ? "" : "[$label] "
+    if status == MOI.OPTIMAL
+        @info "$(prefix)Optimization status: OPTIMAL (unique optimal solution)"
+    elseif status == MOI.DUAL_INFEASIBLE
+        @warn "$(prefix)Optimization status: DUAL_INFEASIBLE (model is unbounded — infinite optimal solutions possible)"
+    elseif status == MOI.INFEASIBLE
+        @warn "$(prefix)Optimization status: INFEASIBLE (no feasible solution exists)"
+    elseif status == MOI.INFEASIBLE_OR_UNBOUNDED
+        @warn "$(prefix)Optimization status: INFEASIBLE_OR_UNBOUNDED (model is either infeasible or unbounded)"
+    else
+        @warn "$(prefix)Optimization status: $status"
+    end
+end
+
 

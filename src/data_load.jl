@@ -131,126 +131,73 @@ end
 #############################################
 
 # Load node data from file path into Parameters structure (Level 1)
+#
+# The `slack` column uses a reference-based format: every node's value is the index
+# of the slack bus that balances its area.  A node that is its own slack bus must
+# reference its own index.  Example for a 4-node network where n2/n3/n1 share a slack:
+#
+#   index | zone | slack
+#   n1    | Z1   | n3     ← n1 is balanced by n3
+#   n2    | Z2   | n3     ← n2 is balanced by n3
+#   n3    | Z2   | n3     ← n3 is the slack bus for {n1, n2, n3}
+#   n4    | Z3   | n4     ← n4 is its own slack
+#
+# Resulting params:
+#   params.slack      = ["n3", "n4"]
+#   params.slack_zone = Dict("n3"=>["n1","n2","n3"], "n4"=>["n4"])
+#
+# Legacy format (0/1): still accepted with a deprecation warning.  In that format
+# every node with slack=1 becomes a standalone slack bus (no zone grouping).
+
 function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::DataReport, location::String="nodes data")
-    # Validate required columns
+    # Validate required columns and structure
     required_columns = [:index, :zone, :slack]
     if !validate_required_columns(report, df_nodes, required_columns, location)
         return
     end
-    
-    # Determine whether slack column uses string references or numeric 0/1
-    slack_is_string = eltype(skipmissing(df_nodes[!, :slack])) <: AbstractString
 
-    if !slack_is_string
-        # Legacy behaviour: validate slack column values (should be 0 or 1)
-        if hasproperty(df_nodes, :slack)
-            slack_data = skipmissing(df_nodes[!, :slack])
-            if !all(x -> x in [0, 1, 0.0, 1.0], slack_data)
-                invalid_count = count(x -> !(x in [0, 1, 0.0, 1.0]), slack_data)
-                add_error!(report, "range_validation", 
-                          "Column 'slack' has $invalid_count values not in {0, 1}", location)
-            end
-        end
-    else
-        # String slack: each value must reference an existing node index
-        all_indices = Set(skipmissing(df_nodes[!, :index]))
-        for s in unique(skipmissing(df_nodes[!, :slack]))
-            if !(s in all_indices)
-                add_error!(report, "invalid_slack_reference",
-                          "Slack value '$s' does not match any node index", location)
-            end
+    if hasproperty(df_nodes, :index)
+        indices = df_nodes[!, :index]
+        if length(indices) != length(unique(indices))
+            add_error!(report, "duplicate_values",
+                      "Found $(length(indices) - length(unique(indices))) duplicate node indices", location)
         end
     end
-    
-    # Validate coordinate columns if present
+
     for coord_col in [:lat, :lon, :latitude, :longitude]
         if hasproperty(df_nodes, coord_col)
             validate_numeric_column(report, df_nodes, coord_col, location; required=false)
         end
     end
-    
-    # Check for duplicate node indices
-    if hasproperty(df_nodes, :index)
-        indices = df_nodes[!, :index]
-        unique_indices = unique(indices)
-        if length(indices) != length(unique_indices)
-            duplicate_count = length(indices) - length(unique_indices)
-            add_error!(report, "duplicate_values", 
-                      "Found $duplicate_count duplicate node indices", location)
-        end
-    end
-    
-    slack_count = 0
-    for row in eachrow(df_nodes)
-        # Skip rows with critical missing data
-        if ismissing(row[:index]) || ismissing(row[:zone]) || ismissing(row[:slack])
-            add_warning!(report, "incomplete_data", 
-                        "Skipping node row with missing critical data", location)
-            continue
-        end
-        
-        push!(params.sets.N, row[:index])
 
-        if !slack_is_string
-            # Legacy numeric slack: 1 marks the node itself as slack
-            if row[:slack] == 1 || row[:slack] == 1.0
-                push!(params.slack, row[:index])
-                slack_count += 1
-            end
-        end
+    # Detect format: legacy 0/1 if all non-missing slack values are in {0, 1}
+    non_missing_slack = collect(skipmissing(df_nodes[!, :slack]))
+    legacy_mode = !isempty(non_missing_slack) &&
+                  all(x -> x in [0, 1, 0.0, 1.0, "0", "1"], non_missing_slack)
 
-        params.node2zone[row[:index]] = row[:zone]
-        
-        if "lat" in names(row) && "lon" in names(row)
-            if !ismissing(row[:lat]) && !ismissing(row[:lon])
-                params.node_coords[row[:index]] = [row[:lon], row[:lat]]
-            else
-                params.node_coords[row[:index]] = [0.0, 0.0]
-                add_note!(report, "missing_coordinates", 
-                         "Node $(row[:index]) missing coordinates, using [0.0, 0.0]", location)
-            end
-        elseif "latitude" in names(row) && "longitude" in names(row)
-            if !ismissing(row[:latitude]) && !ismissing(row[:longitude])
-                params.node_coords[row[:index]] = [row[:longitude], row[:latitude]]
-            else
-                params.node_coords[row[:index]] = [0.0, 0.0]
-                add_note!(report, "missing_coordinates", 
-                         "Node $(row[:index]) missing coordinates, using [0.0, 0.0]", location)
-            end
-        else
-            params.node_coords[row[:index]] = [0.0, 0.0]
-        end
-    end
-    
-    if slack_is_string
-        # Populate slack list in-place (multiple nodes may reference the same slack bus)
-        append!(params.slack, unique(df_nodes.slack))
-        slack_count = length(params.slack)
-
-        # Build slack_zone mapping when more than one unique slack value exists
-        if slack_count > 1
-            for gdf in groupby(df_nodes, :slack)
-                s = first(gdf.slack)
-                params.slack_zone[s] = Vector{String}(gdf.index)
-            end
-        end
+    if legacy_mode
+        _add_nodes_legacy!(params, df_nodes, report, location)
+    else
+        _add_nodes_reference!(params, df_nodes, report, location)
     end
 
-    # Validate slack bus configuration
+    # Validate resulting slack configuration
+    slack_count = length(params.slack)
     if slack_count == 0
-        add_error!(report, "configuration_error", 
-                  "No slack bus defined (need at least one node with slack=1)", location)
+        add_error!(report, "configuration_error",
+                  "No slack bus defined. In the reference format, at least one node must " *
+                  "have its 'slack' value equal to its own index.", location)
     elseif slack_count > 1
-        add_warning!(report, "configuration_warning", 
-                    "Multiple slack buses defined ($slack_count), please ensure this is intended", location)
+        add_warning!(report, "configuration_warning",
+                    "Multiple slack buses defined ($slack_count). " *
+                    "Please ensure this is intended.", location)
     end
-    
-    # Debug: print slack nodes to console
+
     if !isempty(params.slack)
         @info "Slack buses loaded from CSV: $(join(sort(params.slack), ", "))"
     end
-    
-    add_note!(report, "data_summary", 
+
+    add_note!(report, "data_summary",
               "Loaded $(length(params.sets.N)) nodes with $slack_count slack bus(es)", location)
 end
 
@@ -808,9 +755,9 @@ function add_ntc!(params::Parameters, df_ntc::AbstractDataFrame, report::DataRep
     for row in eachrow(df_ntc)
         i, j = row[:zone_i], row[:zone_j]
         push!(params.sets.NTC, (i, j))
-        if :ntc ∉ names(row) || ismissing(row[:ntc])
-            add_warning!(report, "incomplete_data", 
-                        "Skipping NTC row with missing ntc value", location)
+        if "ntc" ∉ names(row) || ismissing(row[:ntc])
+            add_error!(report, "incomplete_data", 
+                        "Row has a missing ntc value", location)
             continue
         end
         params.ntc[i, j] = row[:ntc]

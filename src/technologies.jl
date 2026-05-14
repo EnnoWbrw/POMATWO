@@ -766,7 +766,7 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
         incidence[l, line_end[l]] = 1
     end
 
-    dcincidence = Containers.DenseAxisArray(zeros(Int, length(L), length(N)), DC, N)
+    dcincidence = Containers.DenseAxisArray(zeros(Int, length(DC), length(N)), DC, N)
     for dc in DC
         dcincidence[dc, dc_start[dc]] = -1
         dcincidence[dc, dc_end[dc]] = 1
@@ -798,6 +798,12 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
         sum(dcincidence[dc, n] * F[t, dc] for dc in DC)
     )
 
+    @expression(
+    m,
+    ACINJECTION[n = N, t = T],
+    sum(incidence[l, n] * LINEFLOW[l, t] for l in L)
+    )
+
     for n in slack, t in T
         JuMP.fix(THETA[t, n], 0)
     end
@@ -811,7 +817,7 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
         @constraint(
             m,
             SlackZoneBalance[zs = keys(slack_zone), t = T],
-            sum(NETINPUT[n, t] for n in slack_zone[zs]) == 0
+            sum(ACINJECTION[n, t] for n in slack_zone[zs]) == 0
         )
     end
 
@@ -928,10 +934,14 @@ end
 
 function add_exchange(sr::SubRun, ::Type{FlowBased})
     T = sr.market_state.Time
-    @unpack Z, L = sr.modelrun.params.sets
-    @unpack fixed_exchange = sr.modelrun.params
+    @unpack Z, L , DC, N= sr.modelrun.params.sets
+    @unpack fixed_exchange, 
+    dcline_capacity, 
+    dc_start, 
+    dc_end, 
+    nodes_in_zone = sr.modelrun.params
     fbmc_params = sr.market_state.fbmc_params
-    connected_zones = find_connected_zones(sr.modelrun.params)
+    connected_zones_ac = find_connected_zones_ac(sr.modelrun.params)
     # Check if fbmc_params were calculated
     if isnothing(fbmc_params)
         error("FlowBased market requires fbmc_params but none were provided. Flow-based markets require RedispatchType setup to run the TwoDayAhead basecase.")
@@ -939,18 +949,33 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
         importing::Dict{String,Vector{String}} = Dict{String,Vector{String}}()
         exporting::Dict{String,Vector{String}} = Dict{String,Vector{String}}()
     for z in Z
-        imp = [zz for zz in Z if (zz, z) in connected_zones]
+        imp = [zz for zz in Z if (zz, z) in connected_zones_ac]
         isempty(imp) || (importing[z] = imp)
-        exp = [zz for zz in Z if (z, zz) in connected_zones]
+        exp = [zz for zz in Z if (z, zz) in connected_zones_ac]
         isempty(exp) || (exporting[z] = exp)
+    end
+
+    dcincidence = Containers.DenseAxisArray(zeros(Int, length(DC), length(N)), DC, N)
+    for dc in DC
+        dcincidence[dc, dc_start[dc]] = -1
+        dcincidence[dc, dc_end[dc]] = 1
     end
     m = sr.network
 
-    @variable(m, 0 <= EX[(z, zz) = connected_zones, t = T])
+    @variable(m, 0 <= EX[(z, zz) = connected_zones_ac, t = T])
+
+    # @variable(m, DELTA[N, T])
+    @variable(m, 0 <= F_POS[T, dc = DC] <= dcline_capacity[dc])
+    @variable(m, 0 <= F_NEG[T, dc = DC] <= dcline_capacity[dc])
+    @expression(m, F[t = T, dc = DC], F_POS[t, dc] - F_NEG[t, dc])
+
+    @expression(m, DCINJECTION[z = Z, t = T],
+    sum(sum(dcincidence[dc, n] * F[t, dc] for dc in DC) for n in nodes_in_zone[z])
+    )
 
     @expression(
         m,
-        EXCHANGE[z = Z, t = T],
+        NP[z = Z, t = T],
         0 +
         (
             if haskey(importing, z)
@@ -965,13 +990,6 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
             else
                 0
             end
-        ) +
-        (
-            if haskey(fixed_exchange, z)
-                fixed_exchange[z][t]
-            else
-                0
-            end
         )
     )
 
@@ -979,21 +997,23 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     @constraint(
         m, 
         FBMC_pos[l = L, t = T], 
-        sum(fbmc_params[:PTDFz][l, z] * EXCHANGE[z, t] for z in Z) <= fbmc_params[:RAM][l] 
+        sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l] 
     )
 
         @constraint(
         m, 
         FBMC_neg[l = L, t = T], 
-       - sum(fbmc_params[:PTDFz][l, z] * EXCHANGE[z, t] for z in Z) <= fbmc_params[:RAM][l] 
+       - sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l] 
     )
+
+    @expression(m, EXCHANGE[z = Z, t = T], NP[z, t] + DCINJECTION[z, t])
 
 
     ### to dataframe
     df_ntc(sr.results)
     df_exchange(sr.results)
 
-    for (z, zz) in connected_zones, t in T
+    for (z, zz) in connected_zones_ac, t in T
         push!(sr.results[:BIL_EXCHANGE], (From = z, To = zz, Time = t, BIL_EXCHANGE = EX[(z, zz), t]))
     end
 
