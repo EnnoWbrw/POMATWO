@@ -723,32 +723,38 @@ project_point2f(x, y) = project(x, y) |> Point2f
 
 function prepare_lineplot_data(results_path, data, exclude_dc_lines, threshhold)
     results = DataFiles(results_path)
+    nodes = CSV.read(data[:nodes], DataFrame)
+    missing_cols = setdiff(["index", "lon", "lat"], names(nodes))
+    if !isempty(missing_cols)
+        error("Node file is missing required column(s): $(join(missing_cols, ", ")). "
+            * "Found: $(join(names(nodes), ", "))")
+    end
+    node_coords = Dict(row.index => (row.lon, row.lat) for row in eachrow(nodes))
+    node_lonlat = Dict(n => project_point2f.(c[1], c[2]) for (n, c) in node_coords)
+
     if exclude_dc_lines
         lines_input = select!(
             CSV.read(data[:lines], DataFrame),
-            [:index, :node_i, :node_j, :lat_i, :lon_i, :lat_j, :lon_j],
+            [:index, :node_i, :node_j],
         )
     else
         ac_lines = select!(
             CSV.read(data[:lines], DataFrame),
-            [:index, :node_i, :node_j, :lat_i, :lon_i, :lat_j, :lon_j],
+            [:index, :node_i, :node_j],
         )
         dc_lines = select!(
             CSV.read(data[:dclines], DataFrame),
-            [:index, :node_i, :node_j, :lat_i, :lon_i, :lat_j, :lon_j],
+            [:index, :node_i, :node_j],
         )
         lines_input = vcat(ac_lines, dc_lines)
     end
 
     line_from_to = Dict(
         row.index => (
-            project_point2f.(row.lon_i, row.lat_i),
-            project_point2f.(row.lon_j, row.lat_j),
+            project_point2f.(node_coords[row.node_i][1], node_coords[row.node_i][2]),
+            project_point2f.(node_coords[row.node_j][1], node_coords[row.node_j][2]),
         ) for row in eachrow(lines_input)
     )
-    nodes = CSV.read(data[:nodes], DataFrame)
-    node_lonlat =
-        Dict(row.index => project_point2f.(row.lon, row.lat) for row in eachrow(nodes))
 
 
     df_redisp = @chain results.REDISP begin
@@ -1120,24 +1126,29 @@ fig = plot_network(datafiles)
 ```
 """
 function POMATWO.plot_network(data::Dict{Symbol,String})
-    ac_lines = select!(CSV.read(data[:lines], DataFrame), [:lat_i, :lon_i, :lat_j, :lon_j])
-    dc_lines =
-        select!(CSV.read(data[:dclines], DataFrame), [:lat_i, :lon_i, :lat_j, :lon_j])
     nodes = CSV.read(data[:nodes], DataFrame)
+    missing_cols = setdiff(["index", "lon", "lat"], names(nodes))
+    if !isempty(missing_cols)
+        error("Node file is missing required column(s): $(join(missing_cols, ", ")). "
+            * "Found: $(join(names(nodes), ", "))")
+    end
+    node_coords = Dict(row.index => (row.lon, row.lat) for row in eachrow(nodes))
+
+    ac_lines = select!(CSV.read(data[:lines], DataFrame), [:node_i, :node_j])
+    dc_lines = select!(CSV.read(data[:dclines], DataFrame), [:node_i, :node_j])
     fig, ax = create_lineplot_layout()
 
-
     for row in eachrow(ac_lines)
-        from = project_point2f.(row.lon_i, row.lat_i)
-        to = project_point2f.(row.lon_j, row.lat_j)
+        from = project_point2f.(node_coords[row.node_i][1], node_coords[row.node_i][2])
+        to = project_point2f.(node_coords[row.node_j][1], node_coords[row.node_j][2])
         lw = 1
         c = :black
         lines!(ax, [from, to], color = (c, 0.98), linewidth = lw)
     end
 
     for row in eachrow(dc_lines)
-        from = project_point2f.(row.lon_i, row.lat_i)
-        to = project_point2f.(row.lon_j, row.lat_j)
+        from = project_point2f.(node_coords[row.node_i][1], node_coords[row.node_i][2])
+        to = project_point2f.(node_coords[row.node_j][1], node_coords[row.node_j][2])
         lw = 1
         c = :black
         lines!(ax, [from, to], color = (c, 0.98), linewidth = lw, linestyle = :dash)
