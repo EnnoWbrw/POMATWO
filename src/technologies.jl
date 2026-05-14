@@ -939,7 +939,8 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     dcline_capacity, 
     dc_start, 
     dc_end, 
-    nodes_in_zone = sr.modelrun.params
+    nodes_in_zone,
+    cne = sr.modelrun.params
     fbmc_params = sr.market_state.fbmc_params
     connected_zones_ac = find_connected_zones_ac(sr.modelrun.params)
     # Check if fbmc_params were calculated
@@ -996,13 +997,13 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     # Flow-based constraints: for each line, the zonal exchange weighted by PTDF must respect RAM
     @constraint(
         m, 
-        FBMC_pos[l = L, t = T], 
+        FBMC_pos[l = cne, t = T], 
         sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l][t] 
     )
 
         @constraint(
         m, 
-        FBMC_neg[l = L, t = T], 
+        FBMC_neg[l = cne, t = T], 
        - sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l][t] 
     )
 
