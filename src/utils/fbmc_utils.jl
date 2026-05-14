@@ -70,9 +70,10 @@ end
 
 Identify Critical Network Elements (CNE) based on zone-to-zone PTDF values and store results in params.
 
-Filters the zone-to-zone PTDF matrix to retain only lines with absolute PTDF values 
-above the specified threshold for each zone pair. The cne_indicator results are saved
-to params.cne_indicator as a dictionary indexed by (line, (zone_export, zone_import)).
+A line is classified as a CNE if the maximum absolute PTDF value across all zone pairs
+exceeds the specified threshold. Lines not meeting this criterion are zeroed out in the
+returned matrix. The cne_indicator results are saved to params.cne_indicator as a
+dictionary indexed by (line, (zone_export, zone_import)).
 
 # Arguments
 - `params::Parameters`: Parameters object where cne_indicator will be stored
@@ -91,91 +92,88 @@ PTDFzz = zone_to_zone_ptdf(PTDFz)
 CNE = define_cne!(params, PTDFzz; threshold=0.05)
 ```
 """
-function define_cne(params::Parameters, PTDFzz::DenseAxisArray; threshold::Float64=0.05)
-    lines = axes(PTDFzz, 1)
-    pairs = axes(PTDFzz, 2)
-    
-    # Create a copy to avoid modifying original
-    CNE = Containers.DenseAxisArray(copy(PTDFzz.data), lines, pairs)
-    
-    # Zero out all entries with absolute value below threshold
-    CNE.data[abs.(CNE.data) .< threshold] .= 0
-    
-    # Store binary indicator matrix in params: 1 if above threshold, 0 otherwise
-    for (i, line) in enumerate(lines)
-        for (j, pair) in enumerate(pairs)
-            indicator = abs(PTDFzz.data[i, j]) >= threshold ? 1 : 0
-            params.cne_indicator[line, pair] = indicator
-        end
+function define_cne!(params::Parameters, PTDFzz::DenseAxisArray; threshold::Float64=0.05)
+    # If no initial list is provided, start from all network lines
+    if isempty(params.cne)
+        append!(params.cne, params.sets.L)
     end
-    
-    return CNE
+
+    # Remove lines whose max absolute PTDF across all zone pairs does not exceed the threshold
+    # filter!(params.cne) do line
+    #     line in axes(PTDFzz, 1) && maximum(abs.(PTDFzz[line, :])) > threshold
+    # end
 end
 
 
 """
-    calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFzz::DenseAxisArray)
+    calc_ram(params, TwoDayAhead_results, PTDFz, PTDFzz, PTDFn, T; minRAM, FRM)
 
-Build Reserve Available Margin (RAM) for transmission lines.
+Compute the Available Remaining Margin (RAM) for every CNE line and timestep.
 
-For non-CNE lines, RAM equals the line capacity from params. For CNE lines, RAM is the maximum of:
-1. 70% of line capacity, or
-2. Line capacity minus current lineflow.
+The calculation follows the standard FBMC methodology:
+
+1. Basecase flow (f0):  
+   `f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]`
+
+2. Additional Margin Requirement (AMR) — ensures the 70 %‑rule:  
+   `AMR[l,t] = max(0, minRAM * f̄[l] - (f̄[l] - f0[l,t] - FRM[l]))`
+
+3. RAM:  
+   `RAM[l,t] = f̄[l] - f0[l,t] - FRM[l] + AMR[l,t]`
 
 # Arguments
-- `params::Parameters`: Parameters object containing acline_capacity and cne_indicator
-- `TwoDayAhead_results::Dict`: Results dictionary with :lineflows key containing lineflow data
-- `PTDFzz::DenseAxisArray`: Zone-to-zone PTDF matrix (lines × zone pairs)
+- `params`: model parameters (acline_capacity, nodes_in_zone, cne, sets.Z)
+- `TwoDayAhead_results`: dict with `:lineflows` (DenseAxisArray [l,t]) and `:netinput` (DenseAxisArray [n,t])
+- `PTDFz`: zonal PTDF matrix (l×z)
+- `PTDFzz`: zone-to-zone PTDF matrix (l×zone_pairs)
+- `PTDFn`: nodal PTDF matrix (l×n)
+- `T`: time range
+
+# Keyword Arguments
+- `minRAM`: minimum RAM fraction of line capacity (default `0.7`, i.e. 70 %-rule)
+- `FRM`: Flow Reliability Margin as a fraction of capacity (default `0.0`)
 
 # Returns
-- `ram::Dict{String,Float64}`: Dictionary mapping line names to their RAM values
+- `ram::Dict{String, Vector{Float64}}`: RAM per line, one value per timestep in `T`
 """
-function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFzz::DenseAxisArray)
-    lines = axes(PTDFzz, 1)
-    pairs = axes(PTDFzz, 2)
-    
-    # Initialize RAM dictionary
-    ram = Dict{String,Float64}()
-    
-    # Get lineflows from TwoDayAhead_results
+function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxisArray, PTDFzz::DenseAxisArray, PTDFn::DenseAxisArray, T::UnitRange; minRAM::Float64=0.7, FRM::Float64=0.1)
+    cne_lines = params.cne
+
+    # Initialize RAM dictionary: line -> Vector over T
+    ram = Dict{String, Vector{Float64}}()
+
+    # lineflows[l, t] and netinput[n, t] from TwoDayAhead basecase
     lineflows = TwoDayAhead_results[:lineflows]
+    netinput  = TwoDayAhead_results[:netinput]
 
-    get_lineflow(line::String) = if lineflows isa AbstractDict
-        abs(get(lineflows, line, 0.0))
-    elseif lineflows isa DenseAxisArray
-        line_idx = findfirst(==(line), axes(lineflows, 1))
-        isnothing(line_idx) && return 0.0
-
-        if ndims(lineflows) == 1
-            abs(lineflows.data[line_idx])
-        elseif ndims(lineflows) == 2
-            maximum(abs, @view lineflows.data[line_idx, :])
-        else
-            error("Unsupported lineflows dimensions in calc_ram: $(ndims(lineflows)). Expected 1D or 2D.")
-        end
-    else
-        error("Unsupported lineflows container type in calc_ram: $(typeof(lineflows)).")
+    # Net position per zone per timestep: NP[z, t] = Σ_n∈z netinput[n, t]
+    zones = params.sets.Z
+    NP = Dict{Tuple{String, Int}, Float64}()
+    for z in zones, t in T
+        NP[z, t] = sum(netinput[n, t] for n in params.nodes_in_zone[z])
     end
-    
-    # Process each line
-    for (i, line) in enumerate(lines)
-        # Check if this line is a CNE (any 1 in its row)
-        is_cne = any(get(params.cne_indicator, (line, pair), 0) == 1 for pair in pairs)
-        
-        # Get capacity from params
-        capacity = get(params.acline_capacity, line, 0.0)
-        
-        if is_cne
-            # For CNE lines: max of 70% capacity or (capacity - lineflow)
-            flow = get_lineflow(line)
-            option1 = 0.7 * capacity
-            option2 = capacity - flow
-            ram[line] = max(option1, option2)
-        else
-            # For non-CNE lines: full capacity
-            ram[line] = capacity
+
+    # Basecase flow f0[l, t]: observed flow minus the part explained by zonal net positions
+    # f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]
+    l0 = Dict{Tuple{String, Int}, Float64}()
+    for l in cne_lines, t in T
+        l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
+    end
+
+    # Compute AMR and RAM per line per timestep
+    for line in cne_lines
+        f_max = get(params.acline_capacity, line, 0.0)
+        frm_abs = FRM * f_max   # FRM as absolute MW
+        ram[line] = Vector{Float64}(undef, length(T))
+        for (i, t) in enumerate(T)
+            f0      = l0[line, t]
+            # Margin without AMR
+            initalRAM = f_max - f0 - frm_abs
+            # AMR: adjustment for minimum RAM needed to guarantee at least minRAM * f_max
+            amr = max(0.0, minRAM * f_max - initalRAM)
+            ram[line][i] = initalRAM + amr
         end
-    end   
+    end
     return ram
 end
 
@@ -222,7 +220,7 @@ Calculate FBMC parameters: GSK, PTDFn, PTDFz, PTDFzz.
     * `:PTDFzz` => Zone-to-zone PTDF matrix (l×m)
     * `:RAM` => Dict mapping lines to remaining available margin
 """
-function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Dict ; zone_order=nothing, normalize_empty::Symbol=:flat)
+function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Dict, T; zone_order=nothing, normalize_empty::Symbol=:flat, minRAM::Float64=0.7, FRM::Float64=0.1)
     # Extract GSKStrategy from the market setup
     market_type = sr.modelrun.setup.MarketType
     gsk_strategy = market_type.exchange_formulation.GSKStrategy
@@ -231,8 +229,8 @@ function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Di
     PTDFn = dict_to_matrix(params.ptdf) 
     PTDFz = zonal_ptdf(PTDFn, GSK)
     PTDFzz = zone_to_zone_ptdf(PTDFz; exclude_self=true)
-    CNE = define_cne(params, PTDFzz; threshold=0.05)
-    RAM = calc_ram(params, TwoDayAhead_result, PTDFzz)
+    define_cne!(params, PTDFzz; threshold=0.05)
+    RAM = calc_ram(params, TwoDayAhead_result, PTDFz, PTDFzz, PTDFn, T; minRAM=minRAM, FRM=FRM)
     fbmc_params = Dict(
         :GSK => GSK,
         :PTDFn => PTDFn,

@@ -997,13 +997,13 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     @constraint(
         m, 
         FBMC_pos[l = L, t = T], 
-        sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l] 
+        sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l][t] 
     )
 
         @constraint(
         m, 
         FBMC_neg[l = L, t = T], 
-       - sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l] 
+       - sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l][t] 
     )
 
     @expression(m, EXCHANGE[z = Z, t = T], NP[z, t] + DCINJECTION[z, t])

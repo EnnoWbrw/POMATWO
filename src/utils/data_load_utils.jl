@@ -500,3 +500,114 @@ function find_connected_zones_ac(params::Parameters)
     end
     return collect(connected_zones)
 end
+
+
+# Store coordinates for a single node row into params.node_coords
+function _load_node_coords!(params::Parameters, row, report::DataReport, location::String)
+    if "lat" in names(row) && "lon" in names(row)
+        if !ismissing(row[:lat]) && !ismissing(row[:lon])
+            params.node_coords[row[:index]] = [row[:lon], row[:lat]]
+        else
+            params.node_coords[row[:index]] = [0.0, 0.0]
+            add_note!(report, "missing_coordinates",
+                     "Node $(row[:index]) missing coordinates, using [0.0, 0.0]", location)
+        end
+    elseif "latitude" in names(row) && "longitude" in names(row)
+        if !ismissing(row[:latitude]) && !ismissing(row[:longitude])
+            params.node_coords[row[:index]] = [row[:longitude], row[:latitude]]
+        else
+            params.node_coords[row[:index]] = [0.0, 0.0]
+            add_note!(report, "missing_coordinates",
+                     "Node $(row[:index]) missing coordinates, using [0.0, 0.0]", location)
+        end
+    else
+        params.node_coords[row[:index]] = [0.0, 0.0]
+    end
+end
+
+# Load nodes using the legacy 0/1 slack format (deprecated).
+# Emits a deprecation warning. Each node with slack=1 becomes a standalone slack bus;
+# no slack_zone grouping is built.
+function _add_nodes_legacy!(params::Parameters, df_nodes::AbstractDataFrame, report::DataReport, location::String)
+    add_warning!(report, "deprecated_slack_format",
+        "The numeric 0/1 'slack' column format is deprecated. " *
+        "Use node index references instead: set each node's 'slack' value to the " *
+        "index of its slack bus (or to its own index if it IS the slack bus). " *
+        "Support for the 0/1 format may be removed in a future version.", location)
+
+    for row in eachrow(df_nodes)
+        if ismissing(row[:index]) || ismissing(row[:zone]) || ismissing(row[:slack])
+            add_warning!(report, "incomplete_data",
+                        "Skipping node row with missing critical data", location)
+            continue
+        end
+
+        push!(params.sets.N, row[:index])
+        params.node2zone[row[:index]] = row[:zone]
+
+        if row[:slack] == 1 || row[:slack] == 1.0 || row[:slack] == "1"
+            push!(params.slack, string(row[:index]))
+        end
+
+        _load_node_coords!(params, row, report, location)
+    end
+end
+
+# Validate the reference-based slack column and raise errors for inconsistencies.
+function _validate_slack_references(df_nodes::AbstractDataFrame, report::DataReport, location::String)
+    non_missing_slack = collect(skipmissing(df_nodes[!, :slack]))
+    all_indices = Set(string.(skipmissing(df_nodes[!, :index])))
+
+    # Every slack value must point to a known node index
+    for s in unique(non_missing_slack)
+        if !(string(s) in all_indices)
+            add_error!(report, "invalid_slack_reference",
+                      "Slack value '$s' does not match any node index", location)
+        end
+    end
+
+    # A node referenced as a slack bus by others must also reference itself
+    index_to_slack = Dict(string(row[:index]) => string(row[:slack])
+                          for row in eachrow(df_nodes)
+                          if !ismissing(row[:index]) && !ismissing(row[:slack]))
+    for s in unique(values(index_to_slack))
+        if haskey(index_to_slack, s) && index_to_slack[s] != s
+            add_error!(report, "invalid_slack_reference",
+                      "Node '$s' is referenced as a slack bus by other nodes, " *
+                      "but its own 'slack' value is '$(index_to_slack[s])'. " *
+                      "A slack bus must reference itself.", location)
+        end
+    end
+end
+
+# Load nodes using the reference-based slack format.
+# Builds both params.slack (self-referencing nodes) and params.slack_zone (all groups).
+function _add_nodes_reference!(params::Parameters, df_nodes::AbstractDataFrame, report::DataReport, location::String)
+    _validate_slack_references(df_nodes, report, location)
+
+    for row in eachrow(df_nodes)
+        if ismissing(row[:index]) || ismissing(row[:zone]) || ismissing(row[:slack])
+            add_warning!(report, "incomplete_data",
+                        "Skipping node row with missing critical data", location)
+            continue
+        end
+
+        push!(params.sets.N, row[:index])
+        params.node2zone[row[:index]] = row[:zone]
+        _load_node_coords!(params, row, report, location)
+    end
+
+    # Slack buses are the nodes whose slack value equals their own index
+    for row in eachrow(df_nodes)
+        if !ismissing(row[:index]) && !ismissing(row[:slack]) &&
+           string(row[:index]) == string(row[:slack])
+            push!(params.slack, string(row[:index]))
+        end
+    end
+
+    # Group every node by its slack reference to build slack_zone
+    for gdf in groupby(df_nodes, :slack)
+        s = string(first(gdf[!, :slack]))
+        params.slack_zone[s] = string.(gdf[!, :index])
+    end
+end
