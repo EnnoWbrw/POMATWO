@@ -99,9 +99,9 @@ function define_cne!(params::Parameters, PTDFzz::DenseAxisArray; threshold::Floa
     end
 
     # Remove lines whose max absolute PTDF across all zone pairs does not exceed the threshold
-    # filter!(params.cne) do line
-    #     line in axes(PTDFzz, 1) && maximum(abs.(PTDFzz[line, :])) > threshold
-    # end
+    filter!(params.cne) do line
+        maximum(abs.(PTDFzz[line, :])) > threshold
+    end
 end
 
 
@@ -143,35 +143,44 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     ram = Dict{String, Vector{Float64}}()
 
     # lineflows[l, t] and netinput[n, t] from TwoDayAhead basecase
-    lineflows = TwoDayAhead_results[:lineflows]
-    netinput  = TwoDayAhead_results[:netinput]
+   @show lineflows = TwoDayAhead_results[:lineflows]
+    netinput_ac  = TwoDayAhead_results[:netinput_ac]
 
     # Net position per zone per timestep: NP[z, t] = Σ_n∈z netinput[n, t]
     zones = params.sets.Z
     NP = Dict{Tuple{String, Int}, Float64}()
     for z in zones, t in T
-        NP[z, t] = sum(netinput[n, t] for n in params.nodes_in_zone[z])
+        @show NP[z, t] = sum(netinput_ac[n, t] for n in params.nodes_in_zone[z])
     end
 
     # Basecase flow f0[l, t]: observed flow minus the part explained by zonal net positions
     # f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]
     l0 = Dict{Tuple{String, Int}, Float64}()
     for l in cne_lines, t in T
-        l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
+      @show  l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
     end
+    # Steps to include non flow based zones (which is not currently accounted for):
+    #𝐹⃗0FB -> flow per CNEC in the situation without commercial exchanges within the flow based CCR
+    #𝐹⃗0FB = 𝐹⃗𝑟𝑒𝑓 − 𝐏𝐓𝐃𝐅𝒇 𝑁𝑃⃗𝑟𝑒𝑓FB
+    #𝐹⃗0𝑎𝑙𝑙 = 𝐹𝑟𝑒𝑓 − 𝐏𝐓𝐃𝐅𝒂𝒍𝒍 𝑁𝑃⃗𝑟𝑒𝑓𝑎𝑙𝑙 
+    #𝐹⃗𝑢𝑎𝑓 = 𝐹⃗0FB − 𝐹⃗0𝑎𝑙𝑙
+    #𝐴𝑀𝑅 = 𝑚𝑎𝑥 (𝑅𝑎𝑚𝑟 ∙ 𝐹𝑚𝑎𝑥 − 𝐹𝑢𝑎𝑓 − (𝐹𝑚𝑎𝑥 − 𝐹𝑅𝑀 − 𝐹0FB),
+    #              0.2 ∙ 𝐹𝑚𝑎𝑥 − (𝐹𝑚𝑎𝑥 − 𝐹𝑅𝑀 − 𝐹0FB), 0)
+    # see: https://www.acer.europa.eu/sites/default/files/documents/Media/News/Documents/Amendment-DA-CCM-CCR-2026.pdf
+    # P. 32 ff.
 
     # Compute AMR and RAM per line per timestep
     for line in cne_lines
-        f_max = get(params.acline_capacity, line, 0.0)
+       @show f_max = get(params.acline_capacity, line, 0.0)
         frm_abs = FRM * f_max   # FRM as absolute MW
         ram[line] = Vector{Float64}(undef, length(T))
         for (i, t) in enumerate(T)
-            f0      = l0[line, t]
+           @show f0      = l0[line, t]
             # Margin without AMR
-            initalRAM = f_max - f0 - frm_abs
+          @show  initalRAM = f_max - f0 - frm_abs
             # AMR: adjustment for minimum RAM needed to guarantee at least minRAM * f_max
             amr = max(0.0, minRAM * f_max - initalRAM)
-            ram[line][i] = initalRAM + amr
+           @show ram[line][i] = initalRAM + amr
         end
     end
     return ram
@@ -230,6 +239,9 @@ function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Di
     PTDFz = zonal_ptdf(PTDFn, GSK)
     PTDFzz = zone_to_zone_ptdf(PTDFz; exclude_self=true)
     define_cne!(params, PTDFzz; threshold=0.05)
+    cne = params.cne
+    PTDFz  = PTDFz[cne, :]
+    PTDFzz = PTDFzz[cne, :]
     RAM = calc_ram(params, TwoDayAhead_result, PTDFz, PTDFzz, PTDFn, T; minRAM=minRAM, FRM=FRM)
     fbmc_params = Dict(
         :GSK => GSK,

@@ -224,6 +224,6 @@ function prev_results_for_fbmc(sr::SubRun)
         :sto_generation => value.(d[:sto][:GEN]),
         :sto_charge => value.(d[:sto][:CHARGE]),
         :lineflows => value.(d[:network][:LINEFLOW]),
-        :netinput => value.(d[:network][:NETINPUT]),
+        :netinput_ac => value.(d[:network][:ACINJECTION]),
     )
 end
