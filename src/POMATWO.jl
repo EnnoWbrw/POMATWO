@@ -92,6 +92,7 @@ export load_data,
     FlatGSK,
     GmaxGSK,
     DispOnlyGSK,
-    CustomWeightsGSK
+    CustomWeightsGSK,
+    validate_params
 
 end # module POMATWO

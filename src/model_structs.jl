@@ -101,6 +101,8 @@ Base.@kwdef struct Sets
     N::Vector{String} = Vector{String}()
     L::Vector{String} = Vector{String}()
     DC::Vector{String} = Vector{String}()
+    FBCCR::Vector{String} = Vector{String}()
+    NTCCCR::Vector{String} = Vector{String}()
     NTC::Vector{Tuple{String,String}} = Vector{Tuple{String,String}}()
     PRS::Vector{String} = Vector{String}()
     PRS_STO::Vector{String} = Vector{String}()

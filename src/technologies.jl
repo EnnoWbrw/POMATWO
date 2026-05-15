@@ -934,7 +934,7 @@ end
 
 function add_exchange(sr::SubRun, ::Type{FlowBased})
     T = sr.market_state.Time
-    @unpack Z, L , DC, N= sr.modelrun.params.sets
+    @unpack Z, L , DC, N, NTCCCR, FBCCR = sr.modelrun.params.sets
     @unpack fixed_exchange, 
     dcline_capacity, 
     dc_start, 
@@ -976,7 +976,7 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
 
     @expression(
         m,
-        NP[z = Z, t = T],
+        NP[z = FBCCR, t = T],
         0 +
         (
             if haskey(importing, z)
@@ -998,13 +998,13 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     @constraint(
         m, 
         FBMC_pos[l = cne, t = T], 
-        sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l][t] 
+        sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l][t] 
     )
 
         @constraint(
         m, 
         FBMC_neg[l = cne, t = T], 
-       - sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in Z) <= fbmc_params[:RAM][l][t] 
+       - sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l][t] 
     )
 
     @expression(m, EXCHANGE[z = Z, t = T], NP[z, t] + DCINJECTION[z, t])

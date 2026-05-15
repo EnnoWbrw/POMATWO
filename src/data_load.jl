@@ -88,9 +88,13 @@ function add_plants!(params::Parameters, df_pp::AbstractDataFrame, report::DataR
         params.eta[row[:index]] = row[:eta]
     end
     
-    # Add summary note
+    if isempty(params.sets.P)
+    add_error!(report, "missing_data", "No plants defined", "basic validation")
+    else
     add_note!(report, "data_summary", 
               "Loaded $(length(params.sets.P)) plants", location)
+    end
+
 end
 
 
@@ -197,8 +201,13 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
         @info "Slack buses loaded from CSV: $(join(sort(params.slack), ", "))"
     end
 
-    add_note!(report, "data_summary",
-              "Loaded $(length(params.sets.N)) nodes with $slack_count slack bus(es)", location)
+    if isempty(params.sets.N)
+        add_error!(report, "missing_data", "No nodes defined", location)
+    else
+        add_note!(report, "data_summary",
+                "Loaded $(length(params.sets.N)) nodes with $slack_count slack bus(es)", location)
+    end
+
 end
 
 # Wrapper function to load node data from file path into Parameters structure (Level 2) and pass it to Level 1 function
@@ -245,7 +254,9 @@ function add_zones!(params::Parameters, df_zones::AbstractDataFrame, report::Dat
                       "Found $duplicate_count duplicate zone indices", location)
         end
     end
-    
+
+    has_ccm = hasproperty(df_zones, :CCM)
+
     for row in eachrow(df_zones)
         if ismissing(row[:index])
             add_warning!(report, "incomplete_data", 
@@ -254,10 +265,35 @@ function add_zones!(params::Parameters, df_zones::AbstractDataFrame, report::Dat
         end
         
         push!(params.sets.Z, row[:index])
+
+        if has_ccm
+            ccm_val = ismissing(row[:CCM]) ? missing : string(row[:CCM])
+            if ccm_val == "fb"
+                push!(params.sets.FBCCR, row[:index])
+            elseif ccm_val == "ntc"
+                push!(params.sets.NTCCCR, row[:index])
+            else
+                add_error!(report, "invalid_ccm_value",
+                          "Zone '$(row[:index])' has invalid CCM value '$(something(ccm_val, "missing"))'; must be 'fb' or 'ntc'", location)
+            end
+        end
     end
-    
-    add_note!(report, "data_summary", 
+
+    # If CCM column was present, verify every zone was assigned to exactly one category
+    if has_ccm
+        unassigned = setdiff(params.sets.Z, union(params.sets.FBCCR, params.sets.NTCCCR))
+        for z in unassigned
+            add_error!(report, "missing_ccm_assignment",
+                      "Zone '$z' was not assigned to any CCM category ('fb' or 'ntc')", location)
+        end
+    end
+
+    if isempty(params.sets.Z)
+        add_error!(report, "missing_data", "No zones defined", location)
+    else 
+            add_note!(report, "data_summary", 
               "Loaded $(length(params.sets.Z)) zones", location)
+    end
 end
 
 # Wrapper function to load zone data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
@@ -1191,50 +1227,6 @@ function load_data(data::Dict)
 end
 
 """
-    validate_params(params::Parameters)
-
-Validate a Parameters object for common issues, particularly network topology problems.
-Returns a DataReport with detailed diagnostics.
-
-# Example
-```julia
-params = load_data(data_files)
-report = validate_params(params)
-print_report(report)
-```
-"""
-function validate_params(params::Parameters)
-    report = DataReport()
-    
-    # Validate basic data presence
-    if isempty(params.sets.N)
-        add_error!(report, "missing_data", "No nodes defined", "basic validation")
-    end
-    
-    if isempty(params.sets.Z)
-        add_error!(report, "missing_data", "No zones defined", "basic validation")
-    end
-    
-    if isempty(params.sets.P)
-        add_error!(report, "missing_data", "No plants defined", "basic validation")
-    end
-    
-    # Validate network topology if lines are defined
-    if !isempty(params.sets.L)
-        validate_network_topology(report, params, "network topology")
-    else
-        add_note!(report, "validation_info", "No transmission lines defined - operating in copper plate mode", "network validation")
-    end
-    
-    # Validate slack bus presence
-    if isempty(params.slack)
-        add_error!(report, "missing_data", "No slack bus defined", "slack bus validation")
-    end
-    
-    return report
-end
-
-"""
     validate_params(params::Parameters, setup::ModelSetup)
 
 Extended validation that additionally checks time-series lengths against the configured TimeHorizon
@@ -1243,9 +1235,7 @@ and validates node consistency for nodal availability and nodal load.
 Returns a DataReport containing any errors, warnings, and notes.
 """
 function validate_params(params::Parameters, setup::ModelSetup)
-    # Start with the base validations
-    report = validate_params(params)
-
+    report = DataReport()
     # 1) Time horizon length checks (row count vs TimeHorizon.stop)
     stop_val = setup.TimeHorizon.stop
 
@@ -1313,6 +1303,28 @@ function validate_params(params::Parameters, setup::ModelSetup)
         end
     else
         add_note!(report, "nodal_demand_absent", "No nodal demand data present", "validate_params")
+    end
+
+    # 3) CCM zone set validations
+    # 3a) If NTCCCR is non-empty, every zone must have at least one NTC value defined (either direction)
+    if !isempty(params.sets.NTCCCR)
+        ntc_keys = keys(params.ntc)
+        for z in params.sets.NTCCCR
+            has_ntc = any(((i, j),) -> i == z || j == z, ntc_keys)
+            if !has_ntc
+                add_error!(report, "missing_ntc_for_zone",
+                          "Zone '$z' is in NTCCCR but has no NTC value defined (neither as exporter nor importer)", "validate_params")
+            end
+        end
+    end
+
+    # 3b) If the exchange formulation is FlowBased and FBCCR is still empty, populate it with all zones
+    if setup.MarketType isa ZonalMarket && setup.MarketType.exchange_formulation isa FlowBased
+        if isempty(params.sets.FBCCR)
+            append!(params.sets.FBCCR, params.sets.Z)
+            add_note!(report, "fbccr_auto_populated",
+                     "Exchange formulation is FlowBased but FBCCR was empty; all $(length(params.sets.Z)) zones have been added to FBCCR", "validate_params")
+        end
     end
 
     return report

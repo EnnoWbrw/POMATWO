@@ -13,6 +13,14 @@ Saves input parameters to the results folder and runs the internal optimization 
 - Stores simulation results in output files.
 """
 function run(mr::ModelRun)
+        @info "Validating parameters"
+    validation_report = validate_params(mr.params, mr.setup)
+    if has_issues(validation_report)
+        print_report(validation_report; show_notes=false, show_warnings = false, show_errors = true)
+    end
+    if validation_report.has_errors
+        error("Parameter validation failed. Use validate_params(params, setup) for detailed diagnostics.")
+    end
     @info "Saving parameters to results folder"
     save_object(joinpath(mr.scen_dir, "params.jld2"), mr.params)
     _run(mr)
