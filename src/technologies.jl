@@ -935,7 +935,7 @@ end
 function add_exchange(sr::SubRun, ::Type{FlowBased})
     T = sr.market_state.Time
     @unpack Z, L , DC, N, NTCCCR, FBCCR = sr.modelrun.params.sets
-    @unpack fixed_exchange, 
+    @unpack ntc,
     dcline_capacity, 
     dc_start, 
     dc_end, 
@@ -994,6 +994,29 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
         )
     )
 
+    @constraint(m,
+        ac_NTC[(z, zz) = connected_zones_ac, t = T; z in NTCCCR || zz in NTCCCR],
+        EX[(z, zz), t] <= ntc[z, zz])
+
+    @expression(m,
+    NP_ntc[z = NTCCCR, t = T],
+    0 +
+    (
+        if haskey(importing, z)
+            (sum(EX[(zz, z), t] for zz in importing[z]))
+        else
+            0
+        end
+    ) +
+    (
+        if haskey(exporting, z)
+            (-sum(EX[(z, zz), t] for zz in exporting[z]))
+        else
+            0
+        end
+    )
+    )
+
     # Flow-based constraints: for each line, the zonal exchange weighted by PTDF must respect RAM
     @constraint(
         m, 
@@ -1007,7 +1030,9 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
        - sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l][t] 
     )
 
-    @expression(m, EXCHANGE[z = Z, t = T], NP[z, t] + DCINJECTION[z, t])
+    @expression(m, EXCHANGE[z = Z, t = T],
+        (z in FBCCR ? NP[z, t] : NP_ntc[z, t]) + DCINJECTION[z, t]
+    )
 
 
     ### to dataframe

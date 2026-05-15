@@ -270,11 +270,11 @@ function add_zones!(params::Parameters, df_zones::AbstractDataFrame, report::Dat
             ccm_val = ismissing(row[:CCM]) ? missing : string(row[:CCM])
             if ccm_val == "fb"
                 push!(params.sets.FBCCR, row[:index])
-            elseif ccm_val == "ntc"
+            elseif ccm_val == "ac_ntc"
                 push!(params.sets.NTCCCR, row[:index])
             else
                 add_error!(report, "invalid_ccm_value",
-                          "Zone '$(row[:index])' has invalid CCM value '$(something(ccm_val, "missing"))'; must be 'fb' or 'ntc'", location)
+                          "Zone '$(row[:index])' has invalid CCM value '$(something(ccm_val, "missing"))'; must be 'fb' or 'ac_ntc'", location)
             end
         end
     end
