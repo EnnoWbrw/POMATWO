@@ -91,18 +91,28 @@ One row per market zone.
 | Column  | Required | Type   | Description |
 |---------|----------|--------|-------------|
 | `index` | ✔        | String | Zone identifier. Must be unique. |
+| `CCM`   | optional | String | Capacity Calculation Method. `"fb"` = flow-based, `"ac_ntc"` = net transfer capacity on AC lines. If present, every zone must be assigned to exactly one category. If absent, all zones default to flow-based when a `FlowBased` exchange formulation is used. |
 
-Additional columns are permitted but ignored.
+!!! warning "CCM consistency"
+    When the `CCM` column is present, every zone must have a value of either `"fb"` or `"ac_ntc"`. Missing or invalid values are reported as errors. Additionally, every zone assigned `"ac_ntc"` must have at least one NTC value defined (in either direction) in [File Structure `:ntc`](@ref).
 
 !!! note "Index Linking"
     `index` is referenced by the `zone` column in [File Structure `:nodes`](@ref) and by the first column of [`:avail_planttype_zonal`](@ref).
 
-#### Example
+#### Example — without CCM column
 ```csv
 index
 DE
 FR
 PL
+```
+
+#### Example — with CCM column
+```csv
+index,CCM
+DE,fb
+FR,fb
+PL,ac_ntc
 ```
 
 ---
