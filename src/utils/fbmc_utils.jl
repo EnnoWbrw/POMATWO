@@ -143,21 +143,21 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     ram = Dict{String, Vector{Float64}}()
 
     # lineflows[l, t] and netinput[n, t] from TwoDayAhead basecase
-   @show lineflows = TwoDayAhead_results[:lineflows]
+    lineflows = TwoDayAhead_results[:lineflows]
     netinput_ac  = TwoDayAhead_results[:netinput_ac]
 
     # Net position per zone per timestep: NP[z, t] = Σ_n∈z netinput[n, t]
     zones = params.sets.Z
     NP = Dict{Tuple{String, Int}, Float64}()
     for z in zones, t in T
-        @show NP[z, t] = sum(netinput_ac[n, t] for n in params.nodes_in_zone[z])
+        NP[z, t] = sum(netinput_ac[n, t] for n in params.nodes_in_zone[z])
     end
 
     # Basecase flow f0[l, t]: observed flow minus the part explained by zonal net positions
     # f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]
     l0 = Dict{Tuple{String, Int}, Float64}()
     for l in cne_lines, t in T
-      @show  l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
+      l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
     end
     # Steps to include non flow based zones (which is not currently accounted for):
     #𝐹⃗0FB -> flow per CNEC in the situation without commercial exchanges within the flow based CCR
@@ -171,7 +171,7 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
 
     # Compute AMR and RAM per line per timestep
     for line in cne_lines
-       @show f_max = get(params.acline_capacity, line, 0.0)
+       f_max = get(params.acline_capacity, line, 0.0)
         frm_abs = FRM * f_max   # FRM as absolute MW
         ram[line] = Vector{Float64}(undef, length(T))
         for (i, t) in enumerate(T)
