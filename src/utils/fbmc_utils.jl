@@ -150,14 +150,14 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     zones = params.sets.Z
     NP = Dict{Tuple{String, Int}, Float64}()
     for z in zones, t in T
-        NP[z, t] = sum(netinput_ac[n, t] for n in params.nodes_in_zone[z])
+         NP[z, t] = -sum(netinput_ac[n, t] for n in params.nodes_in_zone[z])
     end
 
     # Basecase flow f0[l, t]: observed flow minus the part explained by zonal net positions
     # f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]
     l0 = Dict{Tuple{String, Int}, Float64}()
     for l in cne_lines, t in T
-      l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
+         l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
     end
     # Steps to include non flow based zones (which is not currently accounted for):
     #𝐹⃗0FB -> flow per CNEC in the situation without commercial exchanges within the flow based CCR
@@ -175,9 +175,9 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
         frm_abs = FRM * f_max   # FRM as absolute MW
         ram[line] = Vector{Float64}(undef, length(T))
         for (i, t) in enumerate(T)
-            f0      = l0[line, t]
+           f0      = l0[line, t]
             # Margin without AMR
-            initalRAM = f_max - f0 - frm_abs
+           initalRAM = f_max - f0 - frm_abs
             # AMR: adjustment for minimum RAM needed to guarantee at least minRAM * f_max
             amr = max(0.0, minRAM * f_max - initalRAM)
            ram[line][i] = initalRAM + amr
