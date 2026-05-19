@@ -175,12 +175,12 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
         frm_abs = FRM * f_max   # FRM as absolute MW
         ram[line] = Vector{Float64}(undef, length(T))
         for (i, t) in enumerate(T)
-           @show f0      = l0[line, t]
+            f0      = l0[line, t]
             # Margin without AMR
-          @show  initalRAM = f_max - f0 - frm_abs
+            initalRAM = f_max - f0 - frm_abs
             # AMR: adjustment for minimum RAM needed to guarantee at least minRAM * f_max
             amr = max(0.0, minRAM * f_max - initalRAM)
-           @show ram[line][i] = initalRAM + amr
+           ram[line][i] = initalRAM + amr
         end
     end
     return ram
