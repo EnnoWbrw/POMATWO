@@ -602,7 +602,7 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
     # generation variables
     @variable(m, cu[p, t] <= CU[p = NDISP, t = T] <= avail[p][t] * gmax[p])
     @expression(m, FEEDIN_REDISP[p = NDISP, t = T], avail[p][t] * gmax[p] - CU[p, t])
-    @objective(m, Min, 1000 * sum(CU[p, t] - cu[p, t] for p in NDISP, t in T))
+    @objective(m, Min, 150 * sum(CU[p, t] - cu[p, t] for p in NDISP, t in T))
 
     df_redispatch(mr.results)
 
@@ -615,7 +615,7 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
                 GEN_REDISP = FEEDIN_REDISP[p, t],
                 GEN_UP = 0, #todo
                 GEN_DOWN = 0,
-                gen = 0,
+                gen = avail[p][t] * gmax[p] - cu[p, t],
                 CU_REDISP = CU[p, t],
                 CHARGE_REDISP = 0,
                 CHARGE_UP = 0,

@@ -99,6 +99,7 @@ function _run(mr::ModelRun{MT, PS, RD}) where {MT<:MarketType, PS<:NoProsumer, R
         sr = SubRun(mr, market_state)
         ProgressMeter.update!(prog, desc = "DayAhead -> Optimizing")
         @suppress optimize!(sr)
+        log_status(sr, "DayAhead")
         ProgressMeter.update!(prog, desc = "DayAhead -> Fetching Results")
         fetch_results(sr)
         write_results(sr)

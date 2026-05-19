@@ -48,31 +48,33 @@ dataCS = Dict{Symbol,String}(
 # load input data
 params = load_data(dataCS)
 
-
-
-# set scenario name 
+# Set scenario name (optional, defaults to random 6 digit string)
 scen_name = "3_nodes"
 
-# define output path for data transfer
+# Define output path for data transfer (optional, defaults to results/)
 output_path = "results/"
 
-### Defining a test setup for a model run that stops after 4 timesteps
+### Defining a test setup for a model run that stops after 4 timesteps 
 setup = ModelSetup(;
-    TimeHorizon = TimeHorizon(stop = 4),
-    MarketType = ZonalMarket(),
-    ProsumerSetup = NoProsumer(),
-    RedispatchSetup = NoRedispatch()
+    TimeHorizon = TimeHorizon(stop = 4), # stop = 4 defines timestep 4 as the last timestep considered
+    MarketType = ZonalMarket(NTC()), # A Zonal market that uses the net transfer capacity approach for market couling
+    RedispatchSetup = DCLF(PhaseAngle) # Linearized power flows (DCOPF), using a phase angle - based formulation 
+                                       # is used for balancing the grid and calculating redispatch
 )
 
+# Setting HiGHS as the optimizer (other optimizers are also allowed)
 solver = HiGHS.Optimizer
 
-mr = ModelRun(params, setup, solver; scenarioname = scen_name, overwrite = true)
+# Combining all steps into a single struct that stores our setup
+mr = ModelRun(params, setup, solver; scenarioname = scen_name)
 
-POMATWO.run(mr)
+# Calling the optimizer
+POMATWO.run(mr) 
 
+# Define path in which the results are stored
 results_path = joinpath(output_path, scen_name)
 
-### reading in the result files
+### Reading in the result files
 results = DataFiles(results_path)
 
 ### Looking at specific results

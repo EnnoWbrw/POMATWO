@@ -41,7 +41,7 @@ function link_components(sr::SubRun{MT,PS, RD, MS}) where {MT<:ZonalMarketType,P
     m = sr.optigraph
     balance = sr.balance
 
-    infeas_cost = 1000
+    infeas_cost = 9000
     has_prs = !(sr.modelrun.setup.ProsumerSetup isa NoProsumer)
 
     @variable(balance, 0 <= CU[Z, T])
@@ -99,7 +99,7 @@ function link_components(sr::SubRun{MT,PS, RD, MS}) where {MT<:ZonalMarketType,P
     m = sr.optigraph
     balance = sr.balance
 
-    infeas_cost = 1000
+    infeas_cost = 9000
     has_prs = !(sr.modelrun.setup.ProsumerSetup isa NoProsumer)
 
     @variable(balance, 0 <= CU[N, T])
@@ -155,7 +155,7 @@ function link_components(sr::SubRun{MT,PS, RD,MS}) where {MT<:NodalMarketType,PS
     m = sr.optigraph
     balance = sr.balance
 
-    infeas_cost = 1000
+    infeas_cost = 9000
     has_prs = !(sr.modelrun.setup.ProsumerSetup isa NoProsumer)
 
     @variable(balance, 0 <= CU[N, T])
@@ -212,7 +212,7 @@ function link_components( sr::SubRun{MT,PS, RD,MS}) where {MT<:MarketType,PS <:P
     m = sr.optigraph
     balance = sr.balance
 
-    infeas_cost = 1000
+    infeas_cost = 9000
 
     has_prs = !(sr.modelrun.setup.ProsumerSetup isa NoProsumer)
 
