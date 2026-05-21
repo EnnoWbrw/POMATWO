@@ -134,30 +134,28 @@ The calculation follows the standard FBMC methodology:
 - `FRM`: Flow Reliability Margin as a fraction of capacity (default `0.0`)
 
 # Returns
-- `ram::Dict{String, Vector{Float64}}`: RAM per line, one value per timestep in `T`
+- `ram`: DenseAxisArray indexed by `(line, t, direction)` where `direction ∈ ["pos", "neg"]`,
+  accessible as `ram[l, t, "pos"]` or `ram[l, t, "neg"]`
 """
 function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxisArray, PTDFzz::DenseAxisArray, PTDFn::DenseAxisArray, T::UnitRange; minRAM::Float64=0.7, FRM::Float64=0.1)
     cne_lines = params.cne
 
-    # Initialize RAM dictionary: line -> Vector over T
-    ram = Dict{String, Vector{Float64}}()
-
     # lineflows[l, t] and netinput[n, t] from TwoDayAhead basecase
-    lineflows = TwoDayAhead_results[:lineflows]
+    lineflows    = TwoDayAhead_results[:lineflows]
     netinput_ac  = TwoDayAhead_results[:netinput_ac]
 
     # Net position per zone per timestep: NP[z, t] = Σ_n∈z netinput[n, t]
     zones = params.sets.Z
     NP = Dict{Tuple{String, Int}, Float64}()
     for z in zones, t in T
-         NP[z, t] = -sum(netinput_ac[n, t] for n in params.nodes_in_zone[z])
+        NP[z, t] = -sum(netinput_ac[n, t] for n in params.nodes_in_zone[z])
     end
 
     # Basecase flow f0[l, t]: observed flow minus the part explained by zonal net positions
     # f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]
     l0 = Dict{Tuple{String, Int}, Float64}()
     for l in cne_lines, t in T
-         l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
+        l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
     end
     # Steps to include non flow based zones (which is not currently accounted for):
     #𝐹⃗0FB -> flow per CNEC in the situation without commercial exchanges within the flow based CCR
@@ -169,20 +167,34 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     # see: https://www.acer.europa.eu/sites/default/files/documents/Media/News/Documents/Amendment-DA-CCM-CCR-2026.pdf
     # P. 32 ff.
 
-    # Compute AMR and RAM per line per timestep
-    for line in cne_lines
-       f_max = get(params.acline_capacity, line, 0.0)
-        frm_abs = FRM * f_max   # FRM as absolute MW
-        ram[line] = Vector{Float64}(undef, length(T))
-        for (i, t) in enumerate(T)
-           f0      = l0[line, t]
-            # Margin without AMR
-           initalRAM = f_max - f0 - frm_abs
-            # AMR: adjustment for minimum RAM needed to guarantee at least minRAM * f_max
-            amr = max(0.0, minRAM * f_max - initalRAM)
-           ram[line][i] = initalRAM + amr
+    # Build RAM as DenseAxisArray indexed by (line, t, direction)
+    # RAM_pos[l,t]: maximum flow in positive direction
+    # RAM_neg[l,t]: maximum flow in negative direction (negative value)
+    #
+    # init_pos  = Fmax - f0 - FRM
+    # init_neg  = -Fmax - f0 + FRM
+    # AMR_pos   = max(0, minRAM * Fmax  - init_pos)
+    # AMR_neg   = min(0, minRAM * -Fmax - init_neg)
+    # RAM_pos   = init_pos + AMR_pos
+    # RAM_neg   = init_neg - AMR_neg
+    directions = ["pos", "neg"]
+    ram_data = Array{Float64, 3}(undef, length(cne_lines), length(T), 2)
+
+    for (i, line) in enumerate(cne_lines)
+        f_max   = get(params.acline_capacity, line, 0.0)
+        frm_abs = FRM * f_max
+        for (j, t) in enumerate(T)
+            f0       = l0[line, t]
+            init_pos = f_max - f0 - frm_abs
+            init_neg = -f_max - f0 + frm_abs
+            amr_pos  = max(0.0,  minRAM *  f_max - init_pos)
+            amr_neg  = min(0.0,  minRAM * -f_max - init_neg)
+            ram_data[i, j, 1] = init_pos + amr_pos   # RAM_pos
+            ram_data[i, j, 2] = init_neg - amr_neg   # RAM_neg
         end
     end
+
+    ram = Containers.DenseAxisArray(ram_data, cne_lines, collect(T), directions)
     return ram
 end
 

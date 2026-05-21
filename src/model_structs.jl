@@ -416,6 +416,7 @@ const results_value_cols = Dict(
     :DCLINEFLOW => [:DCLINEFLOW, :LINEINF],
     :EXCHANGE => :EXCHANGE,
     :BIL_EXCHANGE => :BIL_EXCHANGE,
+    :FBMC_INF => [:FBMC_INF_POS, :FBMC_INF_NEG],
     :REDISP => [
         :GEN_REDISP,
         :GEN_UP,

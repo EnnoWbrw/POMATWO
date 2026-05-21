@@ -48,6 +48,7 @@ The constructor can be called by providing the directory that contains the resul
 - `ZonalMarketBalance::DataFrame`: Market balance data aggregated per zone.
 - `NodalMarketBalance::DataFrame`: Market balance data at the nodal level.
 - `NodalMarketRedispBalance::DataFrame`: Redispatch-adjusted nodal market balance.
+- `FBMC_INF::DataFrame`: FBMC infeasibility slack values per CNE line and time period.
 
 # Constructor
 ```julia
@@ -80,6 +81,7 @@ struct DataFiles
     ZonalMarketBalance::DataFrame
     NodalMarketBalance::DataFrame
     NodalMarketRedispBalance::DataFrame
+    FBMC_INF::DataFrame
 
     function DataFiles(dir;type="")
         if !(type in ["", "2DA"])

@@ -1016,28 +1016,43 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
         end
     )
     )
+    for z in NTCCCR, t in T
+        if haskey(fixed_exchange, z)
+            @constraint(m, NP_ntc[z, t] == fixed_exchange[z][t])
+        end
+    end
+
 
     # Flow-based constraints: for each line, the zonal exchange weighted by PTDF must respect RAM
+    # Note: The sum of PTDFz[l,z] * NP[z,t] is multiplied by -1 because EXCHANGE is defined as positive for imports,
+    # while the flow-based constraints are typically defined with positive for exports. 
+    # This sign convention ensures that the constraints correctly represent the physical flow limits on the lines.
+    # Infeasibility slack variables allow the model to find a solution even if fixed exchanges violate FBMC limits.
+    @variable(m, 0 <= FBMC_INF_POS[l = cne, t = T])
+    @variable(m, 0 <= FBMC_INF_NEG[l = cne, t = T])
+
+    @objective(m, Min, 100000 * sum(FBMC_INF_POS[l, t] + FBMC_INF_NEG[l, t] for l in cne, t in T))
+
     @constraint(
-        m, 
-        FBMC_pos[l = cne, t = T], 
-        sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l][t] 
+        m,
+        FBMC_pos[l = cne, t = T],
+        -sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l,t,"pos"] + FBMC_INF_POS[l, t]
     )
 
-        @constraint(
-        m, 
-        FBMC_neg[l = cne, t = T], 
-       - sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l][t] 
+    @constraint(
+        m,
+        FBMC_neg[l = cne, t = T],
+        fbmc_params[:RAM][l,t,"neg"] - FBMC_INF_NEG[l, t] <= -sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR)
     )
 
     @expression(m, EXCHANGE[z = Z, t = T],
         (z in FBCCR ? NP[z, t] : NP_ntc[z, t]) + DCINJECTION[z, t]
     )
 
-
     ### to dataframe
     df_ntc(sr.results)
     df_exchange(sr.results)
+    df_fbmc_inf(sr.results)
 
     for (z, zz) in connected_zones_ac, t in T
         push!(sr.results[:BIL_EXCHANGE], (From = z, To = zz, Time = t, BIL_EXCHANGE = EX[(z, zz), t]))
@@ -1045,5 +1060,9 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
 
     for z in Z, t in T
         push!(sr.results[:EXCHANGE], (index = z, Time = t, EXCHANGE = EXCHANGE[z, t]))
+    end
+
+    for l in cne, t in T
+        push!(sr.results[:FBMC_INF], (index = l, Time = t, FBMC_INF_POS = FBMC_INF_POS[l, t], FBMC_INF_NEG = FBMC_INF_NEG[l, t]))
     end
 end

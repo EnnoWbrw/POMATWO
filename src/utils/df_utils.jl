@@ -121,6 +121,21 @@ function df_exchange(dict)
 end
 
 """
+Initializes the :FBMC_INF DataFrame in the results dictionary if it does not exist.
+Stores FBMC infeasibility slack values for each CNE line and time period.
+"""
+function df_fbmc_inf(dict)
+    if !haskey(dict, :FBMC_INF)
+        dict[:FBMC_INF] = DataFrame(;
+            index = String[],
+            Time = Int[],
+            FBMC_INF_POS = VariableRef[],
+            FBMC_INF_NEG = VariableRef[],
+        )
+    end
+end
+
+"""
 Initializes the :BIL_EXCHANGE DataFrame in the results dictionary if it does not exist.
 Stores bilateral exchange results for each zone pair and time period.
 """
