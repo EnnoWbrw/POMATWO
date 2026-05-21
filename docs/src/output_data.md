@@ -4,6 +4,9 @@ Model outputs are stored in .arrow files. These files are non-human-readable, bu
 ```@docs
 DataFiles
 ```
+```@docs
+check_infeasibility
+```
 The following functions can be used to create some useful tables automatically.
 ```@docs
 transform_results_by_type

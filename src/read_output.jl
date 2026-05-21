@@ -484,3 +484,101 @@ function get_market_statistics(results::DataFiles, zone::String="DE")
     push!(stats_df, ("timeseries", "Time", market_zone.Time))
     return stats_df
 end
+
+"""
+    check_infeasibility(results::DataFiles; tol=1e-6) -> DataFrame
+
+Scans a `DataFiles` result object for non-zero infeasibility variables and returns a
+summary of any violations found.
+
+Checks all infeasibility slack variables written to the result tables:
+
+| Source | Column | Description |
+|---|---|---|
+| `ZonalMarketBalance` | `LL`, `CU` | Zonal lost load / curtailment not handled by plant specific curtailment |
+| `NodalMarketBalance` | `LL`, `CU` | Nodal lost load / curtailment not handled by plant specific curtailment |
+| `NodalMarketRedispBalance` | `LL`, `CU` | Redispatch nodal lost load / curtailment  not handled by plant specific curtailment |
+| `LINEFLOW` | `lineinf` | AC line thermal limit slack |
+| `DCLINEFLOW` | `lineinf` | DC line thermal limit slack |
+| `FBMC_INF` | `FBMC_INF_POS`, `FBMC_INF_NEG` | FBMC RAM constraint slacks |
+| `STO_LVL` | `inf` | Storage balance slack (`INF_POS - INF_NEG`, signed) |
+| `PRS` | `INF` | Prosumer energy balance slack |
+
+# Arguments
+- `results::DataFiles`: The loaded result object to inspect.
+- `tol::Float64`: Tolerance below which absolute values are considered zero (default: `1e-6`).
+
+# Returns
+A `DataFrame` with columns:
+- `source`: Name of the result table where the violation was found.
+- `variable`: Name of the infeasibility column.
+- `count`: Number of rows with `abs(value) > tol`.
+- `total`: Sum of absolute values of all violating entries.
+- `max`: Maximum absolute value observed.
+
+Returns an empty DataFrame (same schema) when no infeasibilities are detected.
+
+# Example
+```julia
+julia> check_infeasibility(results)
+3×5 DataFrame
+ Row │ source               variable      count  total     max
+     │ String               String        Int64  Float64   Float64
+─────┼────────────────────────────────────────────────────────────
+   1 │ ZonalMarketBalance   LL                3    450.0   200.0
+   2 │ LINEFLOW             lineinf           2     30.5    28.0
+   3 │ FBMC_INF             FBMC_INF_POS      1     12.5    12.5
+```
+"""
+function check_infeasibility(results::DataFiles; tol::Float64=1e-6)
+    report = DataFrame(
+        source   = String[],
+        variable = String[],
+        count    = Int[],
+        total    = Float64[],
+        max      = Float64[],
+    )
+
+    # Push a row if any abs(value) > tol in the column
+    function _check!(source_name, df, col; signed=false)
+        isempty(df) && return
+        hasproperty(df, col) || return
+        vals = Float64.(df[!, col])
+        absvals = abs.(vals)
+        mask = absvals .> tol
+        any(mask) || return
+        push!(report, (source_name, string(col), sum(mask), sum(absvals[mask]), maximum(absvals[mask])))
+    end
+
+    # Market balance slacks — CU and LL are non-negative by construction
+    for (source, df) in (
+        ("ZonalMarketBalance",       results.ZonalMarketBalance),
+        ("NodalMarketBalance",       results.NodalMarketBalance),
+        ("NodalMarketRedispBalance", results.NodalMarketRedispBalance),
+    )
+        _check!(source, df, :LL)
+        _check!(source, df, :CU)
+    end
+
+    # AC and DC line thermal limit slacks (column name is lowercase `lineinf`)
+    _check!("LINEFLOW",   results.LINEFLOW,   :lineinf)
+    _check!("DCLINEFLOW", results.DCLINEFLOW, :lineinf)
+
+    # FBMC RAM slacks
+    _check!("FBMC_INF", results.FBMC_INF, :FBMC_INF_POS)
+    _check!("FBMC_INF", results.FBMC_INF, :FBMC_INF_NEG)
+
+    # Storage balance slack: signed expression INF_POS - INF_NEG stored as `inf`
+    _check!("STO_LVL", results.STO_LVL, :inf; signed=true)
+
+    # Prosumer energy balance slack
+    _check!("PRS", results.PRS, :INF)
+
+    if isempty(report)
+        @info "No infeasibilities detected (tolerance = $tol)."
+    else
+        @warn "Infeasibilities detected in $(nrow(report)) variable(s):" report
+    end
+
+    return report
+end
