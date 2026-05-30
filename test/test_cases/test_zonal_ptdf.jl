@@ -294,13 +294,24 @@ function test_zonal_ptdf()
         nodes = ["N1", "N2"]
         zones = ["Z1", "Z2"]
         node_zone_map = Dict("N1" => "Z1", "N2" => "Z2")
-        # lines kwarg populates params.sets.L so define_cne! can initialize params.cne
-        params = create_gsk_test_params(nodes, zones, node_zone_map; lines=lines)
+        # All lines connect N1↔N2; both zones are FBCCR so all lines are eligible
+        sets = POMATWO.Sets(
+            N=nodes, L=lines, Z=zones, P=String[], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[],
+            FBCCR=zones
+        )
+        params = POMATWO.Parameters(
+            sets=sets,
+            node2zone=node_zone_map,
+            line_start=Dict("L1"=>"N1","L2"=>"N1","L3"=>"N2","L4"=>"N1"),
+            line_end  =Dict("L1"=>"N2","L2"=>"N2","L3"=>"N1","L4"=>"N2")
+        )
 
         @test isempty(params.cne)  # starts empty
         POMATWO.define_cne!(params, PTDFzz; threshold=0.10)
 
-        @test "L1" ∉ params.cne       # max_abs=0.08 < 0.10
+        @test "L1" ∉ params.cne       # max_abs=0.08 < 0.10 (threshold filter)
         @test "L2" in params.cne      # max_abs=0.15 > 0.10
         @test "L3" in params.cne      # max_abs=0.12 > 0.10
         @test "L4" in params.cne      # max_abs=0.20 > 0.10
@@ -312,6 +323,89 @@ function test_zonal_ptdf()
         @test "L3" ∉ params.cne       # 0.12 < 0.14 → removed
         @test "L4" in params.cne      # 0.20 > 0.14 → kept
         @test length(params.cne) == 2
+    end
+
+    @testset "define_cne!: FBCCR zone filter — only lines touching an FBCCR zone qualify" begin
+        # N1→Z_fb1 (FBCCR), N2→Z_fb2 (FBCCR), N3→Z_ntc (NTC), N4→Z_ntc2 (NTC)
+        # L_fb_fb:  N1↔N2 — both endpoints in FBCCR → eligible CNE
+        # L_fb_ntc: N1↔N3 — one endpoint in FBCCR   → eligible CNE
+        # L_ntc_ntc: N3↔N4 — no FBCCR endpoint      → excluded regardless of PTDF
+        nodes = ["N1","N2","N3","N4"]
+        zones = ["Z_fb1","Z_fb2","Z_ntc","Z_ntc2"]
+        lines_fbccr = ["L_fb_fb","L_fb_ntc","L_ntc_ntc"]
+        zone_pairs_fbccr = [("Z_fb1","Z_fb2"),("Z_fb2","Z_fb1")]
+
+        # All lines have PTDF well above any reasonable threshold
+        PTDFzz_fbccr_data = [0.30 -0.30; 0.25 -0.25; 0.40 -0.40]
+        PTDFzz_fbccr = JuMP.Containers.DenseAxisArray(PTDFzz_fbccr_data, lines_fbccr, zone_pairs_fbccr)
+
+        sets_fbccr = POMATWO.Sets(
+            N=nodes, L=lines_fbccr, Z=zones, P=String[], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[],
+            FBCCR  = ["Z_fb1","Z_fb2"],
+            NTCCCR = ["Z_ntc","Z_ntc2"]
+        )
+        params_fbccr = POMATWO.Parameters(
+            sets=sets_fbccr,
+            node2zone=Dict("N1"=>"Z_fb1","N2"=>"Z_fb2","N3"=>"Z_ntc","N4"=>"Z_ntc2"),
+            line_start=Dict("L_fb_fb"=>"N1","L_fb_ntc"=>"N1","L_ntc_ntc"=>"N3"),
+            line_end  =Dict("L_fb_fb"=>"N2","L_fb_ntc"=>"N3","L_ntc_ntc"=>"N4")
+        )
+
+        POMATWO.define_cne!(params_fbccr, PTDFzz_fbccr; threshold=0.05)
+
+        @test "L_fb_fb"   in params_fbccr.cne   # both endpoints in FBCCR → included
+        @test "L_fb_ntc"  in params_fbccr.cne   # one endpoint in FBCCR   → included
+        @test "L_ntc_ntc" ∉ params_fbccr.cne    # no endpoint in FBCCR    → excluded
+        @test length(params_fbccr.cne) == 2
+    end
+
+    @testset "define_cne!: empty FBCCR set → no lines become CNEs" begin
+        lines_empty = ["L1","L2"]
+        zone_pairs_empty = [("Z1","Z2"),("Z2","Z1")]
+        PTDFzz_empty = JuMP.Containers.DenseAxisArray([0.50 -0.50; 0.80 -0.80], lines_empty, zone_pairs_empty)
+
+        sets_empty = POMATWO.Sets(
+            N=["N1","N2"], L=lines_empty, Z=["Z1","Z2"], P=String[], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[],
+            FBCCR=String[]   # no flow-based zones defined
+        )
+        params_empty = POMATWO.Parameters(
+            sets=sets_empty,
+            node2zone=Dict("N1"=>"Z1","N2"=>"Z2"),
+            line_start=Dict("L1"=>"N1","L2"=>"N1"),
+            line_end  =Dict("L1"=>"N2","L2"=>"N2")
+        )
+
+        POMATWO.define_cne!(params_empty, PTDFzz_empty; threshold=0.05)
+        @test isempty(params_empty.cne)   # no FBCCR zones → no CNEs possible
+    end
+
+    @testset "define_cne!: PTDF threshold still applies for FBCCR-connected lines" begin
+        lines_thresh = ["L_high","L_low"]
+        zone_pairs_thresh = [("Z1","Z2"),("Z2","Z1")]
+        PTDFzz_thresh = JuMP.Containers.DenseAxisArray([0.20 -0.20; 0.03 -0.03], lines_thresh, zone_pairs_thresh)
+
+        sets_thresh = POMATWO.Sets(
+            N=["N1","N2"], L=lines_thresh, Z=["Z1","Z2"], P=String[], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[],
+            FBCCR=["Z1","Z2"]
+        )
+        params_thresh = POMATWO.Parameters(
+            sets=sets_thresh,
+            node2zone=Dict("N1"=>"Z1","N2"=>"Z2"),
+            line_start=Dict("L_high"=>"N1","L_low"=>"N1"),
+            line_end  =Dict("L_high"=>"N2","L_low"=>"N2")
+        )
+
+        POMATWO.define_cne!(params_thresh, PTDFzz_thresh; threshold=0.10)
+
+        @test "L_high" in params_thresh.cne   # passes both FBCCR and threshold checks
+        @test "L_low"  ∉ params_thresh.cne    # in FBCCR zone but PTDF too low
+        @test length(params_thresh.cne) == 1
     end
 
     @testset "calc_ram: remaining available margin (70%-rule)" begin

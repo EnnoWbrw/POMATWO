@@ -103,9 +103,15 @@ function define_cne!(params::Parameters, PTDFzz::DenseAxisArray; threshold::Floa
         append!(params.cne, params.sets.L)
     end
 
-    # Remove lines whose max absolute PTDF across all zone pairs does not exceed the threshold
+    fbccr_zones = Set(params.sets.FBCCR)
+
+    # A line qualifies as CNE only if at least one endpoint node belongs to an FBCCR zone
+    # and its max absolute PTDF across all zone pairs exceeds the threshold
     filter!(params.cne) do line
-        maximum(abs.(PTDFzz[line, :])) > threshold
+        z_start = get(params.node2zone, get(params.line_start, line, ""), "")
+        z_end   = get(params.node2zone, get(params.line_end,   line, ""), "")
+        (z_start in fbccr_zones || z_end in fbccr_zones) &&
+            maximum(abs.(PTDFzz[line, :])) > threshold
     end
 end
 
