@@ -2,11 +2,7 @@ name: CI
 
 on:
   push:
-    branches:
-    tags: ['*']
   pull_request:
-    branches:
-    tags: ['*']
   workflow_dispatch:
 
 concurrency:
