@@ -1,13 +1,11 @@
-name: CI
+nname: CI
 
 on:
   push:
     branches:
-      - main  
     tags: ['*']
   pull_request:
     branches:
-      - main
     tags: ['*']
   workflow_dispatch:
 
@@ -42,6 +40,54 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+      statuses: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+
+      - name: Run tests with coverage
+        shell: julia --project=. --color=yes {0}
+        run: |
+          using Pkg
+          Pkg.test(; coverage=true)
+
+      - name: Generate LCOV report
+        shell: julia --color=yes {0}
+        run: |
+          import Pkg
+          Pkg.activate(; temp=true)
+          Pkg.add("Coverage")
+          using Coverage
+          using Coverage.LCOV
+
+          coverage = process_folder("src")
+          LCOV.writefile("lcov.info", coverage)
+
+          covered, total = get_summary(coverage)
+          percentage = total == 0 ? 0.0 : round(100 * covered / total; digits=2)
+          println("Coverage: $covered / $total lines ($percentage%)")
+
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: lcov.info
+          format: lcov
 
   docs:
     name: Documentation

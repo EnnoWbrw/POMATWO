@@ -188,9 +188,8 @@ function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::Dat
     # Validate resulting slack configuration
     slack_count = length(params.slack)
     if slack_count == 0
-        add_error!(report, "configuration_error",
-                  "No slack bus defined. In the reference format, at least one node must " *
-                  "have its 'slack' value equal to its own index.", location)
+        add_error!(report, "missing_data",
+                  "No slack bus could be identified.", location)
     elseif slack_count > 1
         add_warning!(report, "configuration_warning",
                     "Multiple slack buses defined ($slack_count). " *

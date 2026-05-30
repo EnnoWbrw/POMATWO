@@ -156,10 +156,12 @@ end
     include(joinpath("test_cases", "test_data_load_validations.jl"))
     include(joinpath("test_cases", "test_read_output.jl"))
     include(joinpath("test_cases", "test_zonal_ptdf.jl"))
+    include(joinpath("test_cases", "test_utils.jl"))
     test_data_load()
     test_model_creation()
     test_data_reporting()
-   # test_read_output()
+    test_read_output()
     test_zonal_ptdf()
+    test_utils()
 end
  

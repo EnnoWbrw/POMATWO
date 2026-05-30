@@ -1,17 +1,22 @@
 
 """
-    zonal_ptdf(PTDF, GSK) -> Matrix
+    zonal_ptdf(PTDF, GSK) -> DenseAxisArray
 
 Compute zonal PTDF (l×z) as PTDF(l×n) * GSK(n×z).
 
-Assumes that the columns of PTDF correspond to `nodes` in the same order
-used to build GSK.
+GSK rows are reordered to match PTDF's column (node) order before multiplying,
+so the result is correct regardless of how the two arrays were built.
 """
 function zonal_ptdf(PTDF::DenseAxisArray, GSK::DenseAxisArray)
-    @assert size(PTDF, 2) == size(GSK, 1) "PTDF is l×n, GSK must be n×z"
-   PTDFz_mat = round.(PTDF.data * GSK.data, digits=4)
-   PTDFz = JuMP.Containers.DenseAxisArray(PTDFz_mat, axes(PTDF, 1), axes(GSK, 2))
-   return PTDFz
+    nodes_ptdf = axes(PTDF, 2)
+    nodes_gsk  = axes(GSK, 1)
+    @assert length(nodes_ptdf) == length(nodes_gsk) "PTDF is l×n, GSK must be n×z (size mismatch)"
+    @assert Set(collect(nodes_ptdf)) == Set(collect(nodes_gsk)) "PTDF and GSK must cover the same node set"
+    # Reorder GSK rows to match PTDF column order for a correct matrix product
+    GSK_aligned = GSK[collect(nodes_ptdf), :]
+    PTDFz_mat = round.(PTDF.data * GSK_aligned.data, digits=4)
+    PTDFz = JuMP.Containers.DenseAxisArray(PTDFz_mat, axes(PTDF, 1), axes(GSK, 2))
+    return PTDFz
 end
 
 """
@@ -173,10 +178,10 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     #
     # init_pos  = Fmax - f0 - FRM
     # init_neg  = -Fmax - f0 + FRM
-    # AMR_pos   = max(0, minRAM * Fmax  - init_pos)
-    # AMR_neg   = min(0, minRAM * -Fmax - init_neg)
-    # RAM_pos   = init_pos + AMR_pos
-    # RAM_neg   = init_neg - AMR_neg
+    # AMR_pos   = max(0, minRAM * Fmax  - init_pos)   ≥ 0
+    # AMR_neg   = min(0, minRAM * -Fmax - init_neg)   ≤ 0
+    # RAM_pos   = init_pos + AMR_pos   → floor at  minRAM * Fmax
+    # RAM_neg   = init_neg + AMR_neg   → ceiling at minRAM * -Fmax
     directions = ["pos", "neg"]
     ram_data = Array{Float64, 3}(undef, length(cne_lines), length(T), 2)
 
@@ -189,8 +194,8 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
             init_neg = -f_max - f0 + frm_abs
             amr_pos  = max(0.0,  minRAM *  f_max - init_pos)
             amr_neg  = min(0.0,  minRAM * -f_max - init_neg)
-            ram_data[i, j, 1] = init_pos + amr_pos   # RAM_pos
-            ram_data[i, j, 2] = init_neg - amr_neg   # RAM_neg
+            ram_data[i, j, 1] = init_pos + amr_pos   # RAM_pos: floor at minRAM*Fmax
+            ram_data[i, j, 2] = init_neg + amr_neg   # RAM_neg: ceiling at minRAM*(-Fmax)
         end
     end
 

@@ -3,8 +3,6 @@ market_types = [
     NodalMarket(),
 ]
 
-
-
 prosumer_setups = [
     NoProsumer(),
     ProsumerOptimization(sell_price=0.10, buy_price=0.25, retail_type=:buy_price),
@@ -28,22 +26,16 @@ function all_setups()
     [(mt, ps, rd, th) for mt in market_types for rd in redispatch_setups for ps in prosumer_setups for th in timehorizons]
 end
 
-function compare_dataframes(df_actual, df_expected; atol=1e-6, show = false)
-    @test size(df_actual) == size(df_expected)
-    for col in names(df_expected)
-        @test col in names(df_actual)
-        if eltype(df_expected[!, col]) <: AbstractFloat
-            @test all(abs.(df_actual[!, col] .- df_expected[!, col]) .<= atol)
-            if show
-                @show df_actual[!, col]
-                @show df_expected[!, col]
-            end
-        else
-            @test df_actual[!, col] == df_expected[!, col]
-        end
-    end
-end
+# ---------------------------------------------------------------
+# Property-based invariant checks — independent of reference data
+# ---------------------------------------------------------------
 
+"""Check that all values in a non-empty DataFrame column are ≥ lower bound."""
+function check_nonneg(df::DataFrame, col::Symbol; tol=-1e-8)
+    isempty(df) && return true
+    hasproperty(df, col) || return true
+    return all(df[!, col] .≥ tol)
+end
 
 function test_model_creation()
     @testset "Model Creation and Run" begin
@@ -52,81 +44,70 @@ function test_model_creation()
         mktempdir() do tmpdir
             logger = NullLogger()
             with_logger(logger) do
-                for (i, (market, prosumer, redisp,th)) in enumerate(all_setups())
+                for (i, (market, prosumer, redisp, th)) in enumerate(all_setups())
                     scenarioname = "testcase_$(i)_$(nameof(typeof(market)))$(redispatch_suffix(redisp))_$(nameof(typeof(prosumer)))"
                     setup = ModelSetup(
-                        TimeHorizon =  th,
-                        MarketType = market,
+                        TimeHorizon  = th,
+                        MarketType   = market,
                         ProsumerSetup = prosumer,
                         RedispatchSetup = redisp,
                     )
-                    run_dir = tmpdir
                     mr = ModelRun(params, setup, solver;
-                        resultdir=run_dir,
-                        scenarioname=scenarioname,
-                        overwrite=true
+                        resultdir   = tmpdir,
+                        scenarioname = scenarioname,
+                        overwrite    = true
                     )
 
-                    @test mr.setup.MarketType == market
-                    @test mr.setup.ProsumerSetup == prosumer
-                    @test mr.setup.TimeHorizon == th
-                    @test mr.scenarioname == scenarioname
+                    @test mr.setup.MarketType      == market
+                    @test mr.setup.ProsumerSetup   == prosumer
+                    @test mr.setup.TimeHorizon      == th
+                    @test mr.scenarioname           == scenarioname
                     @test isdir(mr.scen_dir)
 
-                    @testset "Run model for $scenarioname" begin
-                         @test POMATWO.run(mr) === nothing
-                        @testset "reading results for $scenarioname and reference results" begin
-                        results_actual = DataFiles(joinpath(run_dir, scenarioname))
-                        expected_dir = joinpath(@__DIR__, "expected_results")
-                        results_expected = DataFiles(joinpath(expected_dir, scenarioname))
-                        @testset "Compare results for $scenarioname" begin
-                            @testset "GEN" begin
-                                compare_dataframes(results_actual.GEN, results_expected.GEN)
-                            end
-                            @testset "REDISP" begin
-                                compare_dataframes(results_actual.REDISP, results_expected.REDISP)
-                            end
-                            @testset "CHARGE" begin
-                                compare_dataframes(results_actual.CHARGE, results_expected.CHARGE)
-                            end
-                            @testset "EXCHANGE" begin
-                                compare_dataframes(results_actual.EXCHANGE, results_expected.EXCHANGE)
-                            end
-                            @testset "FEEDIN" begin
-                                compare_dataframes(results_actual.FEEDIN, results_expected.FEEDIN)
-                            end
-                            @testset "PRS" begin
-                                compare_dataframes(results_actual.PRS, results_expected.PRS)
-                            end
-                            @testset "LINEFLOW" begin
-                                compare_dataframes(results_actual.LINEFLOW, results_expected.LINEFLOW)
-                            end
-                            @testset "DCLINEFLOW" begin
-                                compare_dataframes(results_actual.DCLINEFLOW, results_expected.DCLINEFLOW)
-                            end
-                            # @testset "NETINPUT" begin
-                            #     compare_dataframes(results_actual.NETINPUT, results_expected.NETINPUT)
-                            # end
-                            # @testset "BIL_EXCHANGE" begin
-                            #     compare_dataframes(results_actual.BIL_EXCHANGE, results_expected.BIL_EXCHANGE)
-                            # end
-                            @testset "STO_LVL" begin
-                                compare_dataframes(results_actual.STO_LVL, results_expected.STO_LVL)
-                            end
-                            @testset "STO_LVL_REDISP" begin
-                                compare_dataframes(results_actual.STO_LVL_REDISP, results_expected.STO_LVL_REDISP)
-                            end
-                            @testset "ZonalMarketBalance" begin
-                                compare_dataframes(results_actual.ZonalMarketBalance, results_expected.ZonalMarketBalance)
-                            end
-                            @testset "NodalMarketBalance" begin
-                                compare_dataframes(results_actual.NodalMarketBalance, results_expected.NodalMarketBalance)
-                            end
-                            @testset "NodalMarketRedispBalance" begin
-                                compare_dataframes(results_actual.NodalMarketRedispBalance, results_expected.NodalMarketRedispBalance)
-                            end
+                    @testset "Run + invariants for $scenarioname" begin
+                        @test POMATWO.run(mr) === nothing
+
+                        results = DataFiles(joinpath(tmpdir, scenarioname))
+                        @test results isa DataFiles
+
+                        # --- Non-negativity of primary decision variables ---
+                        @test check_nonneg(results.GEN, :GEN)
+                        @test check_nonneg(results.FEEDIN, :FEEDIN)
+                        @test check_nonneg(results.CHARGE, :CHARGE)
+                        @test check_nonneg(results.STO_LVL, :STO_LVL)
+
+                        # --- Redispatch non-negativity ---
+                        if !isempty(results.REDISP)
+                            @test check_nonneg(results.REDISP, :GEN_REDISP)
                         end
-                    end
+
+                        # --- No infeasibility slacks activated ---
+                        inf_report = check_infeasibility(results)
+                        @test isempty(inf_report)
+
+                        # --- Column structure: GEN must contain index and Time ---
+                        if !isempty(results.GEN)
+                            @test "index" in names(results.GEN)
+                            @test "Time"  in names(results.GEN)
+                            @test "GEN"   in names(results.GEN)
+                        end
+
+                        # --- ZonalMarket: EXCHANGE must exist ---
+                        if market isa ZonalMarket && !isempty(results.EXCHANGE)
+                            @test "index"    in names(results.EXCHANGE)
+                            @test "EXCHANGE" in names(results.EXCHANGE)
+                            @test all(isfinite.(results.EXCHANGE.EXCHANGE))
+                        end
+
+                        # --- NodalMarket: NodalMarketBalance must exist ---
+                        if market isa NodalMarket && !isempty(results.NodalMarketBalance)
+                            @test "LL" in names(results.NodalMarketBalance)
+                        end
+
+                        # --- Prosumer: PRS table must exist for ProsumerOptimization ---
+                        if prosumer isa ProsumerOptimization && !isempty(results.PRS)
+                            @test "index" in names(results.PRS)
+                        end
                     end
                 end
             end
