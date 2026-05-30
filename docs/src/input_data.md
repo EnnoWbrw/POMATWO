@@ -3,6 +3,7 @@
 ## Input Data Load
 ```@docs
 load_data(data::Dict)
+validate_params
 ```
 
 ## Model Input Data Structure
@@ -36,9 +37,9 @@ One row per power plant.
 
     $$mc = \frac{\text{fuel\_price}}{\eta} + \frac{\text{co2\_price} \times \text{co2content}}{\eta}$$
 
-    This requires `fuel_price` to be defined for the plant's type — either via the `fuel_price` column in [File Structure `:types`](@ref) or via the optional [`:fuel_prices`](@ref) input file. `co2content` defaults to `0` if absent (zero CO₂ cost). Loading will fail at the post-processing stage if `fuel_price` is missing for any plant type whose plants lack a direct `mc`.
+    This requires `fuel_price` to be defined for the plant's type — either via the `fuel_price` column in [File Structure `:types`](@ref) or via the optional [File Structure `:fuel_prices`](@ref) input file. `co2content` defaults to `0` if absent (zero CO₂ cost). Loading will fail at the post-processing stage if `fuel_price` is missing for any plant type whose plants lack a direct `mc`.
 
-    The CO₂ price is read from the entry keyed `"co2"` in the fuel price table — i.e. a column named `co2` in the [`:fuel_prices`](@ref) file. If that column is absent, the CO₂ price defaults to `0` (no CO₂ cost component).
+    The CO₂ price is read from the entry keyed `"co2"` in the fuel price table — i.e. a column named `co2` in the [File Structure `:fuel_prices`](@ref) file. If that column is absent, the CO₂ price defaults to `0` (no CO₂ cost component).
 
 !!! note "Index Linking"
     - `plant_type` must match an `index` in [File Structure `:types`](@ref).
