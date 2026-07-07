@@ -239,9 +239,10 @@ function transform_results_by_type(results, kind, zone)
         return nothing
     end
 
+    zone_plants = Set(get(results.params.plants_in_zone, zone, String[]))
     gen_by_type = @chain getfield(results, kind) begin
-        transform!(:index => ByRow(x -> results.params.plant_type[x]) => :type)
-        filter(:index => x -> x in results.params.plants_in_zone[zone], _)
+        transform(:index => ByRow(x -> get(results.params.plant_type, x, "unknown")) => :type)
+        filter(:index => x -> x in zone_plants, _)
         select(:Time, :type, gen)
         groupby([:Time, :type])
         DataFrames.combine(gen => sum => :value)

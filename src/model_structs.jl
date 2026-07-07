@@ -39,6 +39,7 @@ A container struct that holds the basic configuration for the market simulation 
 - `MarketType::T`: Type of market structure to simulate (see section 'MarketType'). Defaults to `ZonalMarket()`.
 - `ProsumerSetup::ProsumerSetup`: Configuration of prosumer behavior in the model (see section 'ProsumerSetup'). Defaults to `NoProsumer()`.
 - `RedispatchSetup::RedispatchSetup`: Configuration of redispatch modeling in the simulation (see section 'RedispatchSetup'). Defaults to `NoRedispatch()`.
+- `components::Vector{ModelComponent}`: Additional user-defined model components (see [`ModelComponent`](@ref)). Defaults to none.
 
 This struct supports keyword-based construction using default values where provided.
 
@@ -58,6 +59,7 @@ Base.@kwdef struct ModelSetup{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchS
     MarketType::MT = ZonalMarket()
     ProsumerSetup::PS = NoProsumer()
     RedispatchSetup::RD = NoRedispatch()
+    components::Vector{ModelComponent} = ModelComponent[]
 end
 
 ### Parameters
@@ -194,6 +196,9 @@ It is typically used as a central configuration object passed to optimization or
 
 ## Plotting parameters
 - `colors::Dict{String,String}`: Color mapping for zones, nodes, or technologies (used in visualization).
+
+## Extension data
+- `extra::Dict{Symbol,Any}`: Input data for user-defined [`ModelComponent`](@ref)s, keyed by component label.
 """
 Base.@kwdef struct Parameters
     sets::Sets = Sets()
@@ -278,6 +283,10 @@ Base.@kwdef struct Parameters
     # plotting parameters
     colors::Dict{String,String} = Dict{String,String}()
 
+    # extension bag: input data for user-defined ModelComponents, keyed by component.
+    # Custom loaders write params.extra[:my_component]; components read it in build!.
+    extra::Dict{Symbol,Any} = Dict{Symbol,Any}()
+
 end
 
 const AffOrVar = Union{AffExpr,VariableRef}
@@ -348,93 +357,74 @@ const AffVarLink = Union{AffExpr,VariableRef,LinkConstraintRef}
     SubRun{MT, PS, RD, MS}
 
 Low-level container representing a single submodel (e.g. one timestep or market state).
-Contains the JuMP submodules, market state, and associated variable containers.
+Contains the model components, their OptiNodes, the market state, and result containers.
 
 # Fields
 - `results::Dict{Symbol,DataFrame}`: Output results from the optimization.
-- `vars::Dict{Symbol,OptiNode}`: Mapping of module names to OptiNodes.
+- `vars::Dict{Symbol,OptiNode}`: Mapping of component labels to OptiNodes (incl. `:balance`).
+- `components::Vector{ModelComponent}`: Components built into this subrun, in build order.
 - `modelrun::ModelRun`: Reference to the parent model run.
 - `market_state::MarketState`: The current market state simulated.
 - `optigraph::OptiGraph`: Graph structure linking all model modules.
-- `disp`, `ndisp`, `sto`, `network`, `prosumer`, `balance`: JuMP modules.
 
-Created internally and passed to module-building functions.
+Component nodes are accessible as `sr.vars[:disp]` etc.; the property shorthands
+`sr.disp`, `sr.ndisp`, `sr.sto`, `sr.network`, `sr.prosumer`, `sr.balance` are kept
+for convenience and dispatch into `vars`.
+
+Created internally: the constructor creates one OptiNode per component (plus
+`:balance`), calls [`build!`](@ref) on each component, links them through the generic
+energy balance ([`link_balance`](@ref)), and finally calls [`collect_results!`](@ref).
 """
 struct SubRun{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup, MS<:MarketState}
     results::Dict{Symbol,DataFrame}
     vars::Dict{Symbol,OptiNode}
+    components::Vector{ModelComponent}
 
     modelrun::ModelRun{MT, PS, RD}
     market_state::MS
 
     optigraph::OptiGraph
-    disp::OptiNode
-    ndisp::OptiNode
-    sto::OptiNode
-    network::OptiNode
-    prosumer::OptiNode
-    balance::OptiNode
 
     function SubRun(mr::ModelRun{MT, PS, RD}, market_state::T) where {MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup, T<:MarketState}
+        comps = components(mr.setup, market_state)
         results = Dict{Symbol,DataFrame}()
         vars = Dict{Symbol,OptiNode}()
 
         m = OptiGraph()
-        vars[:disp] = disp = add_module!(m, "disp")
-        vars[:ndisp] = ndisp = add_module!(m, "ndisp")
-        vars[:sto] = sto = add_module!(m, "sto")
-        vars[:network] = network = add_module!(m, "network")
-        vars[:prosumer] = prosumer = add_module!(m, "prosumer")
-        vars[:balance] = balance = add_module!(m, "balance")
+        for c in comps
+            lbl = label(c)
+            haskey(vars, lbl) && error("Duplicate component label :$lbl. Every component needs a unique label.")
+            vars[lbl] = add_module!(m, string(lbl))
+        end
+        vars[:balance] = add_module!(m, "balance")
 
-        self = new{MT, PS, RD, T}(
-            results,
-            vars,
-            mr,
-            market_state,
-            m,
-            disp,
-            ndisp,
-            sto,
-            network,
-            prosumer,
-            balance,
-        )
+        self = new{MT, PS, RD, T}(results, vars, comps, mr, market_state, m)
 
-        create_energybalance(self)
+        for c in comps
+            build!(c, self)
+        end
+        link_balance(self)
+        for c in comps
+            collect_results!(c, self)
+        end
 
         return self
     end
 end
 
-const results_value_cols = Dict(
-    :GEN => [:GEN, :CU],
-    :CHARGE => :CHARGE,
-    :STO_LVL => :STO_LVL,
-    :NETINPUT => [:NETINPUT, :DELTA],
-    :LINEFLOW => [:LINEFLOW, :LINEINF],
-    :DCLINEFLOW => [:DCLINEFLOW, :LINEINF],
-    :EXCHANGE => :EXCHANGE,
-    :BIL_EXCHANGE => :BIL_EXCHANGE,
-    :FBMC_INF => [:FBMC_INF_POS, :FBMC_INF_NEG],
-    :REDISP => [
-        :GEN_REDISP,
-        :GEN_UP,
-        :GEN_DOWN,
-        :CU_REDISP,
-        :CHARGE_REDISP,
-        :CHARGE_UP,
-        :CHARGE_DOWN,
-    ],
-    :CHARGE_REDISP => [:CHARGE_REDISP, :CHARGE_UP, :CHARGE_DOWN, :CU_REDISP],
-    :STO_LVL_REDISP => :STO_LVL_REDISP,
-    :NodalMarketBalance => [:CU, :LL],
-    :NodalMarketRedispBalance => [:CU, :LL],
-    :ZonalMarketBalance => [:CU, :LL],
-    :PRS =>
-        [:PRS_TOTAL_GEN, :PRS_NETINPUT, :PRS_SELF, :PRS_CU, :PRS_BUY, :PRS_SELL, :INF],
-)
+# Property shorthands for the standard component nodes (sr.disp, sr.network, ...).
+const _SUBRUN_NODE_PROPS = (:disp, :ndisp, :sto, :network, :prosumer, :balance)
 
+function Base.getproperty(sr::SubRun, s::Symbol)
+    s in _SUBRUN_NODE_PROPS && return getfield(sr, :vars)[s]
+    return getfield(sr, s)
+end
+
+Base.propertynames(sr::SubRun) = (fieldnames(SubRun)..., _SUBRUN_NODE_PROPS...)
+
+# Result tables whose named column holds a constraint reference to extract duals from
+# (all other columns of every result table are value-extracted generically in
+# fetch_results, including tables of user-defined components).
 const results_dual_cols = Dict(
     :NodalMarketBalance => :MarketBalance,
     :NodalMarketRedispBalance => :MarketBalance,

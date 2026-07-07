@@ -4,6 +4,7 @@ using GLMakie, Tyler, ColorSchemes
 using Tyler.TileProviders
 using Tyler.MapTiles
 using Tyler.Extents
+using DataFrames
 using DataFramesMeta 
 using CSV
 using Statistics

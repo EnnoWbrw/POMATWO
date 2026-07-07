@@ -34,7 +34,7 @@ using POMATWO
 using HiGHS
 datapath = joinpath("examples", "test_data_3_nodes")
 
-# define dictionary with all necessary data sets
+# Define dictionary with all necessary data sets
 dataCS = Dict{Symbol,String}(
     :plants => joinpath(datapath, "plants.csv"),
     :nodes => joinpath(datapath, "nodes.csv"),
@@ -48,7 +48,7 @@ dataCS = Dict{Symbol,String}(
 # load input data
 params = load_data(dataCS)
 
-# Set scenario name (optional, defaults to random 6 digit string)
+# Set scenario name (optional, defaults to random 6-digit string)
 scen_name = "3_nodes"
 
 # Define output path for data transfer (optional, defaults to results/)
@@ -57,7 +57,7 @@ output_path = "results/"
 ### Defining a test setup for a model run that stops after 4 timesteps 
 setup = ModelSetup(;
     TimeHorizon = TimeHorizon(stop = 4), # stop = 4 defines timestep 4 as the last timestep considered
-    MarketType = ZonalMarket(NTC()), # A Zonal market that uses the net transfer capacity approach for market couling
+    MarketType = ZonalMarket(NTC()), # A Zonal market that uses the net transfer capacity approach for market coupling
     RedispatchSetup = DCLF(PhaseAngle) # Linearized power flows (DCOPF), using a phase angle - based formulation 
                                        # is used for balancing the grid and calculating redispatch
 )

@@ -17,7 +17,8 @@ pages = [
                         "Data Output" => "output_data.md"
     ],
     "Model Configuration" => Any["Market Definition" => "market_definitions.md",
-                                 "Model Creation" => "Model_config.md" ],
+                                 "Model Creation" => "Model_config.md",
+                                 "Extending the Model" => "extending.md" ],
     "Mathematical Model" => Any[
             "Nomenclature" => "nomenclature.md",
             "Market Model" => "market_model.md",

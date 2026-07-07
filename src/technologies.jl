@@ -1,71 +1,10 @@
 
 """
-Add dispatchable generators to the model for DayAhead market.
-Defines variables, objective, and constraints for dispatchable generation.
-Updates results with generation data.
+Add dispatchable generators to the model for the DayAhead market and the
+TwoDayAhead basecase. Defines variables, objective, and constraints for
+dispatchable generation. Updates results with generation data.
 """
-function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DayAhead}
-    T = mr.market_state.Time
-    @unpack DISP = mr.modelrun.params.sets
-    @unpack gmax, mc, avail, historical_generation, min_generation = mr.modelrun.params
-    m = mr.disp
-
-    # generation variables
-    @variable(m, 0 <= GEN[p = DISP, t = T] <= avail[p][t] * gmax[p])
-
-    # objective function
-    @objective(m, Min, sum(mc[p][t] * GEN[p, t] for p in DISP, t in T))
-
-    if !isempty(historical_generation)
-        fueltypes_historical_disp =
-            intersect(mr.modelrun.params.dispatchable, keys(historical_generation))
-        fueltypes_historical_disp =
-            setdiff(fueltypes_historical_disp, mr.modelrun.params.storage_types)
-        for ft in fueltypes_historical_disp
-            generators = filter(x -> ft == mr.modelrun.params.plant_type[x], DISP)
-            @constraint(
-                m,
-                [t = T],
-                sum(GEN[p, t] for p in generators) == historical_generation[ft][t]
-            )
-        end
-    end
-
-    if !isempty(min_generation)
-        fueltypes_mingen_disp =
-            intersect(mr.modelrun.params.dispatchable, keys(min_generation))
-        fueltypes_mingen_disp =
-            setdiff(fueltypes_mingen_disp, mr.modelrun.params.storage_types)
-        for ft in fueltypes_mingen_disp
-            generators = filter(x -> ft == mr.modelrun.params.plant_type[x], DISP)
-            @constraint(
-                m,
-                [t = T],
-                sum(GEN[p, t] for p in generators) >= min_generation[ft][t]
-            )
-        end
-    end
-
-    df_gen(mr.results)
-
-    for p in DISP, t in T
-        push!(
-            mr.results[:GEN],
-            (
-                index = p,
-                Time = t,
-                GEN = GEN[p, t],
-                mc = mc[p][t],
-                gmax = avail[p][t] * gmax[p],
-                CU = 0,
-            ),
-        )
-    end
-
-    return m
-end
-
-function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:TwoDayAhead}
+function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DAor2DA}
     T = mr.market_state.Time
     @unpack DISP = mr.modelrun.params.sets
     @unpack gmax, mc, avail, historical_generation, min_generation = mr.modelrun.params
@@ -127,86 +66,11 @@ function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <
 end
 
 """
-Add non-dispatchable generators to the model for DayAhead market.
-Defines variables, objective, and constraints for non-dispatchable generation.
-Updates results with generation data.
+Add non-dispatchable generators to the model for the DayAhead market and the
+TwoDayAhead basecase. Defines variables, objective, and constraints for
+non-dispatchable generation. Updates results with generation data.
 """
-function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DayAhead}
-    T = mr.market_state.Time
-    @unpack NDISP = mr.modelrun.params.sets
-    @unpack gmax, avail, historical_generation, min_generation = mr.modelrun.params
-    m = mr.ndisp
-
-    # generation variables
-    @variable(m, 0 <= CU[p = NDISP, t = T] <= avail[p][t] * gmax[p])
-    @expression(m, FEEDIN[p = NDISP, t = T], avail[p][t] * gmax[p] - CU[p, t])
-
-    @objective(m, Min, 50 * sum(CU[p, t] for p in NDISP, t in T))
-
-    if !isempty(historical_generation)
-        fueltypes_historical_ndisp =
-            intersect(mr.modelrun.params.nondispatchable, keys(historical_generation))
-
-        @variable(m, HISTORICAL_INF[ft = fueltypes_historical_ndisp, t = T] >= 0)
-        @objective(
-            m,
-            Min,
-            1000 * sum(HISTORICAL_INF[ft, t] for ft in fueltypes_historical_ndisp, t in T)
-        )
-
-        for ft in fueltypes_historical_ndisp
-            generators = filter(x -> ft == mr.modelrun.params.plant_type[x], NDISP)
-            @constraint(
-                m,
-                [t = T],
-                sum(FEEDIN[p, t] for p in generators) + HISTORICAL_INF[ft, t] ==
-                historical_generation[ft][t]
-            )
-        end
-    end
-
-    if !isempty(min_generation)
-        fueltypes_mingen_ndisp =
-            intersect(mr.modelrun.params.nondispatchable, keys(min_generation))
-
-        @variable(m, MINGEN_INF[ft = fueltypes_mingen_ndisp, t = T] >= 0)
-        @objective(
-            m,
-            Min,
-            1000 * sum(MINGEN_INF[ft, t] for ft in fueltypes_mingen_ndisp, t in T)
-        )
-
-        for ft in fueltypes_mingen_ndisp
-            generators = filter(x -> ft == mr.modelrun.params.plant_type[x], NDISP)
-            @constraint(
-                m,
-                [t = T],
-                sum(FEEDIN[p, t] for p in generators) + MINGEN_INF[ft, t] >=
-                min_generation[ft][t]
-            )
-        end
-    end
-
-    df_gen(mr.results)
-
-    for p in NDISP, t in T
-        push!(
-            mr.results[:GEN],
-            (
-                index = p,
-                Time = t,
-                GEN = FEEDIN[p, t],
-                mc = 0,
-                gmax = avail[p][t] * gmax[p],
-                CU = CU[p, t],
-            ),
-        )
-    end
-
-    return m
-end
-
-function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:TwoDayAhead}
+function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DAor2DA}
     T = mr.market_state.Time
     @unpack NDISP = mr.modelrun.params.sets
     @unpack gmax, avail, historical_generation, min_generation = mr.modelrun.params
@@ -282,134 +146,11 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
 end
 
 """
-Add storage units to the model for DayAhead market.
-Defines variables, objective, and constraints for storage operation.
+Add storage units to the model for the DayAhead market and the TwoDayAhead
+basecase. Defines variables, objective, and constraints for storage operation.
 Updates results with storage, charge, and generation data.
 """
-function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DayAhead}
-    T = mr.market_state.Time
-    @unpack S = mr.modelrun.params.sets
-    @unpack gmax_storage,
-    gmax,
-    eta,
-    storage,
-    mc,
-    historical_generation,
-    min_generation,
-    inflow = mr.modelrun.params
-    m = mr.sto
-
-    inflow = Dict((s, t) => haskey(inflow, s) ? inflow[s][t] : 0 for s in S, t in T)
-
-    # storage variables
-    @variable(m, 0 <= GEN[s = S, t = T] <= gmax[s])
-    @variable(m, 0 <= CHARGE[s = S, t = T] <= gmax_storage[s])
-    @variable(m, 0 <= STO_LVL[s = S, t = T] <= storage[s])
-    @variable(m, 0 <= INF_POS[s = S, t = T])
-    @variable(m, 0 <= INF_NEG[s = S, t = T])
-
-    @expression(m, INF[s = S, t = T], INF_POS[s, t] - INF_NEG[s, t])
-    # objective function
-    @objective(
-        m,
-        Min,
-        #sum(max(mc[s][t], 0.01) * GEN[s, t] for s in S, t in T)
-        sum(mc[s][t] * GEN[s, t] for s in S, t in T) +
-        sum(10000 * (INF_POS[s, t] + INF_NEG[s, t]) for s in S, t in T)
-    )
-
-    for s in S
-        for t in T
-            if t == 1
-                @constraint(
-                    m,
-                    STO_LVL[s, t] ==
-                    -(GEN[s, t]) / eta[s] +
-                    CHARGE[s, t] * eta[s] +
-                    inflow[s, t] +
-                    INF[s, t]
-                )
-            else
-                prev_t = prev_period(T, t)
-                @constraint(
-                    m,
-                    STO_LVL[s, t] ==
-                    (STO_LVL[s, prev_t] - GEN[s, t] / eta[s]) +
-                    CHARGE[s, t] * eta[s] +
-                    inflow[s, t] +
-                    INF[s, t]
-                )
-            end
-        end
-    end
-
-    if !isempty(historical_generation)
-        fueltypes_historical_s =
-            intersect(mr.modelrun.params.storage_types, keys(historical_generation))
-        for ft in fueltypes_historical_s
-            generators = filter(x -> ft == mr.modelrun.params.plant_type[x], S)
-            #			@constraint(m, [t=T], sum(GEN[s, t] for s in generators) == historical_generation[ft][t])
-            @constraint(
-                m,
-                sum(GEN[s, t] for s in generators, t in T) ==
-                sum(historical_generation[ft][t] for t in T)
-            )
-        end
-    end
-
-    if !isempty(min_generation)
-        fueltypes_mingen_s =
-            intersect(mr.modelrun.params.storage_types, keys(min_generation))
-        for ft in fueltypes_mingen_s
-            generators = filter(x -> ft == mr.modelrun.params.plant_type[x], S)
-            @constraint(
-                m,
-                [t = T],
-                sum(GEN[s, t] for s in generators) >= min_generation[ft][t]
-            )
-        end
-    end
-
-    ### to dataframe
-    df_gen(mr.results)
-    df_charge(mr.results)
-    df_sto(mr.results)
-
-    for s in S, t in T
-        push!(
-            mr.results[:GEN],
-            (
-                index = s,
-                Time = t,
-                GEN = GEN[s, t],
-                mc = mc[s][t],
-                gmax = gmax_storage[s],
-                CU = 0,
-            ),
-        )
-
-        push!(
-            mr.results[:CHARGE],
-            (index = s, Time = t, CHARGE = CHARGE[s, t], gmax = gmax_storage[s]),
-        )
-
-
-        push!(
-            mr.results[:STO_LVL],
-            (
-                index = s,
-                Time = t,
-                STO_LVL = STO_LVL[s, t],
-                storage = storage[s],
-                inf = INF[s, t],
-            ),
-        )
-    end
-
-    return m
-end
-
-function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:TwoDayAhead}
+function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DAor2DA}
     T = mr.market_state.Time
     @unpack S = mr.modelrun.params.sets
     @unpack gmax_storage,

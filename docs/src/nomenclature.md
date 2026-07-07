@@ -35,7 +35,7 @@ This section defines all sets, parameters, and variables used in the market and 
 | $\mathbf{A^{dc}_{l\times n}}$          | Incidence matrix of DC lines                                       | -               |
 | $\mathbf{B^{line}_{acl \times n}}$     | Line susceptance matrix                                            | -               |
 | $\mathbf{B^{bus}_{n \times m}}$        | Bus susceptance matrix                                             | -               |
-| $\mathbf{\\eta_s}$                     | Efficiency of storage unit $s$                                     | -               |
+| $\mathbf{\eta_s}$                      | Efficiency of storage unit $s$                                     | -               |
 
 
 ## Variables

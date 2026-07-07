@@ -173,8 +173,6 @@ One row per AC transmission line.
 | `node_i`  | ✔                     | String  | From-node. |
 | `node_j`  | ✔                     | String  | To-node. |
 | `capacity`| ✔                     | Float   | Thermal capacity (MW). |
-| `node_i`  | ✔                     | String  | Start node identifier. |
-| `node_j`  | ✔                     | String  | End node identifier. |
 | `voltage` | see note              | Float   | Nominal voltage (kV). Required when using absolute impedance/susceptance parameters (`r`, `x`, or `b`). Defaults to 220 kV with a warning if absent. |
 | `x_pu`    | one group required¹   | Float   | Per-unit reactance. |
 | `r_pu`    | one group required¹   | Float   | Per-unit resistance. Must be provided together with `x_pu`. |

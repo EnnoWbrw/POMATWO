@@ -31,6 +31,7 @@ function plot_market_statistics end
 
 include("utils/GSK_strategies.jl")
 include("market_definitions.jl")
+include("components.jl")
 include("model_structs.jl")
 include("data_report.jl")
 include("utils/fbmc_utils.jl")
@@ -94,6 +95,23 @@ export load_data,
     DispOnlyGSK,
     CustomWeightsGSK,
     validate_params,
-    check_infeasibility
+    check_infeasibility,
+    # component extension interface
+    ModelComponent,
+    build!,
+    injection,
+    collect_results!,
+    validate_component,
+    BalanceScope,
+    NodalScope,
+    ZonalScope,
+    balance_scope,
+    # state pipeline
+    MarketState,
+    DayAhead,
+    TwoDayAhead,
+    ProsumerOptimizationState,
+    Redispatch,
+    state_sequence
 
 end # module POMATWO
