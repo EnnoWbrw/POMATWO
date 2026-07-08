@@ -353,8 +353,8 @@ goldens and a changelog note.
 | # | Finding | Location | Impact |
 |---|---------|----------|--------|
 | F1 | `@objective` **replaces** the node objective, it does not add. `add_ndisp_generators` sets `Min 50*ΣCU`, then — if `historical_generation` present — overwrites it with `Min 1000*ΣHISTORICAL_INF`, then — if `min_generation` present — overwrites again with `Min 1000*ΣMINGEN_INF`. | technologies.jl:144,151,173 (and 2DA copy 219,226,248) | With historical/min-gen inputs, curtailment penalty (and possibly the historical penalty) silently drop out of the objective. Datasets without those inputs (e.g. 3-node goldens) unaffected. Fix = accumulate terms, one final `@objective`. |
-| F2 | Storage inter-temporal constraint branches on literal `t == 1`, but splits start at arbitrary t. First split: acyclic start (implicit level 0). Later splits: `t==T[1]` falls through to `prev_period`, which wraps to `T[end]` → **cyclic** storage. Same in redispatch storage and prosumer `StorageBalance` (always cyclic). | technologies.jl:323,446,678; utils/time_utils.jl:20; prosumer.jl:57 | First split has different storage semantics than every other split. Decide intended boundary condition (cyclic per split vs. carry-over vs. fixed start level) and implement uniformly — `t == T[1]` at minimum. |
-| F3 | `LINEINF` is created and penalized in the objective but appears in **no constraint** → always 0, dead variables (ToDos.md already suspects this). | technologies.jl:779,786 | Noise in model + results (`lineinf` column always 0). Either wire it into the line-limit constraints as real slack or delete. |
+| F2 ✅ | **RESOLVED**: `StorageBoundary` setup option — `CarryOverStorage(start_share)` (default, levels carried across splits via pipeline ctx) and `CyclicStorage()` (uniformly cyclic per split). Original finding: storage inter-temporal constraint branched on literal `t == 1`, but splits start at arbitrary t. First split: acyclic start (implicit level 0). Later splits: `t==T[1]` falls through to `prev_period`, which wraps to `T[end]` → **cyclic** storage. Same in redispatch storage and prosumer `StorageBalance` (always cyclic). | technologies.jl:323,446,678; utils/time_utils.jl:20; prosumer.jl:57 | First split has different storage semantics than every other split. Decide intended boundary condition (cyclic per split vs. carry-over vs. fixed start level) and implement uniformly — `t == T[1]` at minimum. |
+| F3 ✅ | **RESOLVED**: removed (variable, objective, result columns, check_infeasibility rows). Line limits cannot cause infeasibility on their own — THETA=0 always feasible, imbalance lands in CU/LL. Original finding: `LINEINF` is created and penalized in the objective but appears in **no constraint** → always 0, dead variables (ToDos.md already suspects this). | technologies.jl:779,786 | Noise in model + results (`lineinf` column always 0). Either wire it into the line-limit constraints as real slack or delete. |
 | F4 | Zonal balance load term shadows the zone variable: `sum(nodal_load[z][t] for z in nodes_in_zone[z] …)` — inner `z` iterates *nodes*. Works, but reads as a bug. | energy_balances.jl:61 | Readability only. Dies automatically with the generic `load(::ZonalScope, …)` in 2.2. |
 | F5 | `fetch_results` computes `col = results_value_cols[k]` then ignores it, applying `value_or_number` to **every** column (incl. index/Time). | utils/model_utils.jl:8-9 | Wasted per-cell dispatch over full DataFrames; masks schema errors. Fold into `result_columns` migration (Phase 7.2). |
 | F6 | Duplicate `da_results = prev_results_for_redispatch(sr)` (computed twice back-to-back). | solving.jl:140,143 | Wasted work only. Dies with Phase 4. |
@@ -366,28 +366,28 @@ goldens and a changelog note.
 Ordered by expected wall-clock impact. P1/P2 are large and low-risk; do P2 alongside Phase 2/3
 (same code is being touched), P1 after Phase 4 (needs the generic loop).
 
-- **P1 — Parallelize splits.** Each `T in split(...)` iteration is independent (storage is
+- **P1 ✅ (implemented) — Parallelize splits.** `_run` threads over splits when `Threads.nthreads() > 1` and splits are independent (`CarryOverStorage` with non-empty storage forces sequential). `@suppress` replaced by per-model `MOI.Silent` so no global stdout state under threading. Each `T in split(...)` iteration is independent (storage is
   cyclic *within* a split, no state crosses splits; result dirs are per-subrun). After Phase 4
   the loop body is generic → `Threads.@threads` (or `Distributed.pmap`) over splits, one solver
   env per task. Near-linear speedup for year runs (365 splits). Caveats: HiGHS is not
   thread-safe across a shared env (create per-task optimizers — `set_optimizer` already runs
   per SubRun); cap `JULIA_NUM_THREADS` vs solver threads; `ctx` stays split-local so the FBMC
   basecase→DA chain still works inside one split.
-- **P2 — Hoist set algebra out of constraint loops.** The balance does
+- **P2 ✅ (implemented via member caches) — Hoist set algebra out of constraint loops.** The balance does
   `intersect(DISP, plants_in_zone[z])` *per (z,t)* (energy_balances.jl:57-59 and 3 siblings);
   `add_*` builders `filter` plant lists per fueltype inside loops. Precompute
   `region → component-members` maps once per SubRun (fits naturally in `build!`) — model build
   time drops noticeably for large systems.
-- **P3 — Column-wise results instead of row `push!`.** Builders push one NamedTuple of
+- **P3 ✅ (implemented) — Column-wise results instead of row `push!`.** All builders emit DataFrame blocks via `append_results!`; fetch stays vectorized. Builders push one NamedTuple of
   `AffExpr`/`VariableRef` per (p,t) into DataFrames, then `fetch_results` runs `ByRow` over
   everything. Collect columns as vectors and call vectorized `value.()` once per column; also
   fixes F5. Big constant-factor win on result handling for year runs.
-- **P4 — Type-stable parameter access.** `Dict{String,Profile}` fields have abstract value
+- **P4 ✅ (implemented) — Type-stable parameter access.** `ConcreteProfile = Union{FixedProfile{Float64},HourlyProfile{Float64}}` + `Base.convert` methods; Parameters dicts concretized, call sites unchanged. `Dict{String,Profile}` fields have abstract value
   type → dynamic dispatch on every `mc[p][t]` inside `@variable`/`@objective` loops. Options:
   function barrier per builder (extract to concretely-typed locals), or concrete
   `Union{FixedProfile{Float64},HourlyProfile{Float64}}` value type (small union → fast). Pairs
   with the `Parameters.extra` work in Phase 5.
-- **P5 — Make `@suppress` optional.** Wrapping `optimize!` in `Suppressor.@suppress` costs
+- **P5 ✅ (implemented) — Make `@suppress` optional.** `ModelRun(; verbose=false)`; silencing via `_silent_solver` (MOI.Silent), Suppressor dependency removed. Wrapping `optimize!` in `Suppressor.@suppress` costs
   stream redirection and hides solver logs users need for tuning. Add
   `ModelRun(...; verbose=false)` and drop `@suppress` when verbose.
 - **P6 — (Later, measure first) single-model backend.** Plasmo's OptiGraph adds indirection vs

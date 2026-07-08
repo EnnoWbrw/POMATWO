@@ -72,26 +72,20 @@ function add_prosumer(sr::SubRun{MT,PS,RD,MS}
 
     df_prosumer(sr.results)
 
-    for prs in PRS, t in T
-        push!(
-            sr.results[:PRS],
-            (
-                index = prs,
-                Time = t,
-                PRS_TOTAL_GEN = PRS_TOTAL_GEN[prs, t],
-                PRS_SELF = PRS_SELF[prs, t],
-                PRS_CU = PRS_CU[prs, t],
-                PRS_NETINPUT = PRS_NETINPUT[prs, t],
-                PRS_STO_LVL = (prs in PRS_STO ? PRS_STO_LVL[prs, t] : 0),
-                PRS_STO_OUT = (prs in PRS_STO ? PRS_STO_OUT[prs, t] : 0),
-                PRS_STO_IN = (prs in PRS_STO ? PRS_STO_IN[prs, t] : 0),
-                PRS_BUY = PRS_BUY[prs, t],
-                PRS_SELL = PRS_SELL[prs, t],
-                INF = INF[prs, t],
-            ),
-        )
-
-    end
+    append_results!(sr.results, :PRS, DataFrame(
+        index = repeat(PRS, inner = length(T)),
+        Time = repeat(collect(T), outer = length(PRS)),
+        PRS_TOTAL_GEN = [PRS_TOTAL_GEN[prs, t] for prs in PRS for t in T],
+        PRS_SELF = [PRS_SELF[prs, t] for prs in PRS for t in T],
+        PRS_CU = [PRS_CU[prs, t] for prs in PRS for t in T],
+        PRS_NETINPUT = [PRS_NETINPUT[prs, t] for prs in PRS for t in T],
+        PRS_STO_LVL = [(prs in PRS_STO ? PRS_STO_LVL[prs, t] : 0) for prs in PRS for t in T],
+        PRS_STO_OUT = [(prs in PRS_STO ? PRS_STO_OUT[prs, t] : 0) for prs in PRS for t in T],
+        PRS_STO_IN = [(prs in PRS_STO ? PRS_STO_IN[prs, t] : 0) for prs in PRS for t in T],
+        PRS_BUY = [PRS_BUY[prs, t] for prs in PRS for t in T],
+        PRS_SELL = [PRS_SELL[prs, t] for prs in PRS for t in T],
+        INF = [INF[prs, t] for prs in PRS for t in T],
+    ))
 
     return m
 end

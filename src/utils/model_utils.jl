@@ -44,8 +44,16 @@ function add_module!(m::OptiGraph, label::String)
     return n
 end
 
+# Wrap a solver (factory or OptimizerWithAttributes) so it solves silently.
+# Used instead of stdout redirection (`@suppress`), which is global state and not
+# thread-safe — silencing via MOI.Silent is per-model and works under threading.
+_silent_solver(s::MOI.OptimizerWithAttributes) =
+    MOI.OptimizerWithAttributes(s.optimizer_constructor, (s.params..., MOI.Silent() => true)...)
+_silent_solver(s) = MOI.OptimizerWithAttributes(s, MOI.Silent() => true)
+
 function JuMP.optimize!(sr::SubRun)
-    set_optimizer(sr.optigraph, sr.modelrun.solver)
+    solver = sr.modelrun.verbose ? sr.modelrun.solver : _silent_solver(sr.modelrun.solver)
+    set_optimizer(sr.optigraph, solver)
     optimize!(sr.optigraph)
 end
 

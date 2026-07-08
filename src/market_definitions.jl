@@ -184,6 +184,55 @@ Represents a setup without redispatch modeling.
 """
 struct NoRedispatch <: RedispatchSetup end
 
+### Storage boundary conditions
+"""
+    StorageBoundary
+
+Abstract supertype for the storage-level boundary condition at the edges of each
+time split. Determines what the storage level of the first hour of a split connects
+to. Subtypes: [`CyclicStorage`](@ref) (default), [`CarryOverStorage`](@ref).
+"""
+abstract type StorageBoundary end
+
+"""
+    CarryOverStorage(; start_share = 0.0) <: StorageBoundary
+
+Storage levels are carried over between time splits: the first hour of a split
+starts from the level the storage had at the end of the previous split. In the
+first split, the level starts at `start_share * storage_capacity`.
+
+This is the physically consistent choice — energy cannot teleport between days.
+
+!!! warning "End-of-split dumping"
+    A split has no terminal value for stored energy: the optimizer has no incentive
+    to keep energy for later splits and will discharge whatever is profitable before
+    each split boundary. For day-cycling storages (batteries, pumped hydro) consider
+    [`CyclicStorage`](@ref), or use splits long enough to cover the storage cycle.
+"""
+struct CarryOverStorage <: StorageBoundary
+    start_share::Float64
+
+    function CarryOverStorage(; start_share::Float64 = 0.0)
+        0.0 <= start_share <= 1.0 ||
+            error("start_share must be between 0 and 1, got $start_share")
+        return new(start_share)
+    end
+end
+
+"""
+    CyclicStorage() <: StorageBoundary
+
+The storage level is cyclic within every time split: the first hour of a split
+connects to the level at the last hour of the same split. Splits stay fully
+independent and no energy is dumped at split boundaries, but levels do not carry
+over between splits — plausible for day-cycling storages, wrong for seasonal ones.
+
+Storage inflows in the first hours of a split can exceed the storage capacity under
+this boundary (the level wraps around full); use [`CarryOverStorage`](@ref) when
+inflows are used to set initial levels.
+"""
+struct CyclicStorage <: StorageBoundary end
+
 
 ### MarketStates
 """

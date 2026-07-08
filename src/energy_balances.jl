@@ -225,25 +225,12 @@ end
 link_balance(sr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS<:ProsumerSetup,RD<:RedispatchSetup,MS<:ProsumerOptimizationState} = nothing
 
 function _push_balance_results!(sr::SubRun, key::Symbol, regioncol::Symbol, con, CU, LL, R, T)
-    if !haskey(sr.results, key)
-        sr.results[key] = DataFrame(;
-            Time = Int[],
-            regioncol => String[],
-            MarketBalance = LinkConstraintRef[],
-            CU = VariableRef[],
-            LL = VariableRef[],
-        )
-    end
-    for r in R, t in T
-        push!(
-            sr.results[key],
-            (;
-                Time = t,
-                regioncol => r,
-                MarketBalance = con[r, t],
-                CU = CU[r, t],
-                LL = LL[r, t],
-            ),
-        )
-    end
+    sr.results[key] = DataFrame(
+        :Time => repeat(collect(T), outer = length(R)),
+        regioncol => repeat(collect(R), inner = length(T)),
+        :MarketBalance => [con[r, t] for r in R for t in T],
+        :CU => [CU[r, t] for r in R for t in T],
+        :LL => [LL[r, t] for r in R for t in T],
+    )
+    return sr.results[key]
 end

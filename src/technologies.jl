@@ -48,19 +48,14 @@ function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <
 
     df_gen(mr.results)
 
-    for p in DISP, t in T
-        push!(
-            mr.results[:GEN],
-            (
-                index = p,
-                Time = t,
-                GEN = GEN[p, t],
-                mc = mc[p][t],
-                gmax = avail[p][t] * gmax[p],
-                CU = 0,
-            ),
-        )
-    end
+    append_results!(mr.results, :GEN, DataFrame(
+        index = repeat(DISP, inner = length(T)),
+        Time = repeat(collect(T), outer = length(DISP)),
+        GEN = [GEN[p, t] for p in DISP for t in T],
+        mc = [mc[p][t] for p in DISP for t in T],
+        gmax = [avail[p][t] * gmax[p] for p in DISP for t in T],
+        CU = zeros(Int, length(DISP) * length(T)),
+    ))
 
     return m
 end
@@ -128,26 +123,40 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
 
     df_gen(mr.results)
 
-    for p in NDISP, t in T
-        push!(
-            mr.results[:GEN],
-            (
-                index = p,
-                Time = t,
-                GEN = FEEDIN[p, t],
-                mc = 0,
-                gmax = avail[p][t] * gmax[p],
-                CU = CU[p, t],
-            ),
-        )
-    end
+    append_results!(mr.results, :GEN, DataFrame(
+        index = repeat(NDISP, inner = length(T)),
+        Time = repeat(collect(T), outer = length(NDISP)),
+        GEN = [FEEDIN[p, t] for p in NDISP for t in T],
+        mc = zeros(Int, length(NDISP) * length(T)),
+        gmax = [avail[p][t] * gmax[p] for p in NDISP for t in T],
+        CU = [CU[p, t] for p in NDISP for t in T],
+    ))
 
     return m
 end
 
 """
+    initial_level(boundary::StorageBoundary, sr::SubRun, STO_LVL, s, T, carry_key)
+
+Storage level the first hour of a time split connects to, per boundary condition:
+
+- `CyclicStorage`: the level variable of the split's last hour (cyclic within split).
+- `CarryOverStorage`: the level carried over from the previous split
+  (`sr.ctx[carry_key]`), or `start_share * capacity` in the first split.
+"""
+initial_level(::CyclicStorage, sr::SubRun, STO_LVL, s, T, carry_key) = STO_LVL[s, T[end]]
+
+function initial_level(b::CarryOverStorage, sr::SubRun, STO_LVL, s, T, carry_key)
+    carried = get(sr.ctx, carry_key, nothing)
+    carried === nothing && return b.start_share * sr.modelrun.params.storage[s]
+    return carried[s]
+end
+
+"""
 Add storage units to the model for the DayAhead market and the TwoDayAhead
 basecase. Defines variables, objective, and constraints for storage operation.
+The level of the first hour of the split connects to the boundary condition of
+`setup.StorageBoundary` (see [`StorageBoundary`](@ref)).
 Updates results with storage, charge, and generation data.
 """
 function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup, MS<:DAor2DA}
@@ -182,28 +191,20 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
         sum(10000 * (INF_POS[s, t] + INF_NEG[s, t]) for s in S, t in T)
     )
 
+    boundary = mr.modelrun.setup.StorageBoundary
     for s in S
         for t in T
-            if t == 1
-                @constraint(
-                    m,
-                    STO_LVL[s, t] ==
-                    -(GEN[s, t]) / eta[s] +
-                    CHARGE[s, t] * eta[s] +
-                    inflow[s, t] +
-                    INF[s, t]
-                )
-            else
-                prev_t = prev_period(T, t)
-                @constraint(
-                    m,
-                    STO_LVL[s, t] ==
-                    (STO_LVL[s, prev_t] - GEN[s, t] / eta[s]) +
-                    CHARGE[s, t] * eta[s] +
-                    inflow[s, t] +
-                    INF[s, t]
-                )
-            end
+            prev_lvl =
+                t == T[1] ? initial_level(boundary, mr, STO_LVL, s, T, :sto_lvl_start) :
+                STO_LVL[s, prev_period(T, t)]
+            @constraint(
+                m,
+                STO_LVL[s, t] ==
+                prev_lvl - GEN[s, t] / eta[s] +
+                CHARGE[s, t] * eta[s] +
+                inflow[s, t] +
+                INF[s, t]
+            )
         end
     end
 
@@ -239,36 +240,32 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
     df_charge(mr.results)
     df_sto(mr.results)
 
-    for s in S, t in T
-        push!(
-            mr.results[:GEN],
-            (
-                index = s,
-                Time = t,
-                GEN = GEN[s, t],
-                mc = mc[s][t],
-                gmax = gmax_storage[s],
-                CU = 0,
-            ),
-        )
+    index = repeat(S, inner = length(T))
+    Time = repeat(collect(T), outer = length(S))
 
-        push!(
-            mr.results[:CHARGE],
-            (index = s, Time = t, CHARGE = CHARGE[s, t], gmax = gmax_storage[s]),
-        )
+    append_results!(mr.results, :GEN, DataFrame(
+        index = index,
+        Time = Time,
+        GEN = [GEN[s, t] for s in S for t in T],
+        mc = [mc[s][t] for s in S for t in T],
+        gmax = [gmax_storage[s] for s in S for t in T],
+        CU = zeros(Int, length(S) * length(T)),
+    ))
 
+    append_results!(mr.results, :CHARGE, DataFrame(
+        index = index,
+        Time = Time,
+        CHARGE = [CHARGE[s, t] for s in S for t in T],
+        gmax = [gmax_storage[s] for s in S for t in T],
+    ))
 
-        push!(
-            mr.results[:STO_LVL],
-            (
-                index = s,
-                Time = t,
-                STO_LVL = STO_LVL[s, t],
-                storage = storage[s],
-                inf = INF[s, t],
-            ),
-        )
-    end
+    append_results!(mr.results, :STO_LVL, DataFrame(
+        index = index,
+        Time = Time,
+        STO_LVL = [STO_LVL[s, t] for s in S for t in T],
+        storage = [storage[s] for s in S for t in T],
+        inf = [INF[s, t] for s in S for t in T],
+    ))
 
     return m
 end
@@ -302,25 +299,20 @@ function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <
 
     df_redispatch(mr.results)
 
-    for p in DISP, t in T
-        push!(
-            mr.results[:REDISP],
-            (
-                index = p,
-                Time = t,
-                GEN_REDISP = GEN_REDISP[p, t],
-                GEN_UP = GEN_UP[p, t],
-                GEN_DOWN = GEN_DOWN[p, t],
-                gen = g[p, t],
-                CU_REDISP = 0,
-                CHARGE_REDISP = 0,
-                CHARGE_UP = 0,
-                CHARGE_DOWN = 0,
-                max_up = avail[p][t] * gmax[p] - g[p, t],
-            ),
-        )
-
-    end
+    nrows = length(DISP) * length(T)
+    append_results!(mr.results, :REDISP, DataFrame(
+        index = repeat(DISP, inner = length(T)),
+        Time = repeat(collect(T), outer = length(DISP)),
+        GEN_REDISP = [GEN_REDISP[p, t] for p in DISP for t in T],
+        GEN_UP = [GEN_UP[p, t] for p in DISP for t in T],
+        GEN_DOWN = [GEN_DOWN[p, t] for p in DISP for t in T],
+        gen = [g[p, t] for p in DISP for t in T],
+        CU_REDISP = zeros(Int, nrows),
+        CHARGE_REDISP = zeros(Int, nrows),
+        CHARGE_UP = zeros(Int, nrows),
+        CHARGE_DOWN = zeros(Int, nrows),
+        max_up = [avail[p][t] * gmax[p] - g[p, t] for p in DISP for t in T],
+    ))
 
     return m
 end
@@ -347,24 +339,20 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
 
     df_redispatch(mr.results)
 
-    for p in NDISP, t in T
-        push!(
-            mr.results[:REDISP],
-            (
-                index = p,
-                Time = t,
-                GEN_REDISP = FEEDIN_REDISP[p, t],
-                GEN_UP = 0, #todo
-                GEN_DOWN = 0,
-                gen = avail[p][t] * gmax[p] - cu[p, t],
-                CU_REDISP = CU[p, t],
-                CHARGE_REDISP = 0,
-                CHARGE_UP = 0,
-                CHARGE_DOWN = 0,
-                max_up = 0,
-            ),
-        )
-    end
+    nrows = length(NDISP) * length(T)
+    append_results!(mr.results, :REDISP, DataFrame(
+        index = repeat(NDISP, inner = length(T)),
+        Time = repeat(collect(T), outer = length(NDISP)),
+        GEN_REDISP = [FEEDIN_REDISP[p, t] for p in NDISP for t in T],
+        GEN_UP = zeros(Int, nrows), #todo
+        GEN_DOWN = zeros(Int, nrows),
+        gen = [avail[p][t] * gmax[p] - cu[p, t] for p in NDISP for t in T],
+        CU_REDISP = [CU[p, t] for p in NDISP for t in T],
+        CHARGE_REDISP = zeros(Int, nrows),
+        CHARGE_UP = zeros(Int, nrows),
+        CHARGE_DOWN = zeros(Int, nrows),
+        max_up = zeros(Int, nrows),
+    ))
 
     return m
 end
@@ -414,52 +402,40 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
         sum(10000 * (INF_POS[s, t] + INF_NEG[s, t]) for s in S, t in T)
     )
   
+    boundary = mr.modelrun.setup.StorageBoundary
     for s in S
         for t in T
-            if t == 1
-                @constraint(
-                    m,
-                    STO_LVL_REDISP[s, t] ==
-                    -(GEN_REDISP[s, t]) / eta[s] +
-                    CHARGE_REDISP[s, t] * eta[s] +
-                    inflow[s, t] +
-                    INF[s, t]
-                )
-            else
-                prev_t = prev_period(T, t)
-                @constraint(
-                    m,
-                    STO_LVL_REDISP[s, t] ==
-                    (STO_LVL_REDISP[s, prev_t] - GEN_REDISP[s, t] / eta[s]) +
-                    CHARGE_REDISP[s, t] * eta[s] +
-                    inflow[s, t] +
-                    INF[s, t]
-                )
-            end
+            prev_lvl =
+                t == T[1] ?
+                initial_level(boundary, mr, STO_LVL_REDISP, s, T, :sto_lvl_start_redisp) :
+                STO_LVL_REDISP[s, prev_period(T, t)]
+            @constraint(
+                m,
+                STO_LVL_REDISP[s, t] ==
+                prev_lvl - GEN_REDISP[s, t] / eta[s] +
+                CHARGE_REDISP[s, t] * eta[s] +
+                inflow[s, t] +
+                INF[s, t]
+            )
         end
     end
 
     ### to dataframe
     df_redispatch(mr.results)
 
-    for s in S, t in T
-        push!(
-            mr.results[:REDISP],
-            (
-                index = s,
-                Time = t,
-                GEN_REDISP = GEN_REDISP[s, t],
-                GEN_UP = GEN_UP[s, t],
-                GEN_DOWN = GEN_DOWN[s, t],
-                gen = g[s, t],
-                CU_REDISP = 0,
-                CHARGE_REDISP = CHARGE_REDISP[s, t],
-                CHARGE_UP = CHARGE_UP[s, t],
-                CHARGE_DOWN = CHARGE_DOWN[s, t],
-                max_up = gmax_storage[s] - g[s, t],
-            ),
-        )
-    end
+    append_results!(mr.results, :REDISP, DataFrame(
+        index = repeat(S, inner = length(T)),
+        Time = repeat(collect(T), outer = length(S)),
+        GEN_REDISP = [GEN_REDISP[s, t] for s in S for t in T],
+        GEN_UP = [GEN_UP[s, t] for s in S for t in T],
+        GEN_DOWN = [GEN_DOWN[s, t] for s in S for t in T],
+        gen = [g[s, t] for s in S for t in T],
+        CU_REDISP = zeros(Int, length(S) * length(T)),
+        CHARGE_REDISP = [CHARGE_REDISP[s, t] for s in S for t in T],
+        CHARGE_UP = [CHARGE_UP[s, t] for s in S for t in T],
+        CHARGE_DOWN = [CHARGE_DOWN[s, t] for s in S for t in T],
+        max_up = [gmax_storage[s] - g[s, t] for s in S for t in T],
+    ))
 
     return m
 end
@@ -517,14 +493,15 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
     @variable(m, 0 <= F_POS[T, dc = DC] <= dcline_capacity[dc])
     @variable(m, 0 <= F_NEG[T, dc = DC] <= dcline_capacity[dc])
     @expression(m, F[t = T, dc = DC], F_POS[t, dc] - F_NEG[t, dc])
-    @variable(m, 0 <= LINEINF[T, union(DC, L)])
 
     ##pomato version
     # https://github.com/richard-weinhold/MarketModel/blob/main/src/model_functions.jl
 
     @variable(m, THETA[T, N])
 
-    @objective(m, Min, 1000 * sum(LINEINF[t, l] for t in T, l in union(DC, L)))
+    # Note: no line-limit slack variables. Line limits can never make the model
+    # infeasible on their own (THETA = 0 is always feasible for the network node);
+    # any resulting imbalance is absorbed by the CU/LL slacks of the market balance.
 
     @expression(
         m,
@@ -567,38 +544,26 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
     df_netinput(sr.results)
     df_lineflow(sr.results)
 
-    for n in N, t in T
-        push!(
-            sr.results[:NETINPUT],
-            (index = n, Time = t, NETINPUT = NETINPUT[n, t], DELTA = THETA[t, n]),
-        )
-    end
+    append_results!(sr.results, :NETINPUT, DataFrame(
+        index = repeat(N, inner = length(T)),
+        Time = repeat(collect(T), outer = length(N)),
+        NETINPUT = [NETINPUT[n, t] for n in N for t in T],
+        DELTA = [THETA[t, n] for n in N for t in T],
+    ))
 
-    for l in L, t in T
-        push!(
-            sr.results[:LINEFLOW],
-            (
-                index = l,
-                Time = t,
-                LINEFLOW = LINEFLOW[l, t],
-                line_capacity = acline_capacity[l],
-                lineinf = LINEINF[t, l],
-            ),
-        )
-    end
+    append_results!(sr.results, :LINEFLOW, DataFrame(
+        index = repeat(L, inner = length(T)),
+        Time = repeat(collect(T), outer = length(L)),
+        LINEFLOW = [LINEFLOW[l, t] for l in L for t in T],
+        line_capacity = [acline_capacity[l] for l in L for t in T],
+    ))
 
-    for l in DC, t in T
-        push!(
-            sr.results[:DCLINEFLOW],
-            (
-                index = l,
-                Time = t,
-                DCLINEFLOW = F[t, l],
-                line_capacity = dcline_capacity[l],
-                lineinf = LINEINF[t, l],
-            ),
-        )
-    end
+    append_results!(sr.results, :DCLINEFLOW, DataFrame(
+        index = repeat(DC, inner = length(T)),
+        Time = repeat(collect(T), outer = length(DC)),
+        DCLINEFLOW = [F[t, l] for l in DC for t in T],
+        line_capacity = [dcline_capacity[l] for l in DC for t in T],
+    ))
 
 end
 
@@ -663,13 +628,18 @@ function add_exchange(sr::SubRun, ::Type{NTC})
     df_ntc(sr.results)
     df_exchange(sr.results)
 
-    for (z, zz) in NTC, t in T
-        push!(sr.results[:BIL_EXCHANGE], (From = z, To = zz, Time = t, BIL_EXCHANGE = EX[(z, zz), t]))
-    end
+    append_results!(sr.results, :BIL_EXCHANGE, DataFrame(
+        From = [z for (z, zz) in NTC for t in T],
+        To = [zz for (z, zz) in NTC for t in T],
+        Time = repeat(collect(T), outer = length(NTC)),
+        BIL_EXCHANGE = [EX[(z, zz), t] for (z, zz) in NTC for t in T],
+    ))
 
-    for z in Z, t in T
-        push!(sr.results[:EXCHANGE], (index = z, Time = t, EXCHANGE = EXCHANGE[z, t]))
-    end
+    append_results!(sr.results, :EXCHANGE, DataFrame(
+        index = repeat(Z, inner = length(T)),
+        Time = repeat(collect(T), outer = length(Z)),
+        EXCHANGE = [EXCHANGE[z, t] for z in Z for t in T],
+    ))
 end
 
 
@@ -795,15 +765,23 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     df_exchange(sr.results)
     df_fbmc_inf(sr.results)
 
-    for (z, zz) in connected_zones_ac, t in T
-        push!(sr.results[:BIL_EXCHANGE], (From = z, To = zz, Time = t, BIL_EXCHANGE = EX[(z, zz), t]))
-    end
+    append_results!(sr.results, :BIL_EXCHANGE, DataFrame(
+        From = [z for (z, zz) in connected_zones_ac for t in T],
+        To = [zz for (z, zz) in connected_zones_ac for t in T],
+        Time = repeat(collect(T), outer = length(connected_zones_ac)),
+        BIL_EXCHANGE = [EX[(z, zz), t] for (z, zz) in connected_zones_ac for t in T],
+    ))
 
-    for z in Z, t in T
-        push!(sr.results[:EXCHANGE], (index = z, Time = t, EXCHANGE = EXCHANGE[z, t]))
-    end
+    append_results!(sr.results, :EXCHANGE, DataFrame(
+        index = repeat(Z, inner = length(T)),
+        Time = repeat(collect(T), outer = length(Z)),
+        EXCHANGE = [EXCHANGE[z, t] for z in Z for t in T],
+    ))
 
-    for l in cne, t in T
-        push!(sr.results[:FBMC_INF], (index = l, Time = t, FBMC_INF_POS = FBMC_INF_POS[l, t], FBMC_INF_NEG = FBMC_INF_NEG[l, t]))
-    end
+    append_results!(sr.results, :FBMC_INF, DataFrame(
+        index = repeat(cne, inner = length(T)),
+        Time = repeat(collect(T), outer = length(cne)),
+        FBMC_INF_POS = [FBMC_INF_POS[l, t] for l in cne for t in T],
+        FBMC_INF_NEG = [FBMC_INF_NEG[l, t] for l in cne for t in T],
+    ))
 end

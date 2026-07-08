@@ -94,7 +94,6 @@ function df_lineflow(dict)
             Time = Int[],
             LINEFLOW = AffOrVar[],
             line_capacity = Float64[],
-            lineinf = VariableRef[],
         )
     end
 
@@ -104,7 +103,6 @@ function df_lineflow(dict)
             Time = Int[],
             DCLINEFLOW = AffOrVarOrFloatOrInt[],
             line_capacity = Float64[],
-            lineinf = VariableRef[],
         )
     end
 end
@@ -215,6 +213,23 @@ function df_prosumer(dict)
             INF = VariableRef[],
         )
     end
+end
+
+"""
+    append_results!(results, key, tbl)
+
+Add a block of result rows (built column-wise, see the builders in technologies.jl)
+to the result table `key`. Replaces the empty schema-seeded table on first append so
+columns keep their concrete types; later appends promote column types as needed.
+"""
+function append_results!(results::Dict{Symbol,DataFrame}, key::Symbol, tbl::DataFrame)
+    isempty(tbl) && return get(results, key, tbl)
+    if haskey(results, key) && !isempty(results[key])
+        append!(results[key], tbl; promote = true)
+    else
+        results[key] = tbl
+    end
+    return results[key]
 end
 
 read_csv(file) = CSV.read(file, DataFrame, stringtype = String)

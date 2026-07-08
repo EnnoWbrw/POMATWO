@@ -66,6 +66,16 @@ DCLF
 NoRedispatch
 ```
 
+# Storage Boundary Condition
+
+Storage levels within a time split are linked hour by hour; the boundary condition determines what the first hour of each split connects to.
+
+```@docs
+StorageBoundary
+CarryOverStorage
+CyclicStorage
+```
+
 
 
 # Prosumer Setup

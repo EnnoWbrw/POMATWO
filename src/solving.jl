@@ -123,35 +123,98 @@ state_label(::Type{Redispatch}) = "Redispatch"
 state_label(::Type{MS}) where {MS<:MarketState} = string(nameof(MS))
 
 """
+    record_carry!(sr::SubRun, ctx::Dict)
+
+Store cross-split state from a solved subrun in `ctx` (e.g. end-of-split storage
+levels under [`CarryOverStorage`](@ref)). Called after every solve; the keys listed
+in `CARRY_KEYS` survive into the next time split's context.
+"""
+record_carry!(sr::SubRun, ctx::Dict) = record_carry!(sr.modelrun.setup.StorageBoundary, sr, ctx)
+record_carry!(::StorageBoundary, sr::SubRun, ctx::Dict) = nothing
+
+function record_carry!(
+    ::CarryOverStorage, sr::SubRun{MT,PS,RD,MS}, ctx::Dict,
+) where {MT<:MarketType,PS<:ProsumerSetup,RD<:RedispatchSetup,MS<:DayAhead}
+    S = sr.modelrun.params.sets.S
+    isempty(S) && return nothing
+    STO_LVL = sr.vars[:sto][:STO_LVL]
+    tend = sr.market_state.Time[end]
+    ctx[:sto_lvl_start] = Dict(s => value(STO_LVL[s, tend]) for s in S)
+    return nothing
+end
+
+function record_carry!(
+    ::CarryOverStorage, sr::SubRun{MT,PS,RD,MS}, ctx::Dict,
+) where {MT<:MarketType,PS<:ProsumerSetup,RD<:RedispatchSetup,MS<:Redispatch}
+    S = sr.modelrun.params.sets.S
+    isempty(S) && return nothing
+    STO_LVL = sr.vars[:sto][:STO_LVL_REDISP]
+    tend = sr.market_state.Time[end]
+    ctx[:sto_lvl_start_redisp] = Dict(s => value(STO_LVL[s, tend]) for s in S)
+    return nothing
+end
+
+# context keys that survive from one time split into the next
+const CARRY_KEYS = (:sto_lvl_start, :sto_lvl_start_redisp)
+
+# Splits are independent unless storage levels are carried between them.
+_parallel_splits_ok(mr::ModelRun) =
+    !(mr.setup.StorageBoundary isa CarryOverStorage) || isempty(mr.params.sets.S)
+
+"""
     _run(mr::ModelRun)
 
 Runs the market simulation: for every time split, solves the setup's
 [`state_sequence`](@ref) and stores results.
+
+When Julia is started with multiple threads (`julia -t N`) and the splits are
+independent, they are solved in parallel. Under [`CarryOverStorage`](@ref) (with a
+non-empty storage set) splits depend on each other and are solved sequentially,
+passing the cross-split state (`CARRY_KEYS`, e.g. carried storage levels) from each
+split into the next.
 """
 function _run(mr::ModelRun)
     seq = state_sequence(mr.setup)
-    for T in split(mr.setup.TimeHorizon)
-        @info "Starting subrun for period from $(T[1]) to $(T[end])"
-        _run_states(mr, T, Dict{Symbol,Any}(), seq)
+    splits = split(mr.setup.TimeHorizon)
+
+    if Threads.nthreads() > 1 && length(splits) > 1 && _parallel_splits_ok(mr)
+        @info "Solving $(length(splits)) time splits in parallel on $(Threads.nthreads()) threads"
+        Threads.@threads for i in eachindex(splits)
+            _run_states(mr, splits[i], Dict{Symbol,Any}(), seq; show_progress = false)
+        end
+    else
+        carry = Dict{Symbol,Any}()
+        for T in splits
+            @info "Starting subrun for period from $(T[1]) to $(T[end])"
+            ctx = Dict{Symbol,Any}(carry)
+            _run_states(mr, T, ctx, seq)
+            for k in CARRY_KEYS
+                haskey(ctx, k) && (carry[k] = ctx[k])
+            end
+        end
     end
 end
 
-function _run_states(mr::ModelRun, T, ctx::Dict{Symbol,Any}, seq::Vector{DataType})
-    prog = ProgressUnknown(desc = state_label(seq[1]), spinner = true, dt = 0.1)
+function _run_states(
+    mr::ModelRun, T, ctx::Dict{Symbol,Any}, seq::Vector{DataType};
+    show_progress::Bool = true,
+)
+    prog = show_progress ? ProgressUnknown(desc = state_label(seq[1]), spinner = true, dt = 0.1) : nothing
     for (i, ST) in enumerate(seq)
         lbl = state_label(ST)
-        ProgressMeter.update!(prog, desc = "$lbl -> Building Model")
+        isnothing(prog) || ProgressMeter.update!(prog, desc = "$lbl -> Building Model")
         market_state = init_state(ST, mr, T, ctx)
-        sr = SubRun(mr, market_state)
-        ProgressMeter.update!(prog, desc = "$lbl -> Optimizing")
-        @suppress optimize!(sr)
+        sr = SubRun(mr, market_state, ctx)
+        isnothing(prog) || ProgressMeter.update!(prog, desc = "$lbl -> Optimizing")
+        optimize!(sr)  # silent unless ModelRun(verbose = true); see _silent_solver
         log_status(sr, lbl)
-        ProgressMeter.update!(prog, desc = "$lbl -> Fetching Results")
+        isnothing(prog) || ProgressMeter.update!(prog, desc = "$lbl -> Fetching Results")
         fetch_results(sr)
         write_results(sr; prefix = result_prefix(market_state))
+        record_carry!(sr, ctx)
         i < length(seq) && postprocess!(sr, ctx)
     end
-    finish!(prog, desc = "Subrun -> Done")
+    isnothing(prog) || finish!(prog, desc = "Subrun -> Done")
     return ctx
 end
 
@@ -185,9 +248,14 @@ _run_intraday(mr_intraday, fbmc_params_intraday)
 ```
 """
 function _run_intraday(mr::ModelRun{ZonalMarket{FlowBased}, PS, RD}, fbmc_params::Dict) where {PS<:NoProsumer, RD<:RedispatchType}
+    carry = Dict{Symbol,Any}()
     for T in split(mr.setup.TimeHorizon)
         @info "Starting intraday subrun for period from $(T[1]) to $(T[end])"
-        ctx = Dict{Symbol,Any}(:fbmc_params => fbmc_params)
+        ctx = Dict{Symbol,Any}(carry)
+        ctx[:fbmc_params] = fbmc_params
         _run_states(mr, T, ctx, [DayAhead, Redispatch])
+        for k in CARRY_KEYS
+            haskey(ctx, k) && (carry[k] = ctx[k])
+        end
     end
 end

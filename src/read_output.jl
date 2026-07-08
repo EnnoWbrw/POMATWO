@@ -499,8 +499,6 @@ Checks all infeasibility slack variables written to the result tables:
 | `ZonalMarketBalance` | `LL`, `CU` | Zonal lost load / curtailment not handled by plant specific curtailment |
 | `NodalMarketBalance` | `LL`, `CU` | Nodal lost load / curtailment not handled by plant specific curtailment |
 | `NodalMarketRedispBalance` | `LL`, `CU` | Redispatch nodal lost load / curtailment  not handled by plant specific curtailment |
-| `LINEFLOW` | `lineinf` | AC line thermal limit slack |
-| `DCLINEFLOW` | `lineinf` | DC line thermal limit slack |
 | `FBMC_INF` | `FBMC_INF_POS`, `FBMC_INF_NEG` | FBMC RAM constraint slacks |
 | `STO_LVL` | `inf` | Storage balance slack (`INF_POS - INF_NEG`, signed) |
 | `PRS` | `INF` | Prosumer energy balance slack |
@@ -522,13 +520,12 @@ Returns an empty DataFrame (same schema) when no infeasibilities are detected.
 # Example
 ```julia
 julia> check_infeasibility(results)
-3×5 DataFrame
+2×5 DataFrame
  Row │ source               variable      count  total     max
      │ String               String        Int64  Float64   Float64
 ─────┼────────────────────────────────────────────────────────────
    1 │ ZonalMarketBalance   LL                3    450.0   200.0
-   2 │ LINEFLOW             lineinf           2     30.5    28.0
-   3 │ FBMC_INF             FBMC_INF_POS      1     12.5    12.5
+   2 │ FBMC_INF             FBMC_INF_POS      1     12.5    12.5
 ```
 """
 function check_infeasibility(results::DataFiles; tol::Float64=1e-6)
@@ -560,10 +557,6 @@ function check_infeasibility(results::DataFiles; tol::Float64=1e-6)
         _check!(source, df, :LL)
         _check!(source, df, :CU)
     end
-
-    # AC and DC line thermal limit slacks (column name is lowercase `lineinf`)
-    _check!("LINEFLOW",   results.LINEFLOW,   :lineinf)
-    _check!("DCLINEFLOW", results.DCLINEFLOW, :lineinf)
 
     # FBMC RAM slacks
     _check!("FBMC_INF", results.FBMC_INF, :FBMC_INF_POS)
