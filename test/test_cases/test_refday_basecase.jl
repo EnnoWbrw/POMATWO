@@ -70,7 +70,7 @@ function test_refday_basecase()
         )
         fb2 = FlowBased(GSKStrategy = DispOnlyGSK(), basecase = rd)
         @test fb2.basecase isa ReferenceDayBasecase
-        @test fb2.basecase.source_type == "2DA"
+        @test fb2.basecase.source_type == ""   # default: regular market result tables
         @test fb2.basecase.matching.scope isa ZonalMatchScope
 
         mk(fb; kw...) = ModelSetup(TimeHorizon = TimeHorizon(stop = 24),
@@ -83,10 +83,12 @@ function test_refday_basecase()
         @test state_sequence(ModelSetup(TimeHorizon = TimeHorizon(stop = 24))) == [DayAhead]
     end
 
-    @testset "GSKRedist: time-dependent strategy falls back to per-timestep load" begin
-        # GenLoadGSK has no basecase in the redistribution context → per-t nodal load
+    @testset "GSKRedist: time-dependent strategy uses per-timestep GLSK weights" begin
+        # GenLoadGSK weights from the forecast run's nodal data at t:
+        # gen = P + load ; weight = |gen| + |load|
+        # n1: P=10, load=3 → |13|+|3| = 16 ; n2: P=-5, load=6 → |1|+|6| = 7
         w = POMATWO._key_weights(GSKRedist(GenLoadGSK()), nd, params, ["n1", "n2"], 1)
-        @test w == Dict("n1" => nd.LOAD[("n1", 1)], "n2" => nd.LOAD[("n2", 1)])
+        @test w == Dict("n1" => 16.0, "n2" => 7.0)
 
         # static strategies keep using the (optionally cached) GSK column
         wf = POMATWO._key_weights(GSKRedist(FlatGSK()), nd, params, ["n1", "n2"], 1)

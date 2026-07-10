@@ -488,7 +488,8 @@ function test_zonal_ptdf()
 
         # Static fallback is load-only (no capacity terms — gmax/avail must not
         # leak in): N1 = 30 ; N2 = mean([10,20]) = 15 ; N3 = 0 (no load)
-        G = POMATWO.build_gsk(params, POMATWO.GenLoadGSK())
+        # A plain build_gsk call warns that this is not the per-timestep GLSK
+        G = @test_logs (:warn,) match_mode=:any POMATWO.build_gsk(params, POMATWO.GenLoadGSK())
         @test G["N1", "Z1"] ≈ 30 / 45
         @test G["N2", "Z1"] ≈ 15 / 45
         @test G["N3", "Z2"] == 0.0   # zone without load → empty (default :zero)

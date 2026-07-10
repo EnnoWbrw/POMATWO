@@ -138,7 +138,7 @@ Base.@kwdef struct MatchingConfig
 end
 
 """
-    ReferenceDayBasecase(; source, source_type = "2DA", matching = MatchingConfig(), shift = ShareShift())
+    ReferenceDayBasecase(; source, source_type = "", matching = MatchingConfig(), shift = ShareShift())
 
 Reference-day (D2CF-style) basecase methodology for flow-based market runs:
 instead of solving the `TwoDayAhead` optimization, the FBMC basecase is built
@@ -149,8 +149,8 @@ day's renewable infeed and zonal net positions.
 # Keyword fields
 - `source::Union{String,DataFiles}`: results directory of the forecast run, or
   a preloaded [`DataFiles`](@ref).
-- `source_type::String = "2DA"`: which result set of the source to read
-  (`"2DA"` = TwoDayAhead basecase tables, `""` = regular market result tables).
+- `source_type::String = ""`: which result set of the source to read
+  (`""` = regular market result tables, `"2DA"` = TwoDayAhead basecase tables).
   The chosen set must contain nodal `NETINPUT`/`LINEFLOW`/`GEN` data.
 - `matching::MatchingConfig`: reference-day matching options.
 - `shift::ShiftMethod`: how the reference day is shifted toward the target day.
@@ -278,10 +278,15 @@ _key_weights(::RefPropRedist, nd, params, znodes, t; gsk = nothing) =
 
 function _key_weights(key::GSKRedist, nd, params, znodes, t; gsk = nothing)
     if is_time_dependent(key.strategy)
-        # Time-dependent strategies (e.g. GenLoadGSK) have no basecase in the
-        # redistribution context — fall back to per-timestep load weights
-        # (equivalent to LoadPropRedist, but evaluated at each t).
-        return Dict(n => get(nd.LOAD, (n, t), 0.0) for n in znodes)
+        # Time-dependent strategies (e.g. GenLoadGSK): build the GLSK weight
+        # |gen| + |load| at t from the forecast run's nodal data (nd.P is the
+        # net-injection baseline, so gen = P + load) — the same construction as
+        # build_gsk_timeseries, with nd playing the role of the basecase.
+        return Dict(n => begin
+            load = get(nd.LOAD, (n, t), 0.0)
+            gen = get(nd.P, (n, t), 0.0) + load
+            abs(gen) + abs(load)
+        end for n in znodes)
     end
     G = gsk === nothing ? build_gsk(params, key.strategy; normalize_empty = :flat) : gsk
     z = params.node2zone[first(znodes)]

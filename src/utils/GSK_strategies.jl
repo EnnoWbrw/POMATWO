@@ -78,12 +78,12 @@ Weights are normalized per zone (the TSO control area) and per timestep, so each
 zone column sums to 1 for every `t`. Combining generation and load lets the key
 reflect renewable infeed better than a pure capacity key.
 
-When no basecase is available the strategy falls back to *load-only* weights
-(generation is dropped — capacity-based proxies like ``g\\_max \\cdot
-\\overline{avail}`` would treat conventional plants as always running at full
-capacity). Timestep-aware fallback contexts (e.g. as a [`GSKRedist`](@ref)
-redistribution key) use the nodal load at each timestep; a plain
-[`build_gsk`](@ref) call collapses to the mean of the load profile.
+As a [`GSKRedist`](@ref) redistribution key the same `|gen| + |load|` weight is
+built per timestep from the forecast run's nodal data (net-injection baseline +
+load). Only a plain [`build_gsk`](@ref) call — no basecase, no timestep — falls
+back to *load-only* weights (mean of the load profile); capacity-based proxies
+like ``g\\_max \\cdot \\overline{avail}`` are deliberately avoided, as they would
+treat conventional plants as always running at full capacity.
 """
 struct GenLoadGSK <: GSKStrategy end
 
@@ -160,9 +160,13 @@ end
 # Static fallback (no basecase available): load-only weights, mean of the nodal
 # load profile. Capacity-based generation terms are deliberately excluded —
 # gmax·mean(avail) would treat conventionals (avail ≡ 1) as running at full
-# capacity all the time. Timestep-aware contexts (e.g. GSKRedist) use the
-# per-timestep load instead of the mean.
+# capacity all the time. Only reachable through a plain `build_gsk` call: the
+# FBMC pipeline uses `build_gsk_timeseries` and GSKRedist builds per-timestep
+# GLSK weights itself, so warn that the result is not the real GLSK.
 function compute_nodal_weights(strategy::GenLoadGSK, params, nodes)
+    @warn "GenLoadGSK used in a static build_gsk call without a basecase: falling back " *
+          "to load-only weights (mean of nodal_load per node). For the per-timestep " *
+          "GLSK use build_gsk_timeseries or the FBMC pipeline (calc_fbmc_params)." maxlog = 1
     n = length(nodes)
 
     weights = zeros(Float64, n)
