@@ -167,8 +167,8 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
     bvector = Containers.DenseAxisArray(zeros(Float64, length(L)), L)
 
     for l in L
-        incidence[l, line_start[l]] = 1
-        incidence[l, line_end[l]] = -1
+        incidence[l, line_start[l]] = -1
+        incidence[l, line_end[l]] = 1
         if haskey(params.bvector, l)
             bvector[l] = params.bvector[l]
         else
@@ -178,8 +178,8 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
     end
 
     for dc in DC
-        dcincidence[dc, dc_start[dc]] = 1
-        dcincidence[dc, dc_end[dc]] = -1
+        dcincidence[dc, dc_start[dc]] = -1
+        dcincidence[dc, dc_end[dc]] = 1
     end
 
     h = bvector.data .* incidence.data

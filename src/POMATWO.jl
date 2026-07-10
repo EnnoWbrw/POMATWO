@@ -41,6 +41,8 @@ include("utils/get_vals_utils.jl")
 include("utils/model_utils.jl")
 include("data_load.jl")
 include("read_output.jl")
+include("utils/refday_matching.jl")
+include("utils/refday_basecase.jl")
 include("energy_balances.jl")
 include("technologies.jl")
 include("prosumer.jl")
@@ -114,6 +116,25 @@ export load_data,
     TwoDayAhead,
     ProsumerOptimizationState,
     Redispatch,
-    state_sequence
+    state_sequence,
+    # reference-day (D2CF-style) basecase
+    BasecaseMethod,
+    OptimizationBasecase,
+    ReferenceDayBasecase,
+    MatchingConfig,
+    MatchScope,
+    GlobalMatchScope,
+    ZonalMatchScope,
+    AreaMatchScope,
+    ShiftMethod,
+    ShareShift,
+    RedistKey,
+    GSKRedist,
+    RefPropRedist,
+    LoadPropRedist,
+    match_by_cluster,
+    match_by_scope,
+    build_refday_basecase,
+    calc_fbmc_params
 
 end # module POMATWO

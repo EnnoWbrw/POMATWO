@@ -159,6 +159,7 @@ end
     include(joinpath("test_cases", "test_utils.jl"))
     include(joinpath("test_cases", "test_custom_component.jl"))
     include(joinpath("test_cases", "test_storage_boundary.jl"))
+    include(joinpath("test_cases", "test_refday_basecase.jl"))
     test_data_load()
     test_model_creation()
     test_data_reporting()
@@ -167,5 +168,6 @@ end
     test_utils()
     test_custom_component()
     test_storage_boundary()
+    test_refday_basecase()
 end
  

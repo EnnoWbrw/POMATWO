@@ -42,6 +42,16 @@ struct CustomWeightsGSK <: GSKStrategy
     weights::Vector{Float64}
 end
 
+"""
+    DispOnlyGSK <: GSKStrategy
+
+Dispatchable-only capacity weighting: nodes receive shares proportional to the total
+generation capacity of their *dispatchable* plants (sum of `g_max` over plants in
+`params.sets.DISP`). Non-dispatchable units (e.g. wind, solar) do not contribute to the
+node weight. Zones whose only plants are non-dispatchable fall back to the empty-zone rule
+of [`build_gsk`](@ref). This mirrors the common flow-based assumption that a change in a
+zone's net position is served by its dispatchable fleet.
+"""
 struct DispOnlyGSK <: GSKStrategy
 end
 

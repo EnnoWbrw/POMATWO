@@ -53,11 +53,19 @@ state_sequence(::ModelSetup{MT,PS,RD}) where {MT<:MarketType,PS<:NoProsumer,RD<:
 state_sequence(::ModelSetup{MT,PS,RD}) where {MT<:MarketType,PS<:ProsumerOptimization,RD<:RedispatchType} =
     [DayAhead, ProsumerOptimizationState, Redispatch]
 
-# Flow-based zonal markets need the TwoDayAhead basecase to derive FBMC parameters.
-state_sequence(::ModelSetup{ZonalMarket{FlowBased},PS,RD}) where {PS<:NoProsumer,RD<:NoRedispatch} =
-    [TwoDayAhead, DayAhead]
-state_sequence(::ModelSetup{ZonalMarket{FlowBased},PS,RD}) where {PS<:NoProsumer,RD<:RedispatchType} =
-    [TwoDayAhead, DayAhead, Redispatch]
+# Flow-based zonal markets need a basecase to derive FBMC parameters. With the
+# default OptimizationBasecase this is the TwoDayAhead optimization state; with
+# ReferenceDayBasecase the basecase comes from a previous run's results, is
+# built once before the split loop (see _prepare_refday_artifacts) and the
+# TwoDayAhead state is skipped entirely.
+_basecase_states(setup::ModelSetup{ZonalMarket{FlowBased}}) =
+    setup.MarketType.exchange_formulation.basecase isa OptimizationBasecase ?
+        DataType[TwoDayAhead] : DataType[]
+
+state_sequence(setup::ModelSetup{ZonalMarket{FlowBased},PS,RD}) where {PS<:NoProsumer,RD<:NoRedispatch} =
+    vcat(_basecase_states(setup), DataType[DayAhead])
+state_sequence(setup::ModelSetup{ZonalMarket{FlowBased},PS,RD}) where {PS<:NoProsumer,RD<:RedispatchType} =
+    vcat(_basecase_states(setup), DataType[DayAhead, Redispatch])
 state_sequence(::ModelSetup{ZonalMarket{FlowBased},PS,RD}) where {PS<:ProsumerOptimization,RD<:RedispatchSetup} =
     error("Flow-based zonal markets with prosumer optimization are not supported yet.")
 
@@ -176,23 +184,64 @@ split into the next.
 function _run(mr::ModelRun)
     seq = state_sequence(mr.setup)
     splits = split(mr.setup.TimeHorizon)
+    refday_artifacts = _prepare_refday_artifacts(mr)
 
     if Threads.nthreads() > 1 && length(splits) > 1 && _parallel_splits_ok(mr)
         @info "Solving $(length(splits)) time splits in parallel on $(Threads.nthreads()) threads"
         Threads.@threads for i in eachindex(splits)
-            _run_states(mr, splits[i], Dict{Symbol,Any}(), seq; show_progress = false)
+            ctx = Dict{Symbol,Any}()
+            _seed_fbmc!(ctx, mr, splits[i], refday_artifacts)
+            _run_states(mr, splits[i], ctx, seq; show_progress = false)
         end
     else
         carry = Dict{Symbol,Any}()
         for T in splits
             @info "Starting subrun for period from $(T[1]) to $(T[end])"
             ctx = Dict{Symbol,Any}(carry)
+            _seed_fbmc!(ctx, mr, T, refday_artifacts)
             _run_states(mr, T, ctx, seq)
             for k in CARRY_KEYS
                 haskey(ctx, k) && (carry[k] = ctx[k])
             end
         end
     end
+end
+
+"""
+    _prepare_refday_artifacts(mr::ModelRun) -> Union{Dict,Nothing}
+
+For flow-based zonal runs configured with a [`ReferenceDayBasecase`](@ref),
+build the whole-horizon basecase (`:netinput_ac`, `:lineflows`) once before the
+split loop. Returns `nothing` for every other setup (incl. the default
+`OptimizationBasecase`, whose basecase is the solved `TwoDayAhead` state).
+"""
+_prepare_refday_artifacts(mr::ModelRun) = _prepare_refday_artifacts(mr.setup.MarketType, mr)
+_prepare_refday_artifacts(::MarketType, mr::ModelRun) = nothing
+function _prepare_refday_artifacts(mt::ZonalMarket{FlowBased}, mr::ModelRun)
+    bc = mt.exchange_formulation.basecase
+    bc isa ReferenceDayBasecase || return nothing
+    src = bc.source isa DataFiles ? "preloaded DataFiles" : bc.source
+    @info "Building reference-day FBMC basecase (source: $src)"
+    return build_refday_basecase(bc, mr.params)
+end
+
+"""
+    _seed_fbmc!(ctx, mr, T, artifacts)
+
+Seed `ctx[:fbmc_params]` for split `T` from precomputed reference-day basecase
+artifacts (no-op when `artifacts === nothing`). Mirrors what
+`postprocess!(::TwoDayAhead)` does for the optimization basecase.
+"""
+function _seed_fbmc!(ctx::Dict{Symbol,Any}, mr::ModelRun, T, artifacts)
+    artifacts === nothing && return nothing
+    covered = Set(collect(axes(artifacts[:netinput_ac], 2)))
+    all(t -> t in covered, T) || error(
+        "ReferenceDayBasecase: split $(T) is not fully covered by the reference-day " *
+        "basecase (source horizon: $(extrema(collect(covered)))). The current run's " *
+        "TimeHorizon must lie inside the forecast run's time steps.")
+    gsk = mr.setup.MarketType.exchange_formulation.GSKStrategy
+    ctx[:fbmc_params] = calc_fbmc_params(gsk, mr.params, artifacts, T)
+    return nothing
 end
 
 function _run_states(

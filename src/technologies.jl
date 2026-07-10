@@ -548,6 +548,7 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
         index = repeat(N, inner = length(T)),
         Time = repeat(collect(T), outer = length(N)),
         NETINPUT = [NETINPUT[n, t] for n in N for t in T],
+        ACINJECTION = [ACINJECTION[n, t] for n in N for t in T],
         DELTA = [THETA[t, n] for n in N for t in T],
     ))
 

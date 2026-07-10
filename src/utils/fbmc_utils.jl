@@ -252,11 +252,20 @@ Calculate FBMC parameters: GSK, PTDFn, PTDFz, PTDFzz.
     * `:PTDFzz` => Zone-to-zone PTDF matrix (l×m)
     * `:RAM` => Dict mapping lines to remaining available margin
 """
-function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Dict, T; zone_order=nothing, normalize_empty::Symbol=:flat, minRAM::Float64=0.7, FRM::Float64=0.1)
-    # Extract GSKStrategy from the market setup
-    market_type = sr.modelrun.setup.MarketType
-    gsk_strategy = market_type.exchange_formulation.GSKStrategy
-    
+function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Dict, T; kwargs...)
+    # Extract GSKStrategy from the market setup and delegate to the strategy-based core
+    gsk_strategy = sr.modelrun.setup.MarketType.exchange_formulation.GSKStrategy
+    return calc_fbmc_params(gsk_strategy, params, TwoDayAhead_result, T; kwargs...)
+end
+
+"""
+    calc_fbmc_params(gsk_strategy::GSKStrategy, params, basecase_result, T; kwargs...)
+
+Core FBMC parameter calculation, independent of a `SubRun`. `basecase_result`
+is any dict with `:netinput_ac` (n×t) and `:lineflows` (l×t) — from the
+`TwoDayAhead` optimization or from [`build_refday_basecase`](@ref).
+"""
+function calc_fbmc_params(gsk_strategy::GSKStrategy, params::Parameters, TwoDayAhead_result::Dict, T; zone_order=nothing, normalize_empty::Symbol=:flat, minRAM::Float64=0.7, FRM::Float64=0.1)
     GSK = build_gsk(params, gsk_strategy; normalize_empty=normalize_empty)
     PTDFn = dict_to_matrix(params.ptdf) 
     PTDFz = zonal_ptdf(PTDFn, GSK)

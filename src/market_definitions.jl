@@ -22,22 +22,56 @@ Net Transfer Capacity formulation. Represents fixed interzonal capacity limits.
 struct NTC <: ExchangeFormulation end
 
 """
+    BasecaseMethod
+
+Abstract supertype for the methodology that produces the FBMC basecase
+(nodal net injections + line flows) from which zonal PTDFs, CNEs and RAM
+are derived for a flow-based market run.
+
+# Subtypes
+- [`OptimizationBasecase`](@ref): solve the `TwoDayAhead` DC load-flow
+  optimization as basecase (default, current behavior).
+- [`ReferenceDayBasecase`](@ref): construct the basecase from a matched and
+  shifted reference day of a previous ("forecast") model run, mimicking the
+  D2CF process (defined in `utils/refday_basecase.jl`).
+"""
+abstract type BasecaseMethod end
+
+"""
+    OptimizationBasecase <: BasecaseMethod
+
+Default basecase methodology: the `TwoDayAhead` DC load-flow optimization is
+solved ahead of the day-ahead stage and its nodal injections/line flows feed
+the FBMC parameter calculation.
+"""
+struct OptimizationBasecase <: BasecaseMethod end
+
+"""
     FlowBased <: ExchangeFormulation
 
 Flow-based market coupling formulation.
 
 # Fields
 - `GSKStrategy::GSKStrategy`: Generation Shift Key strategy (defaults to `FlatGSK()`).
+- `basecase::BasecaseMethod`: Basecase methodology (defaults to
+  [`OptimizationBasecase`](@ref); see [`ReferenceDayBasecase`](@ref) for the
+  reference-day / D2CF-style alternative).
 
 # Constructors
-- `FlowBased()`: Uses `FlatGSK()` as default.
-- `FlowBased(strategy::GSKStrategy)`: Uses provided GSK strategy.
+- `FlowBased()`: `FlatGSK()` + `OptimizationBasecase()`.
+- `FlowBased(strategy::GSKStrategy)`: provided GSK strategy + `OptimizationBasecase()`.
+- `FlowBased(; GSKStrategy = FlatGSK(), basecase = OptimizationBasecase())`: keyword form.
 """
-struct FlowBased <: ExchangeFormulation 
+struct FlowBased <: ExchangeFormulation
     GSKStrategy::GSKStrategy
+    basecase::BasecaseMethod
 end
 
-FlowBased() = FlowBased(FlatGSK())
+FlowBased(s::GSKStrategy) = FlowBased(s, OptimizationBasecase())
+# NOTE: no explicit zero-arg constructor — the all-defaults keyword method
+# below already covers `FlowBased()`.
+FlowBased(; GSKStrategy = FlatGSK(), basecase = OptimizationBasecase()) =
+    FlowBased(GSKStrategy, basecase)
 
 ### MarketTypes
 """

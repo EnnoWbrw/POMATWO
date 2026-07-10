@@ -78,6 +78,7 @@ function df_netinput(dict)
             index = String[],
             Time = Int[],
             NETINPUT = AffOrVarOrFloatOrInt[],
+            ACINJECTION = AffOrVarOrFloatOrInt[],
             DELTA = AffOrVarOrFloatOrInt[],
         )
     end
