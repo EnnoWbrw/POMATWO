@@ -745,16 +745,18 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
 
     @objective(m, Min, 100000 * sum(FBMC_INF_POS[l, t] + FBMC_INF_NEG[l, t] for l in cne, t in T))
 
+    # _ptdfz resolves the zonal PTDF for both static (l×z) and time-dependent
+    # (l×z×t, e.g. GenLoadGSK) matrices
     @constraint(
         m,
         FBMC_pos[l = cne, t = T],
-        -sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l,t,"pos"] + FBMC_INF_POS[l, t]
+        -sum(_ptdfz(fbmc_params[:PTDFz], l, z, t) * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l,t,"pos"] + FBMC_INF_POS[l, t]
     )
 
     @constraint(
         m,
         FBMC_neg[l = cne, t = T],
-        fbmc_params[:RAM][l,t,"neg"] - FBMC_INF_NEG[l, t] <= -sum(fbmc_params[:PTDFz][l, z] * NP[z, t] for z in FBCCR)
+        fbmc_params[:RAM][l,t,"neg"] - FBMC_INF_NEG[l, t] <= -sum(_ptdfz(fbmc_params[:PTDFz], l, z, t) * NP[z, t] for z in FBCCR)
     )
 
     @expression(m, EXCHANGE[z = Z, t = T],

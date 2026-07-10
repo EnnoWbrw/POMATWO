@@ -460,4 +460,183 @@ function test_zonal_ptdf()
             @test ram[l, t, "neg"] ≤ -0.7 * fmax + 1e-8
         end
     end
+
+    @testset "GSK Strategy: GenLoadGSK trait + static fallback" begin
+        @test POMATWO.is_time_dependent(POMATWO.GenLoadGSK())
+        @test !POMATWO.is_time_dependent(POMATWO.FlatGSK())
+        @test !POMATWO.is_time_dependent(POMATWO.GmaxGSK())
+        @test !POMATWO.is_time_dependent(POMATWO.DispOnlyGSK())
+
+        nodes = ["N1", "N2", "N3"]
+        zones = ["Z1", "Z2"]
+        node_zone_map = Dict("N1" => "Z1", "N2" => "Z1", "N3" => "Z2")
+        sets = POMATWO.Sets(
+            N=nodes, L=String[], Z=zones, P=["P1", "P2", "P3"], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[]
+        )
+        params = POMATWO.Parameters(
+            sets=sets,
+            node2zone=node_zone_map,
+            plant2node=Dict("P1" => "N1", "P2" => "N2", "P3" => "N3"),
+            gmax=Dict("P1" => 100.0, "P2" => 200.0, "P3" => 50.0),
+            avail=Dict("P1" => POMATWO.HourlyProfile([0.5, 0.5]),
+                       "P3" => POMATWO.FixedProfile(0.8)),
+            nodal_load=Dict("N1" => POMATWO.FixedProfile(30.0),
+                            "N2" => POMATWO.HourlyProfile([10.0, 20.0]))
+        )
+
+        # Static fallback is load-only (no capacity terms — gmax/avail must not
+        # leak in): N1 = 30 ; N2 = mean([10,20]) = 15 ; N3 = 0 (no load)
+        G = POMATWO.build_gsk(params, POMATWO.GenLoadGSK())
+        @test G["N1", "Z1"] ≈ 30 / 45
+        @test G["N2", "Z1"] ≈ 15 / 45
+        @test G["N3", "Z2"] == 0.0   # zone without load → empty (default :zero)
+
+        G_flat = POMATWO.build_gsk(params, POMATWO.GenLoadGSK(); normalize_empty=:flat)
+        @test G_flat["N3", "Z2"] ≈ 1.0
+    end
+
+    @testset "build_gsk_timeseries: per-timestep GLSK from basecase" begin
+        nodes = ["N1", "N2", "N3"]
+        zones = ["Z1", "Z2"]
+        node_zone_map = Dict("N1" => "Z1", "N2" => "Z1", "N3" => "Z2")
+        sets = POMATWO.Sets(
+            N=nodes, L=String[], Z=zones, P=String[], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[]
+        )
+        params = POMATWO.Parameters(
+            sets=sets,
+            node2zone=node_zone_map,
+            nodal_load=Dict("N1" => POMATWO.HourlyProfile([30.0, 60.0]),
+                            "N2" => POMATWO.FixedProfile(10.0))
+            # N3 has no load profile → load = 0
+        )
+
+        T = 1:2
+        netinput_data = [20.0 -10.0; 5.0 15.0; -25.0 -5.0]   # nodes × T
+        netinput_ac = JuMP.Containers.DenseAxisArray(netinput_data, nodes, collect(T))
+
+        G = POMATWO.build_gsk_timeseries(params, POMATWO.GenLoadGSK(), netinput_ac, T)
+
+        @test G isa JuMP.Containers.DenseAxisArray
+        @test size(G) == (3, 2, 2)
+        @test collect(axes(G, 1)) == nodes
+        @test collect(axes(G, 2)) == zones
+        @test collect(axes(G, 3)) == collect(T)
+
+        # t=1: N1 load=30, gen=20+30=50  → w=80 ; N2 load=10, gen=15 → w=25
+        #      N3 load=0,  gen=-25       → w=|−25|=25
+        @test G["N1", "Z1", 1] ≈ 80 / 105
+        @test G["N2", "Z1", 1] ≈ 25 / 105
+        @test G["N3", "Z2", 1] ≈ 1.0
+
+        # t=2: N1 load=60, gen=-10+60=50 → w=110 ; N2 load=10, gen=25 → w=35
+        #      N3 load=0,  gen=-5        → w=5
+        @test G["N1", "Z1", 2] ≈ 110 / 145
+        @test G["N2", "Z1", 2] ≈ 35 / 145
+        @test G["N3", "Z2", 2] ≈ 1.0
+
+        # GSK differs across timesteps and every zone column sums to 1 per t
+        @test G["N1", "Z1", 1] != G["N1", "Z1", 2]
+        for t in T, z in zones
+            @test sum(G[n, z, t] for n in nodes if node_zone_map[n] == z) ≈ 1.0
+        end
+        # Cross-zone entries stay 0
+        @test G["N1", "Z2", 1] == 0.0
+        @test G["N3", "Z1", 2] == 0.0
+    end
+
+    @testset "zonal_ptdf: time-dependent GSK (n×z×t) → PTDFz (l×z×t)" begin
+        lines = ["L1", "L2"]
+        nodes = ["N1", "N2", "N3"]
+        zones = ["Z1", "Z2"]
+        T = 1:2
+
+        PTDF_data = [0.6 0.2 -0.4; 0.2 0.6 -0.4]
+        PTDF = JuMP.Containers.DenseAxisArray(PTDF_data, lines, nodes)
+
+        GSK_data = zeros(3, 2, 2)
+        GSK_data[:, 1, 1] = [0.8, 0.2, 0.0]   # Z1 @ t=1
+        GSK_data[:, 2, 1] = [0.0, 0.0, 1.0]   # Z2 @ t=1
+        GSK_data[:, 1, 2] = [0.5, 0.5, 0.0]   # Z1 @ t=2
+        GSK_data[:, 2, 2] = [0.0, 0.0, 1.0]   # Z2 @ t=2
+        GSK = JuMP.Containers.DenseAxisArray(GSK_data, nodes, zones, collect(T))
+
+        PTDFz = POMATWO.zonal_ptdf(PTDF, GSK)
+
+        @test size(PTDFz) == (2, 2, 2)
+        for l in lines, z in zones, t in T
+            expected = sum(PTDF[l, n] * GSK[n, z, t] for n in nodes)
+            @test PTDFz[l, z, t] ≈ expected atol=1e-4
+        end
+        # time-dependence propagates: Z1 column changes between t=1 and t=2
+        @test PTDFz["L1", "Z1", 1] != PTDFz["L1", "Z1", 2]
+
+        # _ptdfz accessor resolves both static and time-dependent matrices
+        static = JuMP.Containers.DenseAxisArray([0.1 0.2; 0.3 0.4], lines, zones)
+        @test POMATWO._ptdfz(static, "L1", "Z2", 1) == 0.2
+        @test POMATWO._ptdfz(static, "L1", "Z2", 2) == 0.2   # t ignored
+        @test POMATWO._ptdfz(PTDFz, "L1", "Z1", 1) == PTDFz["L1", "Z1", 1]
+        @test POMATWO._ptdfz(PTDFz, "L1", "Z1", 2) == PTDFz["L1", "Z1", 2]
+    end
+
+    @testset "calc_fbmc_params: time-dependent GenLoadGSK end-to-end" begin
+        nodes = ["N1", "N2", "N3"]
+        zones = ["Z1", "Z2"]
+        lines = ["L1", "L2"]
+        T = 1:2
+        node_zone_map = Dict("N1" => "Z1", "N2" => "Z1", "N3" => "Z2")
+
+        sets = POMATWO.Sets(
+            N=nodes, L=lines, Z=zones, P=String[], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[],
+            FBCCR=zones
+        )
+        params = POMATWO.Parameters(
+            sets=sets,
+            node2zone=node_zone_map,
+            nodes_in_zone=Dict("Z1" => ["N1", "N2"], "Z2" => ["N3"]),
+            nodal_load=Dict("N1" => POMATWO.HourlyProfile([30.0, 60.0]),
+                            "N2" => POMATWO.FixedProfile(10.0)),
+            acline_capacity=Dict("L1" => 100.0, "L2" => 100.0),
+            line_start=Dict("L1" => "N1", "L2" => "N2"),
+            line_end=Dict("L1" => "N3", "L2" => "N3"),
+            ptdf=Dict(("L1", "N1") => 0.6, ("L1", "N2") => 0.2, ("L1", "N3") => -0.4,
+                      ("L2", "N1") => 0.2, ("L2", "N2") => 0.6, ("L2", "N3") => -0.4)
+        )
+
+        netinput_data = [20.0 -10.0; 5.0 15.0; -25.0 -5.0]
+        lineflow_data = [10.0 5.0; 8.0 4.0]
+        basecase = Dict(
+            :netinput_ac => JuMP.Containers.DenseAxisArray(netinput_data, nodes, collect(T)),
+            :lineflows   => JuMP.Containers.DenseAxisArray(lineflow_data, lines, collect(T)),
+        )
+
+        fb = POMATWO.calc_fbmc_params(POMATWO.GenLoadGSK(), params, basecase, T)
+
+        # 3D GSK/PTDFz, per-t zone columns normalized
+        @test ndims(fb[:GSK].data) == 3
+        @test ndims(fb[:PTDFz].data) == 3
+        @test collect(axes(fb[:GSK], 3)) == collect(T)
+        for t in T, z in zones
+            @test sum(fb[:GSK][n, z, t] for n in nodes if node_zone_map[n] == z) ≈ 1.0
+        end
+
+        # PTDFz varies over time (load/injection pattern differs between t=1 and t=2)
+        @test fb[:PTDFz].data[:, 1, 1] != fb[:PTDFz].data[:, 1, 2]
+
+        # CNE screening ran and RAM has the (cne × T × direction) shape with finite values
+        @test !isempty(params.cne)
+        @test size(fb[:RAM]) == (length(params.cne), length(T), 2)
+        @test all(isfinite.(fb[:RAM].data))
+
+        # Static strategy still returns 2D matrices (regression)
+        empty!(params.cne)
+        fb_static = POMATWO.calc_fbmc_params(POMATWO.FlatGSK(), params, basecase, T)
+        @test ndims(fb_static[:PTDFz].data) == 2
+        @test ndims(fb_static[:GSK].data) == 2
+    end
 end

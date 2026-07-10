@@ -52,6 +52,18 @@ struct RefPropRedist <: RedistKey end
 struct LoadPropRedist <: RedistKey end
 
 """
+Spread by random positive weights, reproducible for a fixed `seed`.
+
+Weights are drawn per (zone, time) from an RNG seeded by `seed` combined with
+the zone's nodes and the timestep, so a run is deterministic and independent of
+node iteration order.
+"""
+struct RandomRedist <: RedistKey
+    seed::UInt64
+end
+RandomRedist(seed::Integer = 0) = RandomRedist(UInt64(seed))
+
+"""
     ShareShift <: ShiftMethod
 
 Apportion the net-position gap among components by user shares.
@@ -256,19 +268,35 @@ end
 # Redistribution, bounded waterfilling, component bounds
 # ---------------------------------------------------------------------------
 
+# Per-key nodal weight rule (dispatched on RedistKey). Add a new key by
+# defining another `_key_weights` method — no edit to `_redist_weights` needed.
+_key_weights(::LoadPropRedist, nd, params, znodes, t; gsk = nothing) =
+    Dict(n => get(nd.LOAD, (n, t), 0.0) for n in znodes)
+
+_key_weights(::RefPropRedist, nd, params, znodes, t; gsk = nothing) =
+    Dict(n => abs(get(nd.P, (n, t), 0.0)) for n in znodes)
+
+function _key_weights(key::GSKRedist, nd, params, znodes, t; gsk = nothing)
+    if is_time_dependent(key.strategy)
+        # Time-dependent strategies (e.g. GenLoadGSK) have no basecase in the
+        # redistribution context — fall back to per-timestep load weights
+        # (equivalent to LoadPropRedist, but evaluated at each t).
+        return Dict(n => get(nd.LOAD, (n, t), 0.0) for n in znodes)
+    end
+    G = gsk === nothing ? build_gsk(params, key.strategy; normalize_empty = :flat) : gsk
+    z = params.node2zone[first(znodes)]
+    return Dict(n => G[n, z] for n in znodes)
+end
+
+function _key_weights(key::RandomRedist, nd, params, znodes, t; gsk = nothing)
+    # per-(zone, time) seed so weights are reproducible and order-independent
+    rng = Random.Xoshiro(hash((key.seed, sort(znodes), t)))
+    return Dict(n => rand(rng) for n in sort(znodes))
+end
+
 "Nodal redistribution weights within a zone for the chosen key (flat fallback)."
 function _redist_weights(key::RedistKey, nd, params, znodes, t; gsk = nothing)
-    if key isa LoadPropRedist
-        w = Dict(n => get(nd.LOAD, (n, t), 0.0) for n in znodes)
-    elseif key isa RefPropRedist
-        w = Dict(n => abs(get(nd.P, (n, t), 0.0)) for n in znodes)
-    elseif key isa GSKRedist
-        G = gsk === nothing ? build_gsk(params, key.strategy; normalize_empty = :flat) : gsk
-        z = params.node2zone[first(znodes)]
-        w = Dict(n => G[n, z] for n in znodes)
-    else
-        w = Dict(n => 1.0 for n in znodes)
-    end
+    w = _key_weights(key, nd, params, znodes, t; gsk = gsk)
     sum(values(w)) <= 0 && (w = Dict(n => 1.0 for n in znodes))
     return w
 end
@@ -443,7 +471,10 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
     build_times = [tt for tt in tgt_times if !(tt in Set(skipped))]
     isempty(build_times) && error("build_refday_basecase: no target hour is fully resolved — check matches/scope/fallback_matches.")
 
-    gsk = (method isa ShareShift && method.redist isa GSKRedist) ?
+    # Precompute a static GSK for the redistribution key; time-dependent
+    # strategies bypass it in _key_weights (per-timestep load weights instead).
+    gsk = (method isa ShareShift && method.redist isa GSKRedist &&
+           !is_time_dependent(method.redist.strategy)) ?
           build_gsk(params, method.redist.strategy; normalize_empty = :flat) : nothing
 
     nodes = nd.nodes

@@ -83,6 +83,16 @@ function test_refday_basecase()
         @test state_sequence(ModelSetup(TimeHorizon = TimeHorizon(stop = 24))) == [DayAhead]
     end
 
+    @testset "GSKRedist: time-dependent strategy falls back to per-timestep load" begin
+        # GenLoadGSK has no basecase in the redistribution context → per-t nodal load
+        w = POMATWO._key_weights(GSKRedist(GenLoadGSK()), nd, params, ["n1", "n2"], 1)
+        @test w == Dict("n1" => nd.LOAD[("n1", 1)], "n2" => nd.LOAD[("n2", 1)])
+
+        # static strategies keep using the (optionally cached) GSK column
+        wf = POMATWO._key_weights(GSKRedist(FlatGSK()), nd, params, ["n1", "n2"], 1)
+        @test wf["n1"] ≈ 0.5 && wf["n2"] ≈ 0.5
+    end
+
     @testset "MatchScope node partitions" begin
         gG = POMATWO.node_groups(GlobalMatchScope(), params)
         @test collect(keys(gG)) == ["ALL"] && gG["ALL"] == ["n1", "n2", "n3"]

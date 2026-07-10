@@ -7,7 +7,7 @@ Compute zonal PTDF (l×z) as PTDF(l×n) * GSK(n×z).
 GSK rows are reordered to match PTDF's column (node) order before multiplying,
 so the result is correct regardless of how the two arrays were built.
 """
-function zonal_ptdf(PTDF::DenseAxisArray, GSK::DenseAxisArray)
+function zonal_ptdf(PTDF::DenseAxisArray, GSK::DenseAxisArray{Float64,2})
     nodes_ptdf = axes(PTDF, 2)
     nodes_gsk  = axes(GSK, 1)
     @assert length(nodes_ptdf) == length(nodes_gsk) "PTDF is l×n, GSK must be n×z (size mismatch)"
@@ -17,6 +17,67 @@ function zonal_ptdf(PTDF::DenseAxisArray, GSK::DenseAxisArray)
     PTDFz_mat = round.(PTDF.data * GSK_aligned.data, digits=4)
     PTDFz = JuMP.Containers.DenseAxisArray(PTDFz_mat, axes(PTDF, 1), axes(GSK, 2))
     return PTDFz
+end
+
+"""
+    zonal_ptdf(PTDF, GSK::DenseAxisArray{Float64,3}) -> DenseAxisArray (l×z×t)
+
+Time-dependent variant: `GSK` is n×z×t (from [`build_gsk_timeseries`](@ref)),
+the result is one zonal PTDF slice per timestep.
+"""
+function zonal_ptdf(PTDF::DenseAxisArray, GSK::DenseAxisArray{Float64,3})
+    nodes_ptdf = collect(axes(PTDF, 2))
+    nodes_gsk  = collect(axes(GSK, 1))
+    @assert length(nodes_ptdf) == length(nodes_gsk) "PTDF is l×n, GSK must be n×z×t (size mismatch)"
+    @assert Set(nodes_ptdf) == Set(nodes_gsk) "PTDF and GSK must cover the same node set"
+    # Row permutation aligning GSK node order to PTDF column order
+    gsk_row = Dict(nl => i for (i, nl) in enumerate(nodes_gsk))
+    perm = [gsk_row[nl] for nl in nodes_ptdf]
+
+    zones = collect(axes(GSK, 2))
+    times = collect(axes(GSK, 3))
+    PTDFz_data = Array{Float64,3}(undef, size(PTDF.data, 1), length(zones), length(times))
+    for k in eachindex(times)
+        PTDFz_data[:, :, k] = round.(PTDF.data * GSK.data[perm, :, k], digits=4)
+    end
+    return JuMP.Containers.DenseAxisArray(PTDFz_data, collect(axes(PTDF, 1)), zones, times)
+end
+
+# Uniform PTDFz lookup for static (l×z) and time-dependent (l×z×t) matrices.
+_ptdfz(P::DenseAxisArray{Float64,2}, l, z, t) = P[l, z]
+_ptdfz(P::DenseAxisArray{Float64,3}, l, z, t) = P[l, z, t]
+
+# Restrict a PTDFz matrix to the CNE line subset (row selection for 2D and 3D).
+_select_lines(P::DenseAxisArray{Float64,2}, lines) = P[lines, :]
+function _select_lines(P::DenseAxisArray{Float64,3}, lines)
+    lidx = Dict(l => i for (i, l) in enumerate(collect(axes(P, 1))))
+    sel = [lidx[l] for l in lines]
+    return Containers.DenseAxisArray(P.data[sel, :, :], collect(lines),
+                                     collect(axes(P, 2)), collect(axes(P, 3)))
+end
+
+"""
+    _max_abs_zone_to_zone(PTDFz::DenseAxisArray{Float64,3}) -> DenseAxisArray (l×pairs)
+
+Per-entry maximum-magnitude (signed) zone-to-zone PTDF across all timesteps of a
+time-dependent zonal PTDF. Used as the CNE screening matrix: a line qualifies if
+it breaches the threshold in *any* timestep.
+"""
+function _max_abs_zone_to_zone(PTDFz::DenseAxisArray{Float64,3})
+    lines = collect(axes(PTDFz, 1))
+    zones = collect(axes(PTDFz, 2))
+    times = collect(axes(PTDFz, 3))
+    rep = nothing
+    for k in eachindex(times)
+        slice = Containers.DenseAxisArray(PTDFz.data[:, :, k], lines, zones)
+        cur = zone_to_zone_ptdf(slice; exclude_self=true)
+        if rep === nothing
+            rep = cur
+        else
+            @. rep.data = ifelse(abs(cur.data) > abs(rep.data), cur.data, rep.data)
+        end
+    end
+    return rep
 end
 
 """
@@ -164,9 +225,10 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
 
     # Basecase flow f0[l, t]: observed flow minus the part explained by zonal net positions
     # f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]
+    # (_ptdfz handles both static l×z and time-dependent l×z×t PTDFz matrices)
     l0 = Dict{Tuple{String, Int}, Float64}()
     for l in cne_lines, t in T
-        l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
+        l0[l, t] = lineflows[l, t] - sum(_ptdfz(PTDFz, l, z, t) * NP[z, t] for z in zones)
     end
     # Steps to include non flow based zones (which is not currently accounted for):
     #𝐹⃗0FB -> flow per CNEC in the situation without commercial exchanges within the flow based CCR
@@ -264,15 +326,28 @@ end
 Core FBMC parameter calculation, independent of a `SubRun`. `basecase_result`
 is any dict with `:netinput_ac` (n×t) and `:lineflows` (l×t) — from the
 `TwoDayAhead` optimization or from [`build_refday_basecase`](@ref).
+
+For time-dependent strategies (`is_time_dependent(gsk_strategy) == true`, e.g.
+[`GenLoadGSK`](@ref)) `:GSK` is n×z×t and `:PTDFz` is l×z×t (one slice per
+timestep, built from the basecase via [`build_gsk_timeseries`](@ref));
+`:PTDFzz` is then the per-entry maximum-magnitude zone-to-zone PTDF across all
+timesteps (used for CNE screening).
 """
 function calc_fbmc_params(gsk_strategy::GSKStrategy, params::Parameters, TwoDayAhead_result::Dict, T; zone_order=nothing, normalize_empty::Symbol=:flat, minRAM::Float64=0.7, FRM::Float64=0.1)
-    GSK = build_gsk(params, gsk_strategy; normalize_empty=normalize_empty)
-    PTDFn = dict_to_matrix(params.ptdf) 
-    PTDFz = zonal_ptdf(PTDFn, GSK)
-    PTDFzz = zone_to_zone_ptdf(PTDFz; exclude_self=true)
+    PTDFn = dict_to_matrix(params.ptdf)
+    if is_time_dependent(gsk_strategy)
+        GSK = build_gsk_timeseries(params, gsk_strategy, TwoDayAhead_result[:netinput_ac], T;
+                                   normalize_empty=normalize_empty)
+        PTDFz = zonal_ptdf(PTDFn, GSK)                 # l×z×t
+        PTDFzz = _max_abs_zone_to_zone(PTDFz)          # 2D representative for CNE screening
+    else
+        GSK = build_gsk(params, gsk_strategy; normalize_empty=normalize_empty)
+        PTDFz = zonal_ptdf(PTDFn, GSK)
+        PTDFzz = zone_to_zone_ptdf(PTDFz; exclude_self=true)
+    end
     define_cne!(params, PTDFzz; threshold=0.05)
     cne = params.cne
-    PTDFz  = PTDFz[cne, :]
+    PTDFz  = _select_lines(PTDFz, cne)
     PTDFzz = PTDFzz[cne, :]
     RAM = calc_ram(params, TwoDayAhead_result, PTDFz, PTDFzz, PTDFn, T; minRAM=minRAM, FRM=FRM)
     fbmc_params = Dict(

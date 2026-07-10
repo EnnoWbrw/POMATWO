@@ -44,8 +44,11 @@ Generation Shift Keys (GSKs) define how zonal net positions are distributed to i
 GSKStrategy
 FlatGSK
 GmaxGSK
+GenLoadGSK
 CustomWeightsGSK
 build_gsk
+POMATWO.build_gsk_timeseries
+POMATWO.is_time_dependent
 zonal_ptdf
 ```
 

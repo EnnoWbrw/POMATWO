@@ -55,6 +55,48 @@ zone's net position is served by its dispatchable fleet.
 struct DispOnlyGSK <: GSKStrategy
 end
 
+"""
+    GenLoadGSK <: GSKStrategy
+
+Combined generation- and load-shift key (GLSK), following the refined "Country
+GLSK" formula used in CWE flow-based capacity calculation:
+
+```math
+GLSK_i(t) = \\frac{|p_i^{GEN}(t)| + |p_i^{LOAD}(t)|}
+                  {\\sum_{k \\in \\text{TSO area}} \\left(|p_k^{GEN}(t)| + |p_k^{LOAD}(t)|\\right)}
+```
+
+This strategy is *time-dependent* (`is_time_dependent(::GenLoadGSK) == true`):
+one GSK matrix is built per timestep from the FBMC basecase (the model's IGM
+equivalent) via [`build_gsk_timeseries`](@ref), with
+
+- ``p_i^{LOAD}(t)`` = the node's `nodal_load` profile at `t` (0 if no load),
+- ``p_i^{GEN}(t)``  = `netinput_ac[i, t] + p_i^{LOAD}(t)`, i.e. active generation
+  recovered from the basecase nodal net injection (net injection = gen − load).
+
+Weights are normalized per zone (the TSO control area) and per timestep, so each
+zone column sums to 1 for every `t`. Combining generation and load lets the key
+reflect renewable infeed better than a pure capacity key.
+
+When no basecase is available the strategy falls back to *load-only* weights
+(generation is dropped — capacity-based proxies like ``g\\_max \\cdot
+\\overline{avail}`` would treat conventional plants as always running at full
+capacity). Timestep-aware fallback contexts (e.g. as a [`GSKRedist`](@ref)
+redistribution key) use the nodal load at each timestep; a plain
+[`build_gsk`](@ref) call collapses to the mean of the load profile.
+"""
+struct GenLoadGSK <: GSKStrategy end
+
+"""
+    is_time_dependent(strategy::GSKStrategy) -> Bool
+
+Whether the strategy builds one GSK per timestep from the FBMC basecase
+([`build_gsk_timeseries`](@ref)) instead of a single static matrix
+([`build_gsk`](@ref)). Defaults to `false`.
+"""
+is_time_dependent(::GSKStrategy) = false
+is_time_dependent(::GenLoadGSK) = true
+
 # ==================== Weight Computation Dispatch ====================
 
 """
@@ -107,6 +149,32 @@ function compute_nodal_weights(strategy::DispOnlyGSK, params, nodes)
 end
 
 
+# Mean of a ConcreteProfile (representative value for the static GSK). Duck-typed
+# on `.val` because the profile types are defined in a later-included file.
+function _profile_avg(p)
+    v = p.val
+    v isa AbstractVector || return v
+    return isempty(v) ? 0.0 : sum(v) / length(v)
+end
+
+# Static fallback (no basecase available): load-only weights, mean of the nodal
+# load profile. Capacity-based generation terms are deliberately excluded —
+# gmax·mean(avail) would treat conventionals (avail ≡ 1) as running at full
+# capacity all the time. Timestep-aware contexts (e.g. GSKRedist) use the
+# per-timestep load instead of the mean.
+function compute_nodal_weights(strategy::GenLoadGSK, params, nodes)
+    n = length(nodes)
+
+    weights = zeros(Float64, n)
+    for (i, nlabel) in enumerate(nodes)
+        load = haskey(params.nodal_load, nlabel) ?
+               _profile_avg(params.nodal_load[nlabel]) : 0.0
+        weights[i] = abs(load)
+    end
+
+    return weights
+end
+
 function compute_nodal_weights(strategy::CustomWeightsGSK, params, nodes)
     n = length(nodes)
     @assert length(strategy.weights) == n "Custom weights must have length n=$n, got $(length(strategy.weights))"
@@ -158,31 +226,34 @@ function build_gsk(params, strategy::GSKStrategy=FlatGSK();
                    node_order::Union{Nothing,AbstractVector}=nothing,
                    zone_order::Union{Nothing,AbstractVector}=nothing,
                    normalize_empty::Symbol=:zero)
-    
-    # Establish deterministic node and zone ordering
+
+    nodes, zones, node_to_zone = _gsk_orderings(params, node_order, zone_order)
+
+    # Delegate to strategy-specific method
+    G_matrix = build_gsk_matrix(strategy, params, nodes, zones, node_to_zone, normalize_empty)
+
+    # Convert to DenseAxisArray
+    G = Containers.DenseAxisArray(G_matrix, nodes, zones)
+
+    return G
+end
+
+# Deterministic node/zone ordering plus node→zone column index, shared by
+# `build_gsk` and `build_gsk_timeseries`.
+function _gsk_orderings(params, node_order, zone_order)
     nodes = node_order === nothing ? sort!(collect(params.sets.N)) : collect(node_order)
     zones = zone_order === nothing ? sort!(collect(params.sets.Z)) : collect(zone_order)
-    
-    n = length(nodes)
-    z = length(zones)
-    
-    # Build zone mapping
-    zidx = Dict(zones[i] => i for i in 1:z)
-    node_to_zone = Vector{Int}(undef, n)
-    
+
+    zidx = Dict(zones[i] => i for i in eachindex(zones))
+    node_to_zone = Vector{Int}(undef, length(nodes))
+
     for (i, nlabel) in enumerate(nodes)
         zlabel = params.node2zone[nlabel]
         @assert haskey(zidx, zlabel) "Zone $(zlabel) of node $(nlabel) not found in zone_order"
         node_to_zone[i] = zidx[zlabel]
     end
-    
-    # Delegate to strategy-specific method
-    G_matrix = build_gsk_matrix(strategy, params, nodes, zones, node_to_zone, normalize_empty)
-    
-    # Convert to DenseAxisArray
-    G = Containers.DenseAxisArray(G_matrix, nodes, zones)
-    
-    return G
+
+    return nodes, zones, node_to_zone
 end
 
 """
@@ -191,27 +262,32 @@ end
 Build GSK matrix from nodal weights. Normalizes weights per zone so columns sum to 1.
 """
 function build_gsk_matrix(strategy::GSKStrategy, params, nodes, zones, node_to_zone, normalize_empty)
-    n, z = length(nodes), length(zones)
-    
     # Compute nodal weights using strategy
     weights = compute_nodal_weights(strategy, params, nodes)
-    
+    return _normalize_per_zone(weights, node_to_zone, length(zones), normalize_empty)
+end
+
+# Normalize nodal weights per zone so each zone column sums to 1 (or is handled
+# by the empty-zone rule). Shared by the static and per-timestep GSK builders.
+function _normalize_per_zone(weights::Vector{Float64}, node_to_zone::Vector{Int}, z::Int, normalize_empty::Symbol)
+    n = length(weights)
+
     # Aggregate weights per zone
     zone_sums = zeros(Float64, z)
     zone_counts = zeros(Int, z)
-    
+
     @inbounds for i in 1:n
         j = node_to_zone[i]
         zone_sums[j] += weights[i]
         zone_counts[j] += 1
     end
-    
+
     # Build normalized GSK matrix
     G = zeros(Float64, n, z)
-    
+
     @inbounds for i in 1:n
         j = node_to_zone[i]
-        
+
         if zone_sums[j] > 0
             # Standard case: normalize by zone sum
             G[i, j] = weights[i] / zone_sums[j]
@@ -226,6 +302,48 @@ function build_gsk_matrix(strategy::GSKStrategy, params, nodes, zones, node_to_z
             end
         end
     end
-    
+
     return G
+end
+
+"""
+    build_gsk_timeseries(params, strategy::GenLoadGSK, netinput_ac, T;
+                         node_order=nothing, zone_order=nothing, normalize_empty=:zero)
+
+Build one GSK matrix per timestep from the FBMC basecase, returned as a
+`DenseAxisArray` of size n×z×|T| indexed by (node, zone, t).
+
+Per node `i` and timestep `t` the weight is `|gen| + |load|` with
+`load = nodal_load[i][t]` (0 if the node has no load profile) and
+`gen = netinput_ac[i, t] + load` (active generation recovered from the basecase
+nodal net injection). Weights are normalized per zone and timestep, so every
+zone column sums to 1 for each `t` (empty zones follow `normalize_empty`, see
+[`build_gsk`](@ref)).
+
+# Arguments
+- `netinput_ac`: DenseAxisArray (node × time) of AC nodal net injections from the
+  basecase (`TwoDayAhead` optimization or [`build_refday_basecase`](@ref)).
+- `T`: timesteps to build GSKs for (must be covered by `netinput_ac`).
+"""
+function build_gsk_timeseries(params, strategy::GenLoadGSK, netinput_ac, T;
+                              node_order::Union{Nothing,AbstractVector}=nothing,
+                              zone_order::Union{Nothing,AbstractVector}=nothing,
+                              normalize_empty::Symbol=:zero)
+    nodes, zones, node_to_zone = _gsk_orderings(params, node_order, zone_order)
+    n, z = length(nodes), length(zones)
+    times = collect(T)
+
+    G_data = Array{Float64,3}(undef, n, z, length(times))
+    weights = Vector{Float64}(undef, n)
+
+    for (k, t) in enumerate(times)
+        for (i, nlabel) in enumerate(nodes)
+            load = haskey(params.nodal_load, nlabel) ? params.nodal_load[nlabel][t] : 0.0
+            gen = netinput_ac[nlabel, t] + load
+            weights[i] = abs(gen) + abs(load)
+        end
+        G_data[:, :, k] = _normalize_per_zone(weights, node_to_zone, z, normalize_empty)
+    end
+
+    return Containers.DenseAxisArray(G_data, nodes, zones, times)
 end
