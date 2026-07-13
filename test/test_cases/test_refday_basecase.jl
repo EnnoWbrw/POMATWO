@@ -197,4 +197,167 @@ function test_refday_basecase()
         @test_throws ErrorException POMATWO.validate_shares(
             ShareShift(resolution = :bogus))
     end
+
+    @testset "shift_single trace: deltas complete and valid" begin
+        valid_comps = Set(["RES_prestep", "RES", "conv", "load", "NP", "unabsorbed"])
+        for m in (
+            ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, β_NP=0.0,
+                       resolution=:zonal, redist=RefPropRedist()),
+            ShareShift(β_conv=0.5, β_load=0.5, β_RES=0.0, β_NP=0.0,
+                       resolution=:zonal, res_prestep=true, redist=LoadPropRedist()),
+            ShareShift(β_conv=0.5, β_load=0.5, resolution=:nodal,
+                       res_prestep=true, redist=RefPropRedist()),
+            ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0, β_NP=1.0,
+                       resolution=:zonal, redist=RefPropRedist()),
+        )
+            tr = POMATWO.ShiftTraceCollector()
+            p = POMATWO.shift_single(nd, params, 2, 1, m; trace = tr)
+            df = POMATWO.shift_trace_df(tr)
+
+            @test all(abs.(df.delta) .> POMATWO.SHIFT_TRACE_TOL)
+            @test all(in(valid_comps), df.component)
+            @test all(==(2), df.Time)
+            # prestep rows appear iff the pre-step is active
+            @test ("RES_prestep" in df.component) == m.res_prestep
+            # :NP always closes the cascade → no unabsorbed remainder
+            @test !("unabsorbed" in df.component)
+
+            # deltas are complete: p_new = P_ref + Σ deltas per node
+            nodal = filter(:component => !=("unabsorbed"), df)
+            for n in nd.nodes
+                d = sum(nodal.delta[nodal.node .== n]; init = 0.0)
+                @test isapprox(p[n], nd.P[(n, 1)] + d; atol = 1e-6)
+            end
+            # per-zone: Σ deltas = full net-position gap
+            for (z, znodes) in nd.nodes_in_zone
+                dz = sum(nodal.delta[in.(nodal.node, Ref(Set(znodes)))]; init = 0.0)
+                gap = NP_tgt(z) - sum(nd.P[(n, 1)] for n in znodes)
+                @test isapprox(dz, gap; atol = 1e-6)
+            end
+
+            # tracing does not change the result
+            p_plain = POMATWO.shift_single(nd, params, 2, 1, m)
+            @test all(isapprox(p[n], p_plain[n]; atol = 1e-12) for n in nd.nodes)
+        end
+    end
+
+    @testset "resolve_group_times: fallback flags and skip" begin
+        sm = DataFrame(group = ["z1"], target_time = [3], matched_time = [1])
+        fb = DataFrame(target_time = [3], matched_time = [2])
+        gm, skipped = POMATWO.resolve_group_times(sm, ZonalMatchScope(), params, [3];
+                                                  fallback_matches = fb)
+        @test isempty(skipped)
+        rz1 = only(filter(:group => ==("z1"), gm))
+        rz2 = only(filter(:group => ==("z2"), gm))
+        @test rz1.matched_time == 1 && rz1.fallback == false
+        @test rz2.matched_time == 2 && rz2.fallback == true   # z2 borrowed the global fallback
+        # skipped hour contributes no rows at all
+        gm2, skipped2 = @test_logs (:warn, r"unresolved") POMATWO.resolve_group_times(
+            sm, ZonalMatchScope(), params, [3])
+        @test skipped2 == [3] && isempty(gm2)
+    end
+
+    @testset "_refday_match_trace: metadata join" begin
+        sm = DataFrame(group = ["z1"], target_time = [3], matched_time = [1],
+                       target_cluster = [3], matched_cluster = [1], cluster_distance = [0.5])
+        fb = DataFrame(target_time = [3], matched_time = [2],
+                       target_cluster = [3], matched_cluster = [2], cluster_distance = [1.5])
+        gm, _ = POMATWO.resolve_group_times(sm, ZonalMatchScope(), params, [3];
+                                            fallback_matches = fb)
+        mt = POMATWO._refday_match_trace(gm, sm, fb)
+        @test nrow(mt) == 2
+        rz1 = only(filter(:group => ==("z1"), mt))
+        rz2 = only(filter(:group => ==("z2"), mt))
+        @test rz1.matched_cluster == 1 && rz1.cluster_distance == 0.5
+        @test rz2.matched_cluster == 2 && rz2.cluster_distance == 1.5   # metadata from fallback table
+    end
+end
+
+# End-to-end: forecast run → refday run with 2 splits → trace files on disk → read-back
+function test_refday_trace_e2e()
+    @testset "refday trace end-to-end (write + read-back)" begin
+        datapath = joinpath(@__DIR__, "..", "..", "examples", "test_data_3_nodes_v2_fbmc")
+        data_files = Dict{Symbol,String}(
+            :plants  => joinpath(datapath, "plants.csv"),
+            :nodes   => joinpath(datapath, "nodes.csv"),
+            :zones   => joinpath(datapath, "zones.csv"),
+            :lines   => joinpath(datapath, "lines.csv"),
+            :dclines => joinpath(datapath, "dclines.csv"),
+            :demand  => joinpath(datapath, "nodal_load.csv"),
+            :types   => joinpath(datapath, "planttypes.csv"),
+            :avail   => joinpath(datapath, "avail.csv"),
+        )
+        solver = HiGHS.Optimizer
+        params = load_data(data_files)
+        tmpdir = mktempdir()  # no do-block: Arrow mmap blocks eager cleanup on Windows
+
+        with_logger(NullLogger()) do
+            # forecast run: provides the 2DA reference pool
+            setup_fc = ModelSetup(
+                TimeHorizon = TimeHorizon(stop = 4),
+                MarketType  = ZonalMarket(FlowBased(DispOnlyGSK())),
+            )
+            mr_fc = ModelRun(params, setup_fc, solver;
+                resultdir = tmpdir, scenarioname = "forecast", overwrite = true)
+            POMATWO.run(mr_fc)
+
+            # refday run over 2 splits (exercises per-subrun trace slicing)
+            bc = ReferenceDayBasecase(
+                source = joinpath(tmpdir, "forecast"), source_type = "2DA",
+                matching = MatchingConfig(cluster_size = 2, lookback = 1,
+                                          scope = ZonalMatchScope()),
+                shift = ShareShift(β_conv = 0.5, β_load = 0.5, res_prestep = true,
+                                   redist = GSKRedist(DispOnlyGSK())),
+            )
+            setup_rd = ModelSetup(
+                TimeHorizon = TimeHorizon(stop = 4, split = 2),
+                MarketType  = ZonalMarket(FlowBased(GSKStrategy = DispOnlyGSK(), basecase = bc)),
+            )
+            mr_rd = ModelRun(params, setup_rd, solver;
+                resultdir = tmpdir, scenarioname = "refday", overwrite = true)
+            POMATWO.run(mr_rd)
+
+            scen = joinpath(tmpdir, "refday")
+
+            # trace files: per-subrun slices + root groups table
+            for sub in ("subrun_t1-t2", "subrun_t3-t4")
+                @test isfile(joinpath(scen, sub, "REFDAY_MATCH.arrow"))
+                @test isfile(joinpath(scen, sub, "REFDAY_SHIFT.arrow"))
+            end
+            @test isfile(joinpath(scen, "REFDAY_GROUPS.arrow"))
+
+            # in-memory trace: reconstruction identity against the built basecase
+            base = build_refday_basecase(bc, params)
+            @test haskey(base, :trace)
+            trace = base[:trace]
+            src = DataFiles(joinpath(tmpdir, "forecast"); type = "2DA")
+            P_src = Dict((r.index, r.Time) => r.ACINJECTION for r in eachrow(src.NETINPUT))
+            reft = innerjoin(trace[:REFDAY_GROUPS], trace[:REFDAY_MATCH]; on = :group)
+            refmap = Dict((r.node, r.target_time) => r.matched_time for r in eachrow(reft))
+            shifts = trace[:REFDAY_SHIFT]
+            for n in params.sets.N, t in 1:4
+                d = sum(shifts.delta[(shifts.node .== n) .& (shifts.Time .== t)]; init = 0.0)
+                @test isapprox(base[:netinput_ac][n, t], P_src[(n, refmap[(n, t)])] + d;
+                               atol = 1e-6)
+            end
+            # no trace when disabled
+            @test !haskey(build_refday_basecase(bc, params; collect_trace = false), :trace)
+
+            # read-back through DataFiles
+            out = DataFiles(scen)
+            @test sort(unique(out.REFDAY_MATCH.target_time)) == [1, 2, 3, 4]
+            @test nrow(unique(out.REFDAY_MATCH[:, [:group, :target_time]])) == nrow(out.REFDAY_MATCH)
+            @test sort(unique(out.REFDAY_GROUPS.node)) == sort(params.sets.N)
+            @test nrow(unique(out.REFDAY_GROUPS)) == nrow(out.REFDAY_GROUPS)
+            @test !isempty(out.REFDAY_SHIFT)
+            rt = refday_reference_times(out)
+            @test nrow(rt) == length(params.sets.N) * 4
+
+            # non-refday results read back with empty trace tables
+            fc_out = DataFiles(joinpath(tmpdir, "forecast"))
+            @test isempty(fc_out.REFDAY_MATCH) && isempty(fc_out.REFDAY_GROUPS) &&
+                  isempty(fc_out.REFDAY_SHIFT)
+            @test isempty(@test_logs (:warn, r"no reference-day trace") refday_reference_times(fc_out))
+        end
+    end
 end

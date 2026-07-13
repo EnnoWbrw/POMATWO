@@ -323,17 +323,18 @@ function match_by_scope(gen_df, scope::MatchScope, params::Parameters; matchkwar
 end
 
 """
-    resolve_ref_times(scoped_matches, scope, params, tgt_times; fallback_matches)
-        -> (refmap::Dict{Tuple{String,Int},Int}, skipped::Vector{Int})
+    resolve_group_times(scoped_matches, scope, params, tgt_times; fallback_matches)
+        -> (groupmap::DataFrame, skipped::Vector{Int})
 
-Resolve, for every (node, target_time), the reference time to borrow from: the
-node's group match if available, else the global `fallback_matches` entry for
-that hour. Target hours where any node stays unresolved are returned in
-`skipped`. A `scoped_matches` table without a `:group` column is treated as one
-global group.
+Group-level match resolution: one `groupmap` row (`group, target_time,
+matched_time, fallback::Bool`) per resolved (group, target hour), where
+`fallback` marks hours the group borrowed from the global `fallback_matches`
+instead of its own scoped match. Target hours where any group stays unresolved
+are returned in `skipped` and contribute no rows. A `scoped_matches` table
+without a `:group` column is treated as one global group.
 """
-function resolve_ref_times(scoped_matches, scope::MatchScope, params::Parameters, tgt_times;
-                           fallback_matches = nothing)
+function resolve_group_times(scoped_matches, scope::MatchScope, params::Parameters, tgt_times;
+                             fallback_matches = nothing)
     groups = node_groups(scope, params)
 
     bygroup = Dict{Tuple{String,Int},Int}()
@@ -356,23 +357,56 @@ function resolve_ref_times(scoped_matches, scope::MatchScope, params::Parameters
         end
     end
 
-    refmap = Dict{Tuple{String,Int},Int}()
+    groupmap = DataFrame(group = String[], target_time = Int[],
+                         matched_time = Int[], fallback = Bool[])
     skipped = Int[]
     for tt in tgt_times
+        rows = Tuple{String,Int,Int,Bool}[]
         ok = true
-        for (g, gnodes) in groups
-            mt = haskey(bygroup, (g, tt)) ? bygroup[(g, tt)] : get(fb, tt, nothing)
+        for g in keys(groups)
+            scoped = haskey(bygroup, (g, tt))
+            mt = scoped ? bygroup[(g, tt)] : get(fb, tt, nothing)
             if mt === nothing
                 ok = false
                 break
             end
-            for n in gnodes
-                refmap[(n, tt)] = mt
-            end
+            push!(rows, (g, tt, mt, !scoped))
         end
-        ok || push!(skipped, tt)
+        if ok
+            for r in rows
+                push!(groupmap, r)
+            end
+        else
+            push!(skipped, tt)
+        end
     end
     isempty(skipped) ||
-        @warn "resolve_ref_times: $(length(skipped)) target hour(s) unresolved in at least one group and no fallback available — skipped." skipped
-    return refmap, sort(skipped)
+        @warn "resolve_group_times: $(length(skipped)) target hour(s) unresolved in at least one group and no fallback available — skipped." skipped
+    return groupmap, sort(skipped)
+end
+
+"""
+    resolve_ref_times(scoped_matches, scope, params, tgt_times; fallback_matches)
+        -> (refmap::Dict{Tuple{String,Int},Int}, skipped::Vector{Int})
+
+Resolve, for every (node, target_time), the reference time to borrow from: the
+node's group match if available, else the global `fallback_matches` entry for
+that hour. Target hours where any node stays unresolved are returned in
+`skipped`. Node-level expansion of [`resolve_group_times`](@ref).
+"""
+function resolve_ref_times(scoped_matches, scope::MatchScope, params::Parameters, tgt_times;
+                           fallback_matches = nothing)
+    groupmap, skipped = resolve_group_times(scoped_matches, scope, params, tgt_times;
+                                            fallback_matches = fallback_matches)
+    refmap = _expand_group_times(groupmap, node_groups(scope, params))
+    return refmap, skipped
+end
+
+"Expand a group-level match table to the per-(node, target_time) refmap."
+function _expand_group_times(groupmap, groups::AbstractDict)
+    refmap = Dict{Tuple{String,Int},Int}()
+    for r in eachrow(groupmap), n in groups[r.group]
+        refmap[(n, r.target_time)] = r.matched_time
+    end
+    return refmap
 end

@@ -354,21 +354,62 @@ function _comp_bounds(comp, n, nd, res_w, conv_w, load_w)
 end
 
 # ---------------------------------------------------------------------------
+# Shift trace
+# ---------------------------------------------------------------------------
+
+"Deltas below this are numerical noise (matches `_waterfill`'s outer tolerance) and are not traced."
+const SHIFT_TRACE_TOL = 1e-9
+
+"""
+    ShiftTraceCollector()
+
+Collects the per-node injection deltas applied by [`shift_single`](@ref) as
+four parallel vectors (`Time`, `node`, `component`, `delta`); convert with
+[`shift_trace_df`](@ref). `delta` is the change in nodal net injection — for
+the `"load"` component the actual load change is `-delta`. The `"unabsorbed"`
+component records (per zone, with the zone label in the `node` column) any gap
+remainder the cascade could not place.
+"""
+struct ShiftTraceCollector
+    Time::Vector{Int}
+    node::Vector{String}
+    component::Vector{String}
+    delta::Vector{Float64}
+end
+ShiftTraceCollector() = ShiftTraceCollector(Int[], String[], String[], Float64[])
+
+@inline _record!(::Nothing, t, n, comp, d) = nothing
+@inline function _record!(tr::ShiftTraceCollector, t, n, comp, d)
+    abs(d) > SHIFT_TRACE_TOL || return nothing
+    push!(tr.Time, t); push!(tr.node, n); push!(tr.component, comp); push!(tr.delta, d)
+    return nothing
+end
+
+"Collector contents as a `DataFrame` (`Time, node, component, delta`)."
+shift_trace_df(tr::ShiftTraceCollector) =
+    DataFrame(Time = tr.Time, node = tr.node, component = tr.component, delta = tr.delta)
+
+# ---------------------------------------------------------------------------
 # The shift
 # ---------------------------------------------------------------------------
 
 """
-    shift_single(nd, params, t_tgt, t_ref, method) -> Dict(node => net_injection)
+    shift_single(nd, params, t_tgt, t_ref, method; trace = nothing) -> Dict(node => net_injection)
 
 Build the target-day nodal net injection from reference day `t_ref` and target
 day `t_tgt` under `method`. `t_ref` is either a single time step (global
 reference day) or a per-node map `node => reference_time` (scoped / per-TSO
 matching, where each group borrows its own reference day).
-"""
-shift_single(nd, params, t_tgt, t_ref::Integer, method::ShareShift; gsk = nothing) =
-    shift_single(nd, params, t_tgt, Dict(n => Int(t_ref) for n in nd.nodes), method; gsk = gsk)
 
-function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::ShareShift; gsk = nothing)
+Pass a [`ShiftTraceCollector`](@ref) as `trace` to record every applied
+per-node injection delta (components `"RES_prestep"`, `"RES"`, `"conv"`,
+`"load"`, `"NP"`, `"unabsorbed"`).
+"""
+shift_single(nd, params, t_tgt, t_ref::Integer, method::ShareShift; gsk = nothing, trace = nothing) =
+    shift_single(nd, params, t_tgt, Dict(n => Int(t_ref) for n in nd.nodes), method; gsk = gsk, trace = trace)
+
+function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::ShareShift;
+                      gsk = nothing, trace = nothing)
     nodes  = nd.nodes
     p_new  = Dict(n => get(nd.P,    (n, ref_of_node[n]), 0.0) for n in nodes)
     res_w  = Dict(n => get(nd.RES,  (n, ref_of_node[n]), 0.0) for n in nodes)
@@ -380,6 +421,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
         if method.resolution == :nodal
             for n in nodes
                 tgt = get(nd.RES, (n, t_tgt), 0.0)
+                _record!(trace, t_tgt, n, "RES_prestep", tgt - res_w[n])
                 p_new[n] += tgt - res_w[n]
                 res_w[n]  = tgt
             end
@@ -394,6 +436,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
                 ws = sum(values(w)); ws <= 0 && (ws = length(znodes); w = Dict(n => 1.0 for n in znodes))
                 for n in znodes
                     d = Δ * w[n] / ws
+                    _record!(trace, t_tgt, n, "RES_prestep", d)
                     p_new[n] += d
                     res_w[n] += d
                 end
@@ -427,6 +470,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
             end
             applied, rem = _waterfill(amount, znodes, w, lo, hi)
             for n in znodes
+                _record!(trace, t_tgt, n, string(comp), applied[n])
                 p_new[n] += applied[n]
                 comp == :conv && (conv_w[n] += applied[n])
                 comp == :RES  && (res_w[n]  += applied[n])
@@ -434,6 +478,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
             end
             carried = rem
         end
+        _record!(trace, t_tgt, string(z), "unabsorbed", carried)
     end
     return p_new
 end
@@ -443,7 +488,33 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    build_refday_basecase(results, matches, method; res_tags, scope, fallback_matches) -> Dict
+    _refday_match_trace(groupmap, matches, fallback_matches) -> DataFrame
+
+Attach the cluster metadata (`target_cluster`, `matched_cluster`,
+`cluster_distance`) of the match tables to a group-level resolution from
+[`resolve_group_times`](@ref). Fallback rows join against `fallback_matches`;
+metadata columns may be `missing` where a join finds no counterpart.
+"""
+function _refday_match_trace(groupmap::DataFrame, matches, fallback_matches)
+    metacols = [:target_cluster, :matched_cluster, :cluster_distance]
+    m = copy(matches)
+    ("group" in names(m)) || (m[!, :group] .= "ALL")
+    own = leftjoin(groupmap[.!groupmap.fallback, :],
+                   unique(m[:, [:group, :target_time, metacols...]]);
+                   on = [:group, :target_time])
+    fbrows = groupmap[groupmap.fallback, :]
+    if fallback_matches !== nothing && !isempty(fbrows)
+        fbrows = leftjoin(fbrows, unique(fallback_matches[:, [:target_time, metacols...]]);
+                          on = :target_time)
+    end
+    out = vcat(own, fbrows; cols = :union)
+    sort!(out, [:target_time, :group])
+    return out
+end
+
+"""
+    build_refday_basecase(results, matches, method;
+                          res_tags, scope, fallback_matches, collect_trace = false) -> Dict
 
 Assemble a TwoDayAhead-style FBMC basecase from a target→reference time mapping
 (`matches` with columns `target_time`, `matched_time` — and `group` when
@@ -461,18 +532,34 @@ Pass `scope` (e.g. `ZonalMatchScope()`) together with a `matches` table from
 [`match_by_scope`](@ref) to let every node group borrow its own reference day.
 Groups without a match for an hour fall back to `fallback_matches` (a global
 match table); hours unresolved in any group are skipped with a warning.
+
+# Traceability
+With `collect_trace = true` the returned Dict carries an extra `:trace` entry,
+a `Dict{Symbol,DataFrame}` with:
+
+- `:REFDAY_MATCH`  — per (group, target_time): matched reference time, cluster
+  metadata, and whether the global fallback was used;
+- `:REFDAY_GROUPS` — group → node membership (join key for `:REFDAY_MATCH`);
+- `:REFDAY_SHIFT`  — sparse per-(Time, node, component) injection deltas from
+  [`shift_single`](@ref).
+
+Together they reconstruct the construction exactly:
+`netinput_ac[n, tt] = P_source(n, ref(n, tt)) + Σ deltas(n, tt)`.
 """
 function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
                                res_tags = ["solar", "wind"],
                                scope::MatchScope = GlobalMatchScope(),
-                               fallback_matches = nothing)
+                               fallback_matches = nothing,
+                               collect_trace::Bool = false)
     validate_shares(method)
     params = results.params
     nd = precompute_nodal(results; res_tags = res_tags)
 
     tgt_times = sort(unique(matches.target_time))
-    refmap, skipped = resolve_ref_times(matches, scope, params, tgt_times;
-                                        fallback_matches = fallback_matches)
+    groups = node_groups(scope, params)
+    groupmap, skipped = resolve_group_times(matches, scope, params, tgt_times;
+                                            fallback_matches = fallback_matches)
+    refmap = _expand_group_times(groupmap, groups)
     build_times = [tt for tt in tgt_times if !(tt in Set(skipped))]
     isempty(build_times) && error("build_refday_basecase: no target hour is fully resolved — check matches/scope/fallback_matches.")
 
@@ -482,12 +569,14 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
            !is_time_dependent(method.redist.strategy)) ?
           build_gsk(params, method.redist.strategy; normalize_empty = :flat) : nothing
 
+    collector = collect_trace ? ShiftTraceCollector() : nothing
+
     nodes = nd.nodes
     nidx  = Dict(n => i for (i, n) in enumerate(nodes))
     Pmat  = zeros(length(nodes), length(build_times))
     for (j, tt) in enumerate(build_times)
         ref_of_node = Dict(n => refmap[(n, tt)] for n in nodes)
-        p_new = shift_single(nd, params, tt, ref_of_node, method; gsk = gsk)
+        p_new = shift_single(nd, params, tt, ref_of_node, method; gsk = gsk, trace = collector)
         for n in nodes
             Pmat[nidx[n], j] = p_new[n]
         end
@@ -502,7 +591,19 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
     LF = PTDFn.data * Preordered
     lineflows = Containers.DenseAxisArray(LF, lines, collect(build_times))
 
-    return Dict(:netinput_ac => netinput_ac, :lineflows => lineflows)
+    out = Dict{Symbol,Any}(:netinput_ac => netinput_ac, :lineflows => lineflows)
+    if collect_trace
+        groups_df = DataFrame(group = String[], node = String[])
+        for g in sort(collect(keys(groups))), n in sort(collect(groups[g]))
+            push!(groups_df, (g, n))
+        end
+        out[:trace] = Dict{Symbol,DataFrame}(
+            :REFDAY_MATCH  => _refday_match_trace(groupmap, matches, fallback_matches),
+            :REFDAY_GROUPS => groups_df,
+            :REFDAY_SHIFT  => shift_trace_df(collector),
+        )
+    end
+    return out
 end
 
 # ---------------------------------------------------------------------------
@@ -513,16 +614,19 @@ _load_refday_source(bc::ReferenceDayBasecase) =
     bc.source isa DataFiles ? bc.source : DataFiles(bc.source; type = bc.source_type)
 
 """
-    build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters) -> Dict
+    build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters;
+                          collect_trace = true) -> Dict
 
 Config-driven entry point: load the forecast run's results, run the (scoped)
 reference-day matching per `bc.matching`, shift per `bc.shift`, and return the
-whole-horizon basecase dict (`:netinput_ac`, `:lineflows`).
+whole-horizon basecase dict (`:netinput_ac`, `:lineflows` — plus `:trace` by
+default, see the `collect_trace` section of the assembly method).
 
 Validates that the source results are usable (non-empty parameters, identical
 node set) before building.
 """
-function build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters)
+function build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters;
+                               collect_trace::Bool = true)
     ref = _load_refday_source(bc)
     cfg = bc.matching
 
@@ -559,5 +663,6 @@ function build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters)
 
     return build_refday_basecase(ref, matches, bc.shift;
                                  res_tags = cfg.res_tags, scope = cfg.scope,
-                                 fallback_matches = fallback)
+                                 fallback_matches = fallback,
+                                 collect_trace = collect_trace)
 end

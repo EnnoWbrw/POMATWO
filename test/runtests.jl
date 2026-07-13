@@ -169,5 +169,6 @@ end
     test_custom_component()
     test_storage_boundary()
     test_refday_basecase()
+    test_refday_trace_e2e()
 end
  

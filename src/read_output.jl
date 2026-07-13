@@ -49,6 +49,9 @@ The constructor can be called by providing the directory that contains the resul
 - `NodalMarketBalance::DataFrame`: Market balance data at the nodal level.
 - `NodalMarketRedispBalance::DataFrame`: Redispatch-adjusted nodal market balance.
 - `FBMC_INF::DataFrame`: FBMC infeasibility slack values per CNE line and time period.
+- `REFDAY_MATCH::DataFrame`: Reference-day basecase trace — per (group, target_time) the matched reference time, cluster metadata (may be `missing` where a join found no counterpart) and whether the global fallback match was used. Empty for runs without a [`ReferenceDayBasecase`](@ref).
+- `REFDAY_GROUPS::DataFrame`: Reference-day basecase trace — group → node membership of the matching scope (join with `REFDAY_MATCH` on `:group` for per-node reference times, see [`refday_reference_times`](@ref)). Loaded from the scenario root, not the subrun folders.
+- `REFDAY_SHIFT::DataFrame`: Reference-day basecase trace — sparse per (Time, node, component) net-injection deltas applied by the shift (components `RES_prestep`, `RES`, `conv`, `load`, `NP`, `unabsorbed`; for `load` the actual load change is `-delta`).
 
 # Constructor
 ```julia
@@ -82,6 +85,9 @@ struct DataFiles
     NodalMarketBalance::DataFrame
     NodalMarketRedispBalance::DataFrame
     FBMC_INF::DataFrame
+    REFDAY_MATCH::DataFrame
+    REFDAY_GROUPS::DataFrame
+    REFDAY_SHIFT::DataFrame
 
     function DataFiles(dir;type="")
         if !(type in ["", "2DA"])
@@ -94,10 +100,19 @@ struct DataFiles
         self = Dict{Symbol,DataFrame}()
         fields = fieldnames_excl(DataFiles, [:params])
 
+        # tables stored once at the scenario root instead of per subrun folder
+        root_tables = (:REFDAY_GROUPS,)
+
         for name in fields
 
             table_files = String[]
             sname = string(name)
+
+            if name in root_tables
+                file = joinpath(dir, "$sname.arrow")
+                self[name] = isfile(file) ? load_arrow_unlocked([file]) : DataFrame()
+                continue
+            end
 
             for folder in subrun_folders
                 file = joinpath(folder, "$type$sname.arrow")
@@ -174,6 +189,21 @@ function load_arrow_unlocked(files::Vector{String})
 
     # Combine after all files are detached
     return isempty(dfs) ? DataFrame() : vcat(dfs...; cols=:union)
+end
+
+"""
+    refday_reference_times(results::DataFiles) -> DataFrame
+
+Per-(node, target_time) reference times of a reference-day basecase run:
+`REFDAY_GROUPS ⋈ REFDAY_MATCH` on `:group`. Empty (with a warning) when the
+results carry no reference-day trace.
+"""
+function refday_reference_times(results::DataFiles)
+    if isempty(results.REFDAY_GROUPS) || isempty(results.REFDAY_MATCH)
+        @warn "refday_reference_times: results carry no reference-day trace (not a ReferenceDayBasecase run?)."
+        return DataFrame()
+    end
+    return innerjoin(results.REFDAY_GROUPS, results.REFDAY_MATCH; on = :group)
 end
 
 function fieldnames_excl(type, excl::Vector{Symbol})

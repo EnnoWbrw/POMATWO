@@ -375,6 +375,37 @@ basecase design choice, and a limitation to keep in mind.
   the market; here `minRAM` floored several RAM values (e.g. l1 at 35 = ``0.7\times50``)
   independently of the basecase.
 
+## 10. Traceability
+
+Runs configured with a `ReferenceDayBasecase` persist how the basecase was constructed,
+next to the regular result tables:
+
+| Table | Rows | Location |
+|---|---|---|
+| `REFDAY_MATCH` | one per (group, `target_time`): `matched_time`, `target_cluster`, `matched_cluster`, `cluster_distance`, `fallback::Bool` | each `subrun_*` folder, sliced by `target_time` |
+| `REFDAY_GROUPS` | one per (group, node) — the matching scope's node membership | scenario root (time-independent) |
+| `REFDAY_SHIFT` | sparse, one per (`Time`, node, component) with `delta` = applied net-injection change | each `subrun_*` folder, sliced by `Time` |
+
+Conventions:
+
+- `component ∈ {"RES_prestep", "RES", "conv", "load", "NP", "unabsorbed"}`. `delta` is
+  always the change in **nodal net injection**; for `"load"` the actual load change is
+  `-delta`. `"unabsorbed"` rows (zone label in the `node` column) flag gap remainders the
+  component cascade could not place — nonzero only when `fallback_order` cannot close the
+  gap.
+- `fallback = true` marks hours where a scoped group borrowed the global fallback match;
+  cluster metadata columns can be `missing` where a join found no counterpart.
+
+Everything else is derivable — nothing is stored twice:
+
+- per-node reference time: `REFDAY_GROUPS ⋈ REFDAY_MATCH` on `group`
+  (convenience: [`refday_reference_times`](@ref));
+- basecase injection: `netinput_ac[n, t] = P_source(n, ref(n, t)) + Σ REFDAY_SHIFT deltas(n, t)`,
+  with `P_source` the forecast run's AC net injection (`NETINPUT.ACINJECTION`).
+
+All three tables load automatically via `DataFiles(scen_dir)`; they are empty for runs
+without a reference-day basecase.
+
 ## API reference
 
 ```@docs
@@ -396,6 +427,7 @@ DispOnlyGSK
 match_by_cluster
 match_by_scope
 build_refday_basecase
+refday_reference_times
 calc_fbmc_params
 POMATWO.zone_to_zone_ptdf
 ```

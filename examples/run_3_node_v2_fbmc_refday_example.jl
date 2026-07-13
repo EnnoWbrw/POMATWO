@@ -166,4 +166,13 @@ for res in (:zonal, :nodal)
     println("=== refday market — ", res, " basecase: EXCHANGE ===");   pretty(out.EXCHANGE)
     println("state_sequence: ", state_sequence(setup))  # note: no TwoDayAhead
     check_infeasibility(out)
+
+    # basecase traceability: which reference hour each group borrowed, and the
+    # per-node shift deltas that turned it into the target hour
+    println("\n=== trace: REFDAY_MATCH (group -> reference time) ===")
+    pretty(out.REFDAY_MATCH)
+    println("=== trace: per-node reference times (groups ⋈ match) ===")
+    pretty(refday_reference_times(out))
+    println("=== trace: REFDAY_SHIFT (nonzero injection deltas) ===")
+    pretty(out.REFDAY_SHIFT)
 end

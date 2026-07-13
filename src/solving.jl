@@ -222,7 +222,13 @@ function _prepare_refday_artifacts(mt::ZonalMarket{FlowBased}, mr::ModelRun)
     bc isa ReferenceDayBasecase || return nothing
     src = bc.source isa DataFiles ? "preloaded DataFiles" : bc.source
     @info "Building reference-day FBMC basecase (source: $src)"
-    return build_refday_basecase(bc, mr.params)
+    artifacts = build_refday_basecase(bc, mr.params)
+    # time-independent trace table: written once at the scenario root (like
+    # params.jld2) so DataFiles' subrun vcat does not duplicate its rows
+    haskey(artifacts, :trace) && Arrow.write(
+        joinpath(mkpath(mr.scen_dir), "REFDAY_GROUPS.arrow"),
+        artifacts[:trace][:REFDAY_GROUPS])
+    return artifacts
 end
 
 """
@@ -230,7 +236,9 @@ end
 
 Seed `ctx[:fbmc_params]` for split `T` from precomputed reference-day basecase
 artifacts (no-op when `artifacts === nothing`). Mirrors what
-`postprocess!(::TwoDayAhead)` does for the optimization basecase.
+`postprocess!(::TwoDayAhead)` does for the optimization basecase. Also writes
+the split's slice of the reference-day trace tables into the subrun folder
+(see [`_write_refday_trace`](@ref)).
 """
 function _seed_fbmc!(ctx::Dict{Symbol,Any}, mr::ModelRun, T, artifacts)
     artifacts === nothing && return nothing
@@ -241,6 +249,29 @@ function _seed_fbmc!(ctx::Dict{Symbol,Any}, mr::ModelRun, T, artifacts)
         "TimeHorizon must lie inside the forecast run's time steps.")
     gsk = mr.setup.MarketType.exchange_formulation.GSKStrategy
     ctx[:fbmc_params] = calc_fbmc_params(gsk, mr.params, artifacts, T)
+    _write_refday_trace(mr, T, artifacts)
+    return nothing
+end
+
+"""
+    _write_refday_trace(mr::ModelRun, T, artifacts)
+
+Write the reference-day trace tables sliced to split `T` as Arrow files into
+the split's subrun folder (`REFDAY_MATCH`, `REFDAY_SHIFT`; the time-independent
+`REFDAY_GROUPS` lives at the scenario root). No-op when the artifacts carry no
+`:trace`. Thread-safe under parallel splits: each split writes only into its
+own folder and the shared trace frames are never mutated.
+"""
+function _write_refday_trace(mr::ModelRun, T, artifacts)
+    trace = artifacts === nothing ? nothing : get(artifacts, :trace, nothing)
+    trace === nothing && return nothing
+    sr_dir = mkpath(joinpath(mr.scen_dir, "subrun_t$(T[1])-t$(T[end])"))
+    Tset = Set(T)
+    for (name, timecol) in ((:REFDAY_MATCH, :target_time), (:REFDAY_SHIFT, :Time))
+        df = trace[name]
+        isempty(df) || (df = filter(timecol => in(Tset), df))
+        Arrow.write(joinpath(sr_dir, string(name) * ".arrow"), df)
+    end
     return nothing
 end
 

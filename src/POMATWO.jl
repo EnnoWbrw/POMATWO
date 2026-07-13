@@ -136,6 +136,7 @@ export load_data,
     match_by_cluster,
     match_by_scope,
     build_refday_basecase,
+    refday_reference_times,
     calc_fbmc_params
 
 end # module POMATWO
