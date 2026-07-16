@@ -196,20 +196,46 @@ abstract type RedispatchType <: RedispatchSetup end
 
 Redispatch setup using a DC load flow formulation.
 
+The cost fields are activation costs on redispatch volume, not fuel costs: the redispatch
+stage minimizes the priced deviation from the day-ahead schedule. Non-dispatchable plants
+are redispatched in both directions — `res_up_cost` prices the recall of energy that was
+curtailed in the day-ahead (physically available, since `avail * gmax` already caps the
+technical potential), `res_down_cost` prices additional curtailment.
+
 # Fields
 - `DCF`: DC load flow formulation type (e.g., `PhaseAngle`, `PTDF`).
+- `disp_cost`: Cost per MWh of dispatchable up- or downward redispatch. Defaults to `150.0`.
+- `res_up_cost`: Cost per MWh of recalled non-dispatchable generation. Defaults to `1.0`,
+  i.e. near-free (no fuel is burnt), but nonzero so that recall only happens where it
+  actually relieves a network constraint.
+- `res_down_cost`: Cost per MWh of additional non-dispatchable curtailment. Defaults to `150.0`.
+- `sto_cost`: Cost per MWh of storage up- or downward redispatch. Defaults to `150.0`.
 
 # Constructors
 - `DCLF()`: Uses `PhaseAngle` as default.
 - `DCLF(DCF::Type{<:DCLFFormulation})`: User-defined formulation type.
+- Both accept the cost fields as keyword arguments, e.g. `DCLF(PTDF; res_up_cost = 0.0)`.
 """
-struct DCLF{DCF<:DCLFFormulation} <: RedispatchType end
+struct DCLF{DCF<:DCLFFormulation} <: RedispatchType
+    disp_cost::Float64
+    res_up_cost::Float64
+    res_down_cost::Float64
+    sto_cost::Float64
+end
 
 # 1) Null-Argument-Default: PhaseAngle
-DCLF() = DCLF{PhaseAngle}()
+DCLF(; kwargs...) = DCLF(PhaseAngle; kwargs...)
 
 # 2) Typgetriebener Convenience-Konstruktor
-DCLF(::Type{DCF}) where {DCF<:DCLFFormulation} = DCLF{DCF}()
+function DCLF(
+    ::Type{DCF};
+    disp_cost::Real = 150.0,
+    res_up_cost::Real = 1.0,
+    res_down_cost::Real = 150.0,
+    sto_cost::Real = 150.0,
+) where {DCF<:DCLFFormulation}
+    return DCLF{DCF}(disp_cost, res_up_cost, res_down_cost, sto_cost)
+end
 
 """
     NoRedispatch <: RedispatchSetup

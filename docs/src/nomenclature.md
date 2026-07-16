@@ -66,7 +66,7 @@ See [market_model.md](./market_model.md) for the utilization of the Sets, Parame
 ## Flow-Based Market Coupling Symbols
 
 These symbols are used in the flow-based market coupling and reference-day basecase
-methodology (see [Reference-Day Basecase](./refday_methodology.md)).
+methodology.
 
 | Symbol                          | Description                                                                 | Unit |
 |---------------------------------|-----------------------------------------------------------------------------|------|

@@ -102,6 +102,7 @@ struct DataFiles
 
         # tables stored once at the scenario root instead of per subrun folder
         root_tables = (:REFDAY_GROUPS,)
+        fallback_tables = Symbol[]
 
         for name in fields
 
@@ -117,11 +118,14 @@ struct DataFiles
             for folder in subrun_folders
                 file = joinpath(folder, "$type$sname.arrow")
                 isfile(file) && push!(table_files, file)
-                
+
                 # If no regular file found, try with "2DA" prefix (for TwoDayAhead basecase results)
                 if !isfile(file)
                     file_2da = joinpath(folder, "2DA" * "$sname.arrow")
-                    isfile(file_2da) && push!(table_files, file_2da)
+                    if isfile(file_2da)
+                        push!(table_files, file_2da)
+                        push!(fallback_tables, name)
+                    end
                 end
             end
 
@@ -131,6 +135,13 @@ struct DataFiles
                 self[name] = DataFrame()
             end
         end
+
+        # the 2DA fallback loads tables from a different MarketState (TwoDayAhead)
+        # than requested — say so instead of silently mixing states downstream
+        isempty(fallback_tables) || @warn(
+            "DataFiles: table(s) $(sort(unique(fallback_tables))) not found with prefix " *
+            "'$type' in $dir; loaded the 2DA-prefixed (TwoDayAhead state) files instead. " *
+            "Do not mix these with tables from other states when computing balances.")
 
         values = [self[field] for field in fields]
 

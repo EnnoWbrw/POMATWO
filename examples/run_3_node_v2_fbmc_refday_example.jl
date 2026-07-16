@@ -1,15 +1,14 @@
 # =============================================================================
-# Reference-Day / Basecase methodology — worked example (companion to the docs)
+# Reference-Day / Basecase methodology — worked example
 #
-# This script is the executable companion to the documentation page
-# "Reference-Day Basecase" (docs/src/refday_methodology.md). It runs, on the small
-# 3-node/2-zone `test_data_3_nodes_v2_fbmc` system, every sub-step the doc derives
-# "on paper" and prints the model's own result next to it, so the two can be
+# This script walks the reference-day / FBMC-basecase pipeline on the small
+# 3-node/2-zone `test_data_3_nodes_v2_fbmc` system, deriving every sub-step
+# "on paper" and printing the model's own result next to it, so the two can be
 # compared line by line.
 #
-# Run it top to bottom (needs POMATWO + a solver, here HiGHS) and follow along with
-# the doc — no copy-pasting numbers required. Section headers below map 1:1 to the
-# numbered sections of the doc page.
+# Run it top to bottom (needs POMATWO + a solver, here HiGHS). The numbered
+# section headers below group the pipeline stages (matching, shift/redistribution,
+# F0/RAM, market clearing).
 # =============================================================================
 using POMATWO
 using HiGHS

@@ -238,7 +238,7 @@ Seed `ctx[:fbmc_params]` for split `T` from precomputed reference-day basecase
 artifacts (no-op when `artifacts === nothing`). Mirrors what
 `postprocess!(::TwoDayAhead)` does for the optimization basecase. Also writes
 the split's slice of the reference-day trace tables into the subrun folder
-(see [`_write_refday_trace`](@ref)).
+(see `_write_refday_trace`).
 """
 function _seed_fbmc!(ctx::Dict{Symbol,Any}, mr::ModelRun, T, artifacts)
     artifacts === nothing && return nothing

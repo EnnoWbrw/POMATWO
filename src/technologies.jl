@@ -75,18 +75,23 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
     @variable(m, 0 <= CU[p = NDISP, t = T] <= avail[p][t] * gmax[p])
     @expression(m, FEEDIN[p = NDISP, t = T], avail[p][t] * gmax[p] - CU[p, t])
 
-    @objective(m, Min, 50 * sum(CU[p, t] for p in NDISP, t in T))
+    # `@objective` REPLACES the node objective, it does not add to it. Accumulate every cost
+    # term into `obj` and set the objective exactly once, at the end of the builder.
+    # NDISP may be empty, so accumulate term by term rather than with `sum` — outside a JuMP
+    # macro, `sum` over an empty collection throws.
+    obj = AffExpr()
+    for p in NDISP, t in T
+        add_to_expression!(obj, 50.0, CU[p, t])
+    end
 
     if !isempty(historical_generation)
         fueltypes_historical_ndisp =
             intersect(mr.modelrun.params.nondispatchable, keys(historical_generation))
 
         @variable(m, HISTORICAL_INF[ft = fueltypes_historical_ndisp, t = T] >= 0)
-        @objective(
-            m,
-            Min,
-            1000 * sum(HISTORICAL_INF[ft, t] for ft in fueltypes_historical_ndisp, t in T)
-        )
+        for ft in fueltypes_historical_ndisp, t in T
+            add_to_expression!(obj, 1000.0, HISTORICAL_INF[ft, t])
+        end
 
         for ft in fueltypes_historical_ndisp
             generators = filter(x -> ft == mr.modelrun.params.plant_type[x], NDISP)
@@ -104,11 +109,9 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
             intersect(mr.modelrun.params.nondispatchable, keys(min_generation))
 
         @variable(m, MINGEN_INF[ft = fueltypes_mingen_ndisp, t = T] >= 0)
-        @objective(
-            m,
-            Min,
-            1000 * sum(MINGEN_INF[ft, t] for ft in fueltypes_mingen_ndisp, t in T)
-        )
+        for ft in fueltypes_mingen_ndisp, t in T
+            add_to_expression!(obj, 1000.0, MINGEN_INF[ft, t])
+        end
 
         for ft in fueltypes_mingen_ndisp
             generators = filter(x -> ft == mr.modelrun.params.plant_type[x], NDISP)
@@ -120,6 +123,8 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
             )
         end
     end
+
+    @objective(m, Min, obj)
 
     df_gen(mr.results)
 
@@ -282,7 +287,7 @@ function add_disp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <
     @unpack gmax, mc, avail = mr.modelrun.params
     m = mr.disp
 
-    redispatch_cost = 150
+    redispatch_cost = mr.modelrun.setup.RedispatchSetup.disp_cost
     g = mr.market_state.da_market_result[:disp_generation]
 
     # generation variables
@@ -321,6 +326,12 @@ end
 Add non-dispatchable generators to the model for Redispatch market.
 Defines variables, objective, and constraints for redispatch non-dispatchable generation.
 Updates results with redispatch data.
+
+Non-dispatchables are redispatched in both directions: `GEN_UP` recalls generation that was
+curtailed in the day-ahead (bounded by that curtailment, so it can never exceed the
+available potential `avail * gmax`), `GEN_DOWN` curtails further. Prosumer plants are
+exempt: they represent aggregated household-scale capacity, not TSO-dispatchable assets, and
+their day-ahead behaviour is frozen (see `add_prosumer` for `Redispatch`).
 """
 function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:ProsumerSetup, RD <:RedispatchSetup,MS<:Redispatch}
     T = mr.market_state.Time
@@ -328,14 +339,35 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
     @unpack gmax, avail = mr.modelrun.params
     m = mr.ndisp
 
-    #NDISP = setdiff(NDISP, PRS)
+    if !(mr.modelrun.setup.ProsumerSetup isa NoProsumer)
+        NDISP = setdiff(NDISP, PRS)
+    end
+
+    res_up_cost = mr.modelrun.setup.RedispatchSetup.res_up_cost
+    res_down_cost = mr.modelrun.setup.RedispatchSetup.res_down_cost
 
     cu = mr.market_state.da_market_result[:ndisp_cu]
+    feedin_da = Dict((p, t) => avail[p][t] * gmax[p] - cu[p, t] for p in NDISP, t in T)
 
     # generation variables
-    @variable(m, cu[p, t] <= CU[p = NDISP, t = T] <= avail[p][t] * gmax[p])
-    @expression(m, FEEDIN_REDISP[p = NDISP, t = T], avail[p][t] * gmax[p] - CU[p, t])
-    @objective(m, Min, 150 * sum(CU[p, t] - cu[p, t] for p in NDISP, t in T))
+    @variable(m, 0 <= GEN_UP[p = NDISP, t = T] <= cu[p, t])
+    @variable(m, 0 <= GEN_DOWN[p = NDISP, t = T] <= feedin_da[p, t])
+
+    @expression(
+        m,
+        FEEDIN_REDISP[p = NDISP, t = T],
+        feedin_da[p, t] + GEN_UP[p, t] - GEN_DOWN[p, t]
+    )
+    @expression(m, CU[p = NDISP, t = T], cu[p, t] - GEN_UP[p, t] + GEN_DOWN[p, t])
+
+    @objective(
+        m,
+        Min,
+        sum(
+            res_up_cost * GEN_UP[p, t] + res_down_cost * GEN_DOWN[p, t] for p in NDISP,
+            t in T
+        )
+    )
 
     df_redispatch(mr.results)
 
@@ -344,14 +376,14 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
         index = repeat(NDISP, inner = length(T)),
         Time = repeat(collect(T), outer = length(NDISP)),
         GEN_REDISP = [FEEDIN_REDISP[p, t] for p in NDISP for t in T],
-        GEN_UP = zeros(Int, nrows), #todo
-        GEN_DOWN = zeros(Int, nrows),
-        gen = [avail[p][t] * gmax[p] - cu[p, t] for p in NDISP for t in T],
+        GEN_UP = [GEN_UP[p, t] for p in NDISP for t in T],
+        GEN_DOWN = [GEN_DOWN[p, t] for p in NDISP for t in T],
+        gen = [feedin_da[p, t] for p in NDISP for t in T],
         CU_REDISP = [CU[p, t] for p in NDISP for t in T],
         CHARGE_REDISP = zeros(Int, nrows),
         CHARGE_UP = zeros(Int, nrows),
         CHARGE_DOWN = zeros(Int, nrows),
-        max_up = zeros(Int, nrows),
+        max_up = [cu[p, t] for p in NDISP for t in T],
     ))
 
     return m
@@ -373,7 +405,7 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
     g = mr.market_state.da_market_result[:sto_generation]
     charge = mr.market_state.da_market_result[:sto_charge]
 
-    redispatch_cost = 150
+    redispatch_cost = mr.modelrun.setup.RedispatchSetup.sto_cost
 
     # storage variables
     @variable(m, 0 <= GEN_UP[s = S, t = T] <= gmax[s] - g[s, t])
@@ -434,7 +466,7 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
         CHARGE_REDISP = [CHARGE_REDISP[s, t] for s in S for t in T],
         CHARGE_UP = [CHARGE_UP[s, t] for s in S for t in T],
         CHARGE_DOWN = [CHARGE_DOWN[s, t] for s in S for t in T],
-        max_up = [gmax_storage[s] - g[s, t] for s in S for t in T],
+        max_up = [gmax[s] - g[s, t] for s in S for t in T],
     ))
 
     return m

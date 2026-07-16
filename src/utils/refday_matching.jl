@@ -95,7 +95,7 @@ function filter_powerplants(df; plant_indicies::Union{Vector{String},Nothing} = 
     return df
 end
 
-"In-place variant of [`filter_powerplants`](@ref)."
+"In-place variant of `filter_powerplants`."
 function filter_powerplants!(df; plant_indicies::Union{Vector{String},Nothing} = nothing,
                              type_in_name::Union{Vector{String},Nothing} = nothing,
                              type_in_planttype::Union{Vector{String},Nothing} = nothing)
@@ -171,7 +171,7 @@ end
 """
 Weighted L1 distance between two pre-aggregated cluster profile slices.
 Missing keys in the outer join count as zero. Weights are looked up per
-value/statistic column, optionally refined per plant type (see [`refday_weights`](@ref)).
+value/statistic column, optionally refined per plant type (see `refday_weights`).
 """
 function profile_distance(p1, p2, valuecols, weights, valuemethods)
     keycol_names = names(p1)[2:end - length(valuecols) * length(valuemethods)]
@@ -197,7 +197,7 @@ end
 """
     refday_weights(weights, col, plant_type)
 
-Distance-weight lookup for [`profile_distance`](@ref); default 1.0.
+Distance-weight lookup for `profile_distance`; default 1.0.
 - `Dict{Symbol,Float64}`: weight per value/statistic column.
 - `Dict{Tuple{Symbol,String},Float64}`: weight per (column, plant type) pair.
 """
@@ -392,7 +392,7 @@ end
 Resolve, for every (node, target_time), the reference time to borrow from: the
 node's group match if available, else the global `fallback_matches` entry for
 that hour. Target hours where any node stays unresolved are returned in
-`skipped`. Node-level expansion of [`resolve_group_times`](@ref).
+`skipped`. Node-level expansion of `resolve_group_times`.
 """
 function resolve_ref_times(scoped_matches, scope::MatchScope, params::Parameters, tgt_times;
                            fallback_matches = nothing)

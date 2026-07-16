@@ -216,24 +216,46 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     lineflows    = TwoDayAhead_results[:lineflows]
     netinput_ac  = TwoDayAhead_results[:netinput_ac]
 
-    # Net position per zone per timestep: NP[z, t] = Σ_n∈z netinput[n, t]
+    # Net position (export-positive) per zone per timestep:
+    # NP[z, t] = -Σ_n∈z netinput_ac[n, t], since netinput_ac follows the
+    # model's import-positive ACINJECTION convention (= load + charge - gen).
     zones = params.sets.Z
     NP = Dict{Tuple{String, Int}, Float64}()
     for z in zones, t in T
         NP[z, t] = -sum(netinput_ac[n, t] for n in params.nodes_in_zone[z])
     end
 
-    # Basecase flow f0[l, t]: observed flow minus the part explained by zonal net positions
-    # f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]
-    # (_ptdfz handles both static l×z and time-dependent l×z×t PTDFz matrices)
+    # Basecase reference flow f0[l, t]: the intercept of the linearized flow equation,
+    # i.e. the flow that remains once the commercial exchange within the flow-based CCR
+    # is removed. NOTE: f0 is NOT a physical flow and may legitimately exceed the line
+    # rating (it is the y-intercept of a linearization, not the flow at zero net
+    # position). Do not test |f0| ≤ f_max.
+    #
+    # SIGN CONVENTION — do not "simplify" the leading minus on lineflows:
+    #   • lineflows[l,t] = PTDFn · netinput_ac is IMPORT-positive (netinput_ac =
+    #     load + charge - gen), so it equals the NEGATIVE of the physical feed-in flow.
+    #   • NP[z,t] = -Σ netinput_ac is EXPORT-positive; Σ_z PTDFz[l,z]·NP[z,t] is the
+    #     feed-in / export-positive commercial flow — the SAME convention the day-ahead
+    #     FBMC constraint bounds (it uses Fz = -Σ PTDFz·NP_market, see add_exchange in
+    #     technologies.jl). lineflows and Σ PTDFz·NP therefore have OPPOSITE signs.
+    #   • f0 must reproduce the basecase flow at the basecase net position:
+    #        f0 + Σ_z PTDFz·NP  ==  (physical flow) == -lineflow
+    #        ⇒  f0 = -lineflow - Σ_z PTDFz·NP.
+    # Getting the leading sign wrong double-counts the commercial exchange, inflating RAM
+    # so the FBMC domain silently never binds. Nothing errors. Guarded by the
+    # "reference-reproduction invariant" testset in test/test_cases/test_zonal_ptdf.jl.
+    # (_ptdfz handles both static l×z and time-dependent l×z×t PTDFz matrices.)
     l0 = Dict{Tuple{String, Int}, Float64}()
     for l in cne_lines, t in T
-        l0[l, t] = lineflows[l, t] - sum(_ptdfz(PTDFz, l, z, t) * NP[z, t] for z in zones)
+        l0[l, t] = -lineflows[l, t] - sum(_ptdfz(PTDFz, l, z, t) * NP[z, t] for z in zones)
     end
-    # Steps to include non flow based zones (which is not currently accounted for):
+    # Steps to include non flow based zones (which is not currently accounted for).
+    # ENTSO-E notation below writes Fref for the reference flow; in THIS model that is
+    # -lineflows (lineflows is import-positive, see the sign note above), so the model
+    # form uses a leading minus that the raw ENTSO-E symbols do not show:
     #𝐹⃗0FB -> flow per CNEC in the situation without commercial exchanges within the flow based CCR
     #𝐹⃗0FB = 𝐹⃗𝑟𝑒𝑓 − 𝐏𝐓𝐃𝐅𝒇 𝑁𝑃⃗𝑟𝑒𝑓FB
-    #𝐹⃗0𝑎𝑙𝑙 = 𝐹𝑟𝑒𝑓 − 𝐏𝐓𝐃𝐅𝒂𝒍𝒍 𝑁𝑃⃗𝑟𝑒𝑓𝑎𝑙𝑙 
+    #𝐹⃗0𝑎𝑙𝑙 = 𝐹𝑟𝑒𝑓 − 𝐏𝐓𝐃𝐅𝒂𝒍𝒍 𝑁𝑃⃗𝑟𝑒𝑓𝑎𝑙𝑙
     #𝐹⃗𝑢𝑎𝑓 = 𝐹⃗0FB − 𝐹⃗0𝑎𝑙𝑙
     #𝐴𝑀𝑅 = 𝑚𝑎𝑥 (𝑅𝑎𝑚𝑟 ∙ 𝐹𝑚𝑎𝑥 − 𝐹𝑢𝑎𝑓 − (𝐹𝑚𝑎𝑥 − 𝐹𝑅𝑀 − 𝐹0FB),
     #              0.2 ∙ 𝐹𝑚𝑎𝑥 − (𝐹𝑚𝑎𝑥 − 𝐹𝑅𝑀 − 𝐹0FB), 0)

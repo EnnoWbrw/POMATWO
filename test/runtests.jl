@@ -160,6 +160,8 @@ end
     include(joinpath("test_cases", "test_custom_component.jl"))
     include(joinpath("test_cases", "test_storage_boundary.jl"))
     include(joinpath("test_cases", "test_refday_basecase.jl"))
+    include(joinpath("test_cases", "test_redispatch.jl"))
+    include(joinpath("test_cases", "test_objectives.jl"))
     test_data_load()
     test_model_creation()
     test_data_reporting()
@@ -170,5 +172,7 @@ end
     test_storage_boundary()
     test_refday_basecase()
     test_refday_trace_e2e()
+    test_redispatch()
+    test_objectives()
 end
  

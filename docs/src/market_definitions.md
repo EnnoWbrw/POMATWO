@@ -91,3 +91,35 @@ ProsumerSetup
 NoProsumer
 ProsumerOptimization
 ```
+
+# Flow-Based Basecase
+
+Flow-based market coupling needs a *basecase* — the reference nodal injections from
+which the zonal PTDF and the Remaining Available Margins (RAM) are derived. POMATWO
+either solves it (`OptimizationBasecase`) or constructs it from a matched reference day
+(`ReferenceDayBasecase`), warping the reference injections toward each zone's target net
+position with a `ShiftMethod` (`ShareShift`) and a redistribution key (`RedistKey`).
+
+```@docs
+BasecaseMethod
+OptimizationBasecase
+ReferenceDayBasecase
+MatchingConfig
+MatchScope
+GlobalMatchScope
+ZonalMatchScope
+AreaMatchScope
+ShiftMethod
+ShareShift
+RedistKey
+GSKRedist
+RefPropRedist
+LoadPropRedist
+DispOnlyGSK
+match_by_cluster
+match_by_scope
+build_refday_basecase
+refday_reference_times
+calc_fbmc_params
+POMATWO.zone_to_zone_ptdf
+```

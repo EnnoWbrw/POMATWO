@@ -83,6 +83,18 @@ function test_refday_basecase()
         @test state_sequence(ModelSetup(TimeHorizon = TimeHorizon(stop = 24))) == [DayAhead]
     end
 
+    @testset "source_type -> RefdaySourceState mapping" begin
+        @test POMATWO._source_state("")       isa POMATWO.DayAheadSource
+        @test POMATWO._source_state("DA")     isa POMATWO.DayAheadSource
+        @test POMATWO._source_state("2DA")    isa POMATWO.TwoDayAheadSource
+        @test POMATWO._source_state("REDISP") isa POMATWO.RedispatchSource
+        @test_throws ErrorException POMATWO._source_state("bogus")
+        # table prefix DataFiles needs per state
+        @test POMATWO._datafiles_type(POMATWO.TwoDayAheadSource()) == "2DA"
+        @test POMATWO._datafiles_type(POMATWO.DayAheadSource())    == ""
+        @test POMATWO._datafiles_type(POMATWO.RedispatchSource())  == ""
+    end
+
     @testset "GSKRedist: time-dependent strategy uses per-timestep GLSK weights" begin
         # GenLoadGSK weights from the forecast run's nodal data at t:
         # gen = P + load ; weight = |gen| + |load|
@@ -326,7 +338,9 @@ function test_refday_trace_e2e()
             end
             @test isfile(joinpath(scen, "REFDAY_GROUPS.arrow"))
 
-            # in-memory trace: reconstruction identity against the built basecase
+            # in-memory trace: reconstruction identity against the built basecase.
+            # ACINJECTION (and :netinput_ac) are import-positive; trace deltas are
+            # export-positive, hence: netinput_ac = ACINJECTION_src(ref) − Σ deltas.
             base = build_refday_basecase(bc, params)
             @test haskey(base, :trace)
             trace = base[:trace]
@@ -337,7 +351,7 @@ function test_refday_trace_e2e()
             shifts = trace[:REFDAY_SHIFT]
             for n in params.sets.N, t in 1:4
                 d = sum(shifts.delta[(shifts.node .== n) .& (shifts.Time .== t)]; init = 0.0)
-                @test isapprox(base[:netinput_ac][n, t], P_src[(n, refmap[(n, t)])] + d;
+                @test isapprox(base[:netinput_ac][n, t], P_src[(n, refmap[(n, t)])] - d;
                                atol = 1e-6)
             end
             # no trace when disabled
@@ -358,6 +372,76 @@ function test_refday_trace_e2e()
             @test isempty(fc_out.REFDAY_MATCH) && isempty(fc_out.REFDAY_GROUPS) &&
                   isempty(fc_out.REFDAY_SHIFT)
             @test isempty(@test_logs (:warn, r"no reference-day trace") refday_reference_times(fc_out))
+
+            # ── DayAhead source: zonal DA persists no nodal tables → nodal ────
+            # injections computed from plant-level GEN/CHARGE + nodal_load.
+            bc_da = ReferenceDayBasecase(
+                source = joinpath(tmpdir, "forecast"), source_type = "",
+                matching = MatchingConfig(cluster_size = 2, lookback = 1,
+                                          scope = ZonalMatchScope()),
+                shift = ShareShift(β_conv = 0.5, β_load = 0.5, res_prestep = true,
+                                   redist = GSKRedist(DispOnlyGSK())),
+            )
+            base_da = build_refday_basecase(bc_da, params)
+            src_da = DataFiles(joinpath(tmpdir, "forecast"))
+            # import-positive DA baseline from plant-level tables: load + charge − gen
+            imp = Dict{Tuple{String,Int},Float64}()
+            for n in params.sets.N, t in 1:4
+                load = haskey(params.nodal_load, n) ? Float64(params.nodal_load[n][t]) : 0.0
+                imp[(n, t)] = load
+            end
+            for r in eachrow(src_da.GEN)
+                imp[(params.plant2node[r.index], Int(r.Time))] -= Float64(r.GEN)
+            end
+            for r in eachrow(src_da.CHARGE)
+                imp[(params.plant2node[r.index], Int(r.Time))] += Float64(r.CHARGE)
+            end
+            trace_da = base_da[:trace]
+            reft_da = innerjoin(trace_da[:REFDAY_GROUPS], trace_da[:REFDAY_MATCH]; on = :group)
+            refmap_da = Dict((r.node, r.target_time) => r.matched_time for r in eachrow(reft_da))
+            shifts_da = trace_da[:REFDAY_SHIFT]
+            for n in params.sets.N, t in 1:4
+                d = sum(shifts_da.delta[(shifts_da.node .== n) .& (shifts_da.Time .== t)];
+                        init = 0.0)
+                @test isapprox(base_da[:netinput_ac][n, t],
+                               imp[(n, refmap_da[(n, t)])] - d; atol = 1e-6)
+            end
+
+            # ── Redispatch source ─────────────────────────────────────────────
+            # forecast run has no redispatch results → explicit error
+            bc_rd_bad = ReferenceDayBasecase(
+                source = joinpath(tmpdir, "forecast"), source_type = "REDISP",
+                matching = bc_da.matching, shift = bc_da.shift)
+            @test_throws ErrorException build_refday_basecase(bc_rd_bad, params)
+
+            # run WITH redispatch: plain NETINPUT comes from the Redispatch DCLF
+            setup_rd2 = ModelSetup(
+                TimeHorizon = TimeHorizon(stop = 4),
+                MarketType  = ZonalMarket(FlowBased(DispOnlyGSK())),
+                RedispatchSetup = DCLF(),
+            )
+            mr_rd2 = ModelRun(params, setup_rd2, solver;
+                resultdir = tmpdir, scenarioname = "forecast_redisp", overwrite = true)
+            POMATWO.run(mr_rd2)
+
+            bc_rd = ReferenceDayBasecase(
+                source = joinpath(tmpdir, "forecast_redisp"), source_type = "REDISP",
+                matching = bc_da.matching, shift = bc_da.shift)
+            base_rd = build_refday_basecase(bc_rd, params)
+            src_rd = DataFiles(joinpath(tmpdir, "forecast_redisp"))
+            @test !isempty(src_rd.REDISP)
+            P_rd = Dict((r.index, r.Time) => Float64(r.ACINJECTION)
+                        for r in eachrow(src_rd.NETINPUT))
+            trace_rd = base_rd[:trace]
+            reft_rd = innerjoin(trace_rd[:REFDAY_GROUPS], trace_rd[:REFDAY_MATCH]; on = :group)
+            refmap_rd = Dict((r.node, r.target_time) => r.matched_time for r in eachrow(reft_rd))
+            shifts_rd = trace_rd[:REFDAY_SHIFT]
+            for n in params.sets.N, t in 1:4
+                d = sum(shifts_rd.delta[(shifts_rd.node .== n) .& (shifts_rd.Time .== t)];
+                        init = 0.0)
+                @test isapprox(base_rd[:netinput_ac][n, t],
+                               P_rd[(n, refmap_rd[(n, t)])] - d; atol = 1e-6)
+            end
         end
     end
 end

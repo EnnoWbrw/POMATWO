@@ -461,6 +461,143 @@ function test_zonal_ptdf()
         end
     end
 
+    @testset "calc_ram: reference-flow F0 sign coherence (reproduction invariant)" begin
+        # This is the sign test the 70%-rule testset above cannot make: it uses a
+        # GENUINE DC power flow (lineflow = PTDFn·netinput) so the sign relationship
+        # between the two f0 terms is real, and checks the defining property of the
+        # linearization intercept F0:
+        #     F0 + Σ_z PTDFz[l,z]·NP_export[z]  ==  physical flow  == -lineflow
+        # with NP_export = -netinput_ac. The buggy code (f0 = +lineflow - ΣPTDFz·NP)
+        # double-counts the commercial exchange and fails this; the fix passes it.
+        #
+        # 4 nodes, 2 zones (2 nodes each), 2 lines. Flat GSK ⇒ PTDFz[l,z] = mean of the
+        # zone's nodal PTDF. L1 carries loop flow (|F0| > f_max, which is LEGITIMATE —
+        # F0 is a linearization intercept, not a physical flow, so |F0| ≤ f_max is NOT
+        # asserted). L2 is purely commercial ⇒ F0 = 0.
+        nodes = ["N1", "N2", "N3", "N4"]
+        zones = ["Z1", "Z2"]
+        lines = ["L1", "L2"]
+        T = 1:1
+        node_zone_map = Dict("N1"=>"Z1", "N2"=>"Z1", "N3"=>"Z2", "N4"=>"Z2")
+
+        sets = POMATWO.Sets(
+            N=nodes, L=lines, Z=zones, P=String[], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[]
+        )
+        params = POMATWO.Parameters(
+            sets=sets,
+            node2zone=node_zone_map,
+            nodes_in_zone=Dict("Z1"=>["N1","N2"], "Z2"=>["N3","N4"]),
+            acline_capacity=Dict("L1"=>8.0, "L2"=>100.0),   # tiny L1 cap: |F0|>f_max
+            cne=copy(lines)
+        )
+
+        # Nodal PTDF (l×n) and the flat-GSK zonal PTDF (l×z = zonal mean).
+        PTDFn_data = [ 0.4  0.1  -0.2  -0.3;    # L1 → loop flow (nodes differ from zone mean)
+                       0.3  0.3  -0.3  -0.3 ]   # L2 → zone-uniform ⇒ purely commercial
+        PTDFn = JuMP.Containers.DenseAxisArray(PTDFn_data, lines, nodes)
+        PTDFz_data = [ 0.25 -0.25;   # L1: mean(0.4,0.1)=0.25 ; mean(-0.2,-0.3)=-0.25
+                       0.30 -0.30 ]  # L2: mean(0.3,0.3)=0.30 ; mean(-0.3,-0.3)=-0.30
+        PTDFz = JuMP.Containers.DenseAxisArray(PTDFz_data, lines, zones)
+        PTDFzz = POMATWO.zone_to_zone_ptdf(PTDFz; exclude_self=true)
+
+        # Import-positive nodal injections (load+charge-gen); balanced. NP is export-positive.
+        netinput = [40.0; -10.0; -5.0; -25.0]   # N1..N4
+        netinput_ac = JuMP.Containers.DenseAxisArray(reshape(netinput, 4, 1), nodes, collect(T))
+        NP = Dict("Z1" => -(40.0 - 10.0), "Z2" => -(-5.0 - 25.0))   # -30, +30
+
+        # Genuine DC flow: lineflow = PTDFn·netinput (this is what makes the sign real).
+        lineflow = PTDFn_data * netinput
+        @test lineflow ≈ [23.5, 18.0]
+        lineflows = JuMP.Containers.DenseAxisArray(reshape(lineflow, 2, 1), lines, collect(T))
+        basecase = Dict(:lineflows => lineflows, :netinput_ac => netinput_ac)
+
+        minRAM, FRM = 0.7, 0.1
+        ram = POMATWO.calc_ram(params, basecase, PTDFz, PTDFzz, PTDFn, T; minRAM=minRAM, FRM=FRM)
+
+        for (i, l) in enumerate(lines)
+            fmax       = params.acline_capacity[l]
+            commercial = sum(PTDFz[l, z] * NP[z] for z in zones)     # Σ PTDFz·NP_export
+            f0_correct = -lineflow[i] - commercial                   
+            f0_buggy   =  lineflow[i] - commercial                   
+
+            # Recover the f0 the model actually used from RAM_pos. init_pos is not
+            # floored here (checked below), so RAM_pos = f_max - f0 - FRM·f_max.
+            init_pos_floor = minRAM * fmax
+            @test fmax - f0_correct - FRM * fmax ≥ init_pos_floor - 1e-9   # AMR inactive on pos
+            f0_model = fmax - FRM * fmax - ram[l, T[1], "pos"]
+
+            @test f0_model ≈ f0_correct atol=1e-9        # model uses the corrected sign
+            @test !isapprox(f0_model, f0_buggy; atol=1e-6)   # and NOT the buggy sign
+
+            # Reproduction invariant (f_max-free): linearization passes through the
+            # basecase net position and reproduces the basecase physical flow.
+            @test f0_model + commercial ≈ -lineflow[i] atol=1e-9
+        end
+
+        # L1: loop flow — F0 = -23.5 - (-15) = -8.5, magnitude 8.5 > f_max = 8 (legit).
+        @test (8.0 - 0.1*8.0 - ram["L1", 1, "pos"]) ≈ -8.5 atol=1e-9
+        @test ram["L1", 1, "pos"] ≈ 15.7 atol=1e-9      # = 8 - (-8.5) - 0.8, NOT clamped to f_max
+        @test ram["L1", 1, "neg"] ≈ -5.6 atol=1e-9      # floored to -minRAM·f_max
+        # L2: purely commercial — F0 = -18 - (-18) = 0 ⇒ symmetric RAM = ±(f_max - FRM·f_max).
+        @test (100.0 - 10.0 - ram["L2", 1, "pos"]) ≈ 0.0 atol=1e-9
+        @test ram["L2", 1, "pos"] ≈ 90.0 atol=1e-9
+        @test ram["L2", 1, "neg"] ≈ -90.0 atol=1e-9
+    end
+
+    @testset "calc_ram: AMR floor active vs inactive (both directions)" begin
+        # Isolate the minRAM-floor (AMR) logic with exact hand values. One node per
+        # zone, shared PTDFz and netinput ⇒ Σ PTDFz·NP = -20 on every line; per-line
+        # lineflow sets f0 = -lineflow - (-20) = 20 - lineflow. f_max = 100, FRM = 0.1,
+        # minRAM = 0.7 ⇒ floor = ±70.
+        #   L_A: f0 =   0  → init_pos=90, init_neg=-90  → AMR inactive both sides
+        #   L_B: f0 =  40  → init_pos=50 (<70) floored, init_neg=-130 inactive
+        #   L_C: f0 = -40  → init_pos=130 inactive,     init_neg=-50 (>-70) floored
+        nodes = ["N1", "N2"]
+        zones = ["Z1", "Z2"]
+        lines = ["L_A", "L_B", "L_C"]
+        T = 1:1
+        node_zone_map = Dict("N1"=>"Z1", "N2"=>"Z2")
+
+        sets = POMATWO.Sets(
+            N=nodes, L=lines, Z=zones, P=String[], S=String[],
+            DC=String[], DISP=String[], NDISP=String[],
+            NTC=Tuple{String,String}[], PRS=String[], PRS_STO=String[]
+        )
+        params = POMATWO.Parameters(
+            sets=sets,
+            node2zone=node_zone_map,
+            nodes_in_zone=Dict("Z1"=>["N1"], "Z2"=>["N2"]),
+            acline_capacity=Dict("L_A"=>100.0, "L_B"=>100.0, "L_C"=>100.0),
+            cne=copy(lines)
+        )
+
+        PTDFz_data = [0.5 -0.5; 0.5 -0.5; 0.5 -0.5]
+        PTDFz = JuMP.Containers.DenseAxisArray(PTDFz_data, lines, zones)
+        PTDFzz = POMATWO.zone_to_zone_ptdf(PTDFz; exclude_self=true)
+        PTDFn = PTDFz   # unused by calc_ram; shape-compatible
+
+        netinput = [20.0; -20.0]   # NP_Z1 = -20, NP_Z2 = +20 ⇒ Σ PTDFz·NP = -20 (all lines)
+        netinput_ac = JuMP.Containers.DenseAxisArray(reshape(netinput, 2, 1), nodes, collect(T))
+        # lineflow chosen per line to hit target f0 = 20 - lineflow: 20→0, -20→40, 60→-40
+        lineflow = [20.0; -20.0; 60.0]
+        lineflows = JuMP.Containers.DenseAxisArray(reshape(lineflow, 3, 1), lines, collect(T))
+        basecase = Dict(:lineflows => lineflows, :netinput_ac => netinput_ac)
+
+        ram = POMATWO.calc_ram(params, basecase, PTDFz, PTDFzz, PTDFn, T; minRAM=0.7, FRM=0.1)
+
+        # L_A: f0=0, AMR inactive both sides (init within [floor, ...]).
+        @test ram["L_A", 1, "pos"] ≈ 90.0 atol=1e-9    # init_pos, NOT the 70 floor
+        @test ram["L_A", 1, "neg"] ≈ -90.0 atol=1e-9   # init_neg, NOT the -70 floor
+        # L_B: f0=40, positive side floored to +70, negative side inactive.
+        @test ram["L_B", 1, "pos"] ≈ 70.0 atol=1e-9    # AMR lifts init_pos=50 up to floor
+        @test ram["L_B", 1, "neg"] ≈ -130.0 atol=1e-9  # init_neg, AMR inactive
+        # L_C: f0=-40, positive side inactive, negative side floored to -70.
+        @test ram["L_C", 1, "pos"] ≈ 130.0 atol=1e-9   # init_pos, AMR inactive
+        @test ram["L_C", 1, "neg"] ≈ -70.0 atol=1e-9   # AMR lifts init_neg=-50 to -floor
+    end
+
     @testset "GSK Strategy: GenLoadGSK trait + static fallback" begin
         @test POMATWO.is_time_dependent(POMATWO.GenLoadGSK())
         @test !POMATWO.is_time_dependent(POMATWO.FlatGSK())
@@ -527,16 +664,17 @@ function test_zonal_ptdf()
         @test collect(axes(G, 2)) == zones
         @test collect(axes(G, 3)) == collect(T)
 
-        # t=1: N1 load=30, gen=20+30=50  → w=80 ; N2 load=10, gen=15 → w=25
-        #      N3 load=0,  gen=-25       → w=|−25|=25
-        @test G["N1", "Z1", 1] ≈ 80 / 105
-        @test G["N2", "Z1", 1] ≈ 25 / 105
+        # netinput_ac is import-positive → gen = load − netinput
+        # t=1: N1 load=30, gen=30−20=10  → w=40 ; N2 load=10, gen=10−5=5 → w=15
+        #      N3 load=0,  gen=0−(−25)=25 → w=25
+        @test G["N1", "Z1", 1] ≈ 40 / 55
+        @test G["N2", "Z1", 1] ≈ 15 / 55
         @test G["N3", "Z2", 1] ≈ 1.0
 
-        # t=2: N1 load=60, gen=-10+60=50 → w=110 ; N2 load=10, gen=25 → w=35
-        #      N3 load=0,  gen=-5        → w=5
-        @test G["N1", "Z1", 2] ≈ 110 / 145
-        @test G["N2", "Z1", 2] ≈ 35 / 145
+        # t=2: N1 load=60, gen=60−(−10)=70 → w=130 ; N2 load=10, gen=10−15=−5 → w=15
+        #      N3 load=0,  gen=0−(−5)=5    → w=5
+        @test G["N1", "Z1", 2] ≈ 130 / 145
+        @test G["N2", "Z1", 2] ≈ 15 / 145
         @test G["N3", "Z2", 2] ≈ 1.0
 
         # GSK differs across timesteps and every zone column sums to 1 per t

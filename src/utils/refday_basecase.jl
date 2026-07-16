@@ -13,9 +13,17 @@
 # clipped to physical headroom; unabsorbed remainder cascades down
 # `fallback_order`, with :NP (unbounded) closing the gap exactly.
 #
-# The nodal injection baseline is the AC-only ACINJECTION column of the
-# NETINPUT result table (DC contributions excluded), matching what `calc_ram`
-# consumes; legacy result sets reconstruct it from the LINEFLOW table.
+# SIGN CONVENTION: the whole shift pipeline (baseline P, shares, bounds,
+# REFDAY_SHIFT trace deltas) works EXPORT-positive (feed-in: positive =
+# gen − load − charge). The persisted NETINPUT/ACINJECTION tables are
+# IMPORT-positive (model convention, = load + charge − gen), so the baseline
+# is negated on entry (`_ac_injection_baseline`) and the assembled basecase is
+# negated back on exit (`build_refday_basecase`) before `calc_ram` /
+# `build_gsk_timeseries` consume it.
+#
+# The nodal injection baseline is the (negated) AC-only ACINJECTION column of
+# the NETINPUT result table (DC contributions excluded); legacy result sets
+# reconstruct it from the LINEFLOW table.
 # ============================================================================
 
 # ---------------------------------------------------------------------------
@@ -149,9 +157,12 @@ day's renewable infeed and zonal net positions.
 # Keyword fields
 - `source::Union{String,DataFiles}`: results directory of the forecast run, or
   a preloaded [`DataFiles`](@ref).
-- `source_type::String = ""`: which result set of the source to read
-  (`""` = regular market result tables, `"2DA"` = TwoDayAhead basecase tables).
-  The chosen set must contain nodal `NETINPUT`/`LINEFLOW`/`GEN` data.
+- `source_type::String = ""`: which MarketState of the source run provides
+  BOTH the matching data and the injection baseline (never mixed):
+  `""`/`"DA"` = day-ahead results (for zonal DA markets the nodal injections
+  are computed from plant-level `GEN`/`CHARGE` and `nodal_load`, since zonal
+  stages persist no nodal tables); `"2DA"` = TwoDayAhead basecase tables;
+  `"REDISP"` = redispatch results. See `_source_state`.
 - `matching::MatchingConfig`: reference-day matching options.
 - `shift::ShiftMethod`: how the reference day is shifted toward the target day.
 
@@ -181,6 +192,13 @@ end
 # Nodal data extraction
 # ---------------------------------------------------------------------------
 
+"Nodal load at (n, t); 0.0 for nodes without a load series or `missing` values."
+function _nodal_load_at(params::Parameters, n, t)
+    haskey(params.nodal_load, n) || return 0.0
+    v = params.nodal_load[n][t]
+    return ismissing(v) ? 0.0 : Float64(v)
+end
+
 function _classify_plant(p, params::Parameters, res_tags)
     p in params.sets.S && return :sto
     pt = get(params.plant_type, p, "")
@@ -188,44 +206,152 @@ function _classify_plant(p, params::Parameters, res_tags)
     return :conv
 end
 
-"""
-    _ac_injection_baseline(results::DataFiles) -> Dict{(node,Time) => Float64}
+# ---------------------------------------------------------------------------
+# Source MarketState selection
+#
+# `ReferenceDayBasecase.source_type` picks WHICH MarketState of the source run
+# provides BOTH the matching data (generation) and the injection baseline —
+# they must never come from different states. The string maps to a dispatch
+# type so future states (e.g. an intraday stage) only need a new subtype plus
+# `_source_gen` / `_source_charge` / `_ac_injection_baseline` methods.
+# ---------------------------------------------------------------------------
 
-AC-only nodal net injection per (node, time). Uses the persisted `ACINJECTION`
-column when present; otherwise reconstructs it from the saved `LINEFLOW` table
-via the incidence convention (line_start = -1, line_end = +1), which is DC-free
-and matches the model's `ACINJECTION` expression.
+"Source MarketState of a [`ReferenceDayBasecase`](@ref); see `_source_state`."
+abstract type RefdaySourceState end
+struct TwoDayAheadSource <: RefdaySourceState end
+struct DayAheadSource    <: RefdaySourceState end
+struct RedispatchSource  <: RefdaySourceState end
+
 """
-function _ac_injection_baseline(results::DataFiles)
-    ni = results.NETINPUT
+    _source_state(source_type::AbstractString) -> RefdaySourceState
+
+Map the `source_type` config string to its dispatch type:
+`"2DA"` → `TwoDayAheadSource` (2DA-prefixed result tables),
+`""`/`"DA"` → `DayAheadSource` (plain day-ahead tables; nodal
+injections are computed from plant-level results when the DA market was
+zonal), `"REDISP"` → `RedispatchSource` (redispatch results).
+"""
+_source_state(source_type::AbstractString) =
+    source_type == "2DA"           ? TwoDayAheadSource() :
+    source_type in ("", "DA")      ? DayAheadSource() :
+    source_type == "REDISP"        ? RedispatchSource() :
+    error("ReferenceDayBasecase: unknown source_type = \"$source_type\". " *
+          "Supported: \"\"/\"DA\" (day-ahead), \"2DA\" (TwoDayAhead), \"REDISP\" (redispatch).")
+
+"Table prefix `DataFiles` needs for this source state."
+_datafiles_type(::RefdaySourceState)  = ""
+_datafiles_type(::TwoDayAheadSource)  = "2DA"
+
+"Generation table (columns `index`, `Time`, `GEN`) of the source state."
+_source_gen(::RefdaySourceState, ref::DataFiles) = ref.GEN
+function _source_gen(::RedispatchSource, ref::DataFiles)
+    isempty(ref.REDISP) && error(
+        "ReferenceDayBasecase: source_type = \"REDISP\" but the source run has no " *
+        "redispatch results (empty REDISP table).")
+    df = select(ref.REDISP, :index, :Time, :GEN_REDISP => :GEN)
+    df.GEN = Float64.(coalesce.(df.GEN, 0.0))
+    return df
+end
+
+"Storage-charging table (columns `index`, `Time`, `CHARGE`) of the source state."
+_source_charge(::RefdaySourceState, ref::DataFiles) = ref.CHARGE
+function _source_charge(::RedispatchSource, ref::DataFiles)
+    isempty(ref.REDISP) && return DataFrame(index = String[], Time = Int[], CHARGE = Float64[])
+    df = select(ref.REDISP, :index, :Time, :CHARGE_REDISP => :CHARGE)
+    df.CHARGE = Float64.(coalesce.(df.CHARGE, 0.0))
+    return df
+end
+
+"""
+    _ac_injection_baseline(state::RefdaySourceState, ref::DataFiles)
+        -> Dict{(node,Time) => Float64}
+
+AC-only nodal net injection per (node, time), **export-positive** (feed-in
+convention: positive = the node injects into the AC grid, `gen − load − charge`).
+
+- `TwoDayAheadSource` / `RedispatchSource` (nodal DCLF stages): read from the
+  persisted `NETINPUT` table. Its `ACINJECTION` column follows the model's
+  *import-positive* convention (`= load + charge − gen`, see the nodal balance
+  in energy_balances.jl and the NP negation in `calc_ram`), so it is negated
+  here. Legacy result sets reconstruct it from `LINEFLOW` via the incidence
+  convention (line_start = +1, line_end = -1); errors when neither an
+  `ACINJECTION` column nor `LINEFLOW` data is available.
+- `DayAheadSource`: a *zonal* day-ahead stage persists no nodal tables, so the
+  injection is computed from plant-level results — every plant has a node:
+  `P[n,t] = Σ GEN(plants at n) − nodal_load[n][t] − Σ CHARGE(storages at n)`.
+  DC-line flows, prosumer net input, and the `CU`/`LL` infeasibility slacks of
+  the DA balance are not nodally attributable and are omitted (approximation;
+  exact for AC-only networks whose DA stage used no slack).
+
+The shift pipeline works entirely in this export-positive space;
+[`build_refday_basecase`](@ref) negates back to the model's import-positive
+convention when assembling `:netinput_ac`.
+"""
+function _ac_injection_baseline(::Union{TwoDayAheadSource,RedispatchSource}, ref::DataFiles)
+    ni = ref.NETINPUT
     if "ACINJECTION" in names(ni)
-        return Dict((r.index, r.Time) => Float64(r.ACINJECTION) for r in eachrow(ni))
+        return Dict{Tuple{String,Int},Float64}(
+            (String(r.index), Int(r.Time)) => -Float64(r.ACINJECTION) for r in eachrow(ni))
     end
-    params = results.params
+    isempty(ref.LINEFLOW) && error(
+        "ReferenceDayBasecase: NETINPUT of the source results has no ACINJECTION column " *
+        "(legacy result set) and LINEFLOW is empty — the AC injection baseline cannot be " *
+        "reconstructed. Re-run the forecast scenario with the current package.")
+    params = ref.params
     P = Dict{Tuple{String,Int},Float64}()
-    for r in eachrow(results.LINEFLOW)
+    for r in eachrow(ref.LINEFLOW)
         f = Float64(r.LINEFLOW)
+        t = Int(r.Time)
         ns = params.line_start[r.index]; ne = params.line_end[r.index]
-        P[(ns, r.Time)] = get(P, (ns, r.Time), 0.0) - f
-        P[(ne, r.Time)] = get(P, (ne, r.Time), 0.0) + f
+        P[(ns, t)] = get(P, (ns, t), 0.0) + f
+        P[(ne, t)] = get(P, (ne, t), 0.0) - f
+    end
+    return P
+end
+
+function _ac_injection_baseline(state::DayAheadSource, ref::DataFiles)
+    params = ref.params
+    gen    = _source_gen(state, ref)
+    charge = _source_charge(state, ref)
+    times  = sort(unique(Int.(gen.Time)))
+
+    P = Dict{Tuple{String,Int},Float64}()
+    for n in params.sets.N, t in times
+        P[(n, t)] = -_nodal_load_at(params, n, t)
+    end
+    for r in eachrow(gen)
+        n = get(params.plant2node, r.index, "")
+        n == "" && continue
+        key = (n, Int(r.Time))
+        P[key] = get(P, key, 0.0) + Float64(coalesce(r.GEN, 0.0))
+    end
+    for r in eachrow(charge)
+        n = get(params.plant2node, r.index, "")
+        n == "" && continue
+        key = (n, Int(r.Time))
+        P[key] = get(P, key, 0.0) - Float64(coalesce(r.CHARGE, 0.0))
     end
     return P
 end
 
 """
-    precompute_nodal(results::DataFiles; res_tags) -> NamedTuple
+    precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayAheadSource();
+                     res_tags) -> NamedTuple
 
 Precompute the per-(node, time) lookups used by the shift: RES and conventional
-generation, nodal load, AC net-injection baseline, per-node class capacities,
-and zone maps. Storage dispatch stays inside the net-injection baseline (not a
-shift lever).
+generation, nodal load, AC net-injection baseline (`P`, **export-positive** —
+see `_ac_injection_baseline`), per-node class capacities, and zone
+maps. All state-dependent data (generation and injection baseline) come from
+the SAME source MarketState selected by `state`. Storage dispatch stays inside
+the net-injection baseline (not a shift lever).
 """
-function precompute_nodal(results::DataFiles; res_tags = ["solar", "wind"])
+function precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayAheadSource();
+                          res_tags = ["solar", "wind"])
     params = results.params
     nodes  = sort(collect(params.sets.N))
-    times  = sort(unique(results.NETINPUT.Time))
 
-    gen = copy(results.GEN)
+    gen = copy(_source_gen(state, results))
+    times = sort(unique(Int.(gen.Time)))
     transform!(gen, :index => ByRow(x -> get(params.plant2node, x, "")) => :node)
     transform!(gen, :index => ByRow(x -> _classify_plant(x, params, res_tags)) => :cls)
     filter!(:node => !=(""), gen)
@@ -251,12 +377,13 @@ function precompute_nodal(results::DataFiles; res_tags = ["solar", "wind"])
         cls == :res  && (gmax_res[n]  += g)
     end
 
-    # AC-only nodal injection baseline (DC excluded); matches calc_ram's :netinput_ac
-    P = _ac_injection_baseline(results)
+    # AC-only nodal injection baseline (DC excluded), export-positive —
+    # the negation of calc_ram's import-positive :netinput_ac convention
+    P = _ac_injection_baseline(state, results)
 
     LOAD = Dict{Tuple{String,Int},Float64}()
     for n in nodes, t in times
-        LOAD[(n, t)] = haskey(params.nodal_load, n) ? params.nodal_load[n][t] : 0.0
+        LOAD[(n, t)] = _nodal_load_at(params, n, t)
     end
 
     nodes_in_zone = Dict(z => sort(collect(v)) for (z, v) in params.nodes_in_zone)
@@ -279,9 +406,11 @@ _key_weights(::RefPropRedist, nd, params, znodes, t; gsk = nothing) =
 function _key_weights(key::GSKRedist, nd, params, znodes, t; gsk = nothing)
     if is_time_dependent(key.strategy)
         # Time-dependent strategies (e.g. GenLoadGSK): build the GLSK weight
-        # |gen| + |load| at t from the forecast run's nodal data (nd.P is the
-        # net-injection baseline, so gen = P + load) — the same construction as
-        # build_gsk_timeseries, with nd playing the role of the basecase.
+        # |gen| + |load| at t from the forecast run's nodal data. nd.P is the
+        # EXPORT-positive net-injection baseline (see _ac_injection_baseline),
+        # so gen = P + load (storage charge absorbed into gen, harmless under
+        # abs) — the same weight as build_gsk_timeseries, which recovers
+        # gen = load − netinput_ac from the import-positive persisted table.
         return Dict(n => begin
             load = get(nd.LOAD, (n, t), 0.0)
             gen = get(nd.P, (n, t), 0.0) + load
@@ -363,12 +492,14 @@ const SHIFT_TRACE_TOL = 1e-9
 """
     ShiftTraceCollector()
 
-Collects the per-node injection deltas applied by [`shift_single`](@ref) as
+Collects the per-node injection deltas applied by `shift_single` as
 four parallel vectors (`Time`, `node`, `component`, `delta`); convert with
-[`shift_trace_df`](@ref). `delta` is the change in nodal net injection — for
-the `"load"` component the actual load change is `-delta`. The `"unabsorbed"`
-component records (per zone, with the zone label in the `node` column) any gap
-remainder the cascade could not place.
+`shift_trace_df`. `delta` is the change in nodal net injection in the
+**export-positive** (feed-in) convention — positive = more generation / less
+load; note the persisted NETINPUT/ACINJECTION result tables use the opposite
+(import-positive) convention. For the `"load"` component the actual load
+change is `-delta`. The `"unabsorbed"` component records (per zone, with the
+zone label in the `node` column) any gap remainder the cascade could not place.
 """
 struct ShiftTraceCollector
     Time::Vector{Int}
@@ -401,7 +532,7 @@ day `t_tgt` under `method`. `t_ref` is either a single time step (global
 reference day) or a per-node map `node => reference_time` (scoped / per-TSO
 matching, where each group borrows its own reference day).
 
-Pass a [`ShiftTraceCollector`](@ref) as `trace` to record every applied
+Pass a `ShiftTraceCollector` as `trace` to record every applied
 per-node injection delta (components `"RES_prestep"`, `"RES"`, `"conv"`,
 `"load"`, `"NP"`, `"unabsorbed"`).
 """
@@ -492,7 +623,7 @@ end
 
 Attach the cluster metadata (`target_cluster`, `matched_cluster`,
 `cluster_distance`) of the match tables to a group-level resolution from
-[`resolve_group_times`](@ref). Fallback rows join against `fallback_matches`;
+`resolve_group_times`. Fallback rows join against `fallback_matches`;
 metadata columns may be `missing` where a join finds no counterpart.
 """
 function _refday_match_trace(groupmap::DataFrame, matches, fallback_matches)
@@ -522,6 +653,7 @@ produced by [`match_by_scope`](@ref)). Returns a Dict with the keys `calc_ram`
 / `calc_fbmc_params` consume:
 
 - `:netinput_ac` => DenseAxisArray (node × target_time) nodal net injection
+  (import-positive, the model's ACINJECTION convention)
 - `:lineflows`   => DenseAxisArray (line × target_time) = PTDFn · netinput
 
 so the reference-day construction is a drop-in replacement for the
@@ -541,19 +673,22 @@ a `Dict{Symbol,DataFrame}` with:
   metadata, and whether the global fallback was used;
 - `:REFDAY_GROUPS` — group → node membership (join key for `:REFDAY_MATCH`);
 - `:REFDAY_SHIFT`  — sparse per-(Time, node, component) injection deltas from
-  [`shift_single`](@ref).
+  `shift_single`.
 
-Together they reconstruct the construction exactly:
-`netinput_ac[n, tt] = P_source(n, ref(n, tt)) + Σ deltas(n, tt)`.
+Together they reconstruct the construction exactly. Trace deltas are
+export-positive (feed-in) while the persisted `ACINJECTION` (and the returned
+`:netinput_ac`) are import-positive, hence:
+`netinput_ac[n, tt] = ACINJECTION_source(n, ref(n, tt)) − Σ deltas(n, tt)`.
 """
 function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
                                res_tags = ["solar", "wind"],
                                scope::MatchScope = GlobalMatchScope(),
                                fallback_matches = nothing,
-                               collect_trace::Bool = false)
+                               collect_trace::Bool = false,
+                               source_state::RefdaySourceState = TwoDayAheadSource())
     validate_shares(method)
     params = results.params
-    nd = precompute_nodal(results; res_tags = res_tags)
+    nd = precompute_nodal(results, source_state; res_tags = res_tags)
 
     tgt_times = sort(unique(matches.target_time))
     groups = node_groups(scope, params)
@@ -578,7 +713,10 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
         ref_of_node = Dict(n => refmap[(n, tt)] for n in nodes)
         p_new = shift_single(nd, params, tt, ref_of_node, method; gsk = gsk, trace = collector)
         for n in nodes
-            Pmat[nidx[n], j] = p_new[n]
+            # shift_single works export-positive (feed-in); :netinput_ac must be
+            # in the model's import-positive ACINJECTION convention (what
+            # calc_ram / build_gsk_timeseries consume), so negate back here.
+            Pmat[nidx[n], j] = -p_new[n]
         end
     end
 
@@ -610,8 +748,43 @@ end
 # Config-driven entry point (used by the solving pipeline)
 # ---------------------------------------------------------------------------
 
-_load_refday_source(bc::ReferenceDayBasecase) =
-    bc.source isa DataFiles ? bc.source : DataFiles(bc.source; type = bc.source_type)
+"""
+    _load_refday_source(bc::ReferenceDayBasecase) -> (ref::DataFiles, state::RefdaySourceState)
+
+Resolve `bc.source_type` to its `RefdaySourceState` and load the source
+results with the matching table prefix. When `bc.source` is already a
+`DataFiles`, it is used as-is (the caller is responsible for having loaded it
+with the right prefix).
+"""
+function _load_refday_source(bc::ReferenceDayBasecase)
+    state = _source_state(bc.source_type)
+    ref = bc.source isa DataFiles ? bc.source :
+          DataFiles(bc.source; type = _datafiles_type(state))
+    return ref, state
+end
+
+"State-specific source validation — fail loudly on unusable sources."
+function _validate_refday_source(::TwoDayAheadSource, ref::DataFiles, source_type)
+    isempty(ref.NETINPUT) && isempty(ref.LINEFLOW) && error(
+        "ReferenceDayBasecase: source results contain no nodal NETINPUT/LINEFLOW data " *
+        "for source_type = \"$source_type\". Choose a source/result set whose selected " *
+        "MarketState produced nodal network data.")
+    return nothing
+end
+function _validate_refday_source(::RedispatchSource, ref::DataFiles, source_type)
+    isempty(ref.REDISP) && error(
+        "ReferenceDayBasecase: source_type = \"REDISP\" but the source run has no " *
+        "redispatch results (empty REDISP table).")
+    isempty(ref.NETINPUT) && isempty(ref.LINEFLOW) && error(
+        "ReferenceDayBasecase: redispatch source has no nodal NETINPUT/LINEFLOW data.")
+    return nothing
+end
+function _validate_refday_source(::DayAheadSource, ref::DataFiles, source_type)
+    isempty(ref.GEN) && error(
+        "ReferenceDayBasecase: source results contain no day-ahead GEN data " *
+        "(source_type = \"$source_type\").")
+    return nothing
+end
 
 """
     build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters;
@@ -622,12 +795,15 @@ reference-day matching per `bc.matching`, shift per `bc.shift`, and return the
 whole-horizon basecase dict (`:netinput_ac`, `:lineflows` — plus `:trace` by
 default, see the `collect_trace` section of the assembly method).
 
+`bc.source_type` selects the source MarketState (see `_source_state`);
+matching data and injection baseline always come from that one state.
+
 Validates that the source results are usable (non-empty parameters, identical
-node set) before building.
+node set, state-specific data present) before building.
 """
 function build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters;
                                collect_trace::Bool = true)
-    ref = _load_refday_source(bc)
+    ref, state = _load_refday_source(bc)
     cfg = bc.matching
 
     # --- validation: fail loudly on unusable sources ---
@@ -636,12 +812,10 @@ function build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters;
         "from an older POMATWO version?). Re-run the forecast scenario with the current package.")
     Set(ref.params.sets.N) == Set(params.sets.N) || error(
         "ReferenceDayBasecase: node set of the source results does not match the current model.")
-    isempty(ref.NETINPUT) && error(
-        "ReferenceDayBasecase: source results contain no nodal NETINPUT data " *
-        "(source_type = \"$(bc.source_type)\"). Choose a source/result set with nodal network data.")
+    _validate_refday_source(state, ref, bc.source_type)
 
-    # --- renewable frame + matching ---
-    gen_df = copy(ref.GEN)
+    # --- renewable frame + matching (from the same MarketState as the shift) ---
+    gen_df = copy(_source_gen(state, ref))
     add_planttype!(gen_df, ref.params)
     filter_powerplants!(gen_df; type_in_planttype = cfg.res_tags)
     isempty(gen_df) && error("ReferenceDayBasecase: no plants match res_tags = $(cfg.res_tags).")
@@ -664,5 +838,6 @@ function build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters;
     return build_refday_basecase(ref, matches, bc.shift;
                                  res_tags = cfg.res_tags, scope = cfg.scope,
                                  fallback_matches = fallback,
-                                 collect_trace = collect_trace)
+                                 collect_trace = collect_trace,
+                                 source_state = state)
 end

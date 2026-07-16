@@ -71,8 +71,9 @@ one GSK matrix is built per timestep from the FBMC basecase (the model's IGM
 equivalent) via [`build_gsk_timeseries`](@ref), with
 
 - ``p_i^{LOAD}(t)`` = the node's `nodal_load` profile at `t` (0 if no load),
-- ``p_i^{GEN}(t)``  = `netinput_ac[i, t] + p_i^{LOAD}(t)`, i.e. active generation
-  recovered from the basecase nodal net injection (net injection = gen − load).
+- ``p_i^{GEN}(t)``  = `p_i^{LOAD}(t) - netinput_ac[i, t]`, i.e. active generation
+  recovered from the basecase nodal net injection (`netinput_ac` is
+  import-positive: netinput = load + charge − gen).
 
 Weights are normalized per zone (the TSO control area) and per timestep, so each
 zone column sums to 1 for every `t`. Combining generation and load lets the key
@@ -319,8 +320,10 @@ Build one GSK matrix per timestep from the FBMC basecase, returned as a
 
 Per node `i` and timestep `t` the weight is `|gen| + |load|` with
 `load = nodal_load[i][t]` (0 if the node has no load profile) and
-`gen = netinput_ac[i, t] + load` (active generation recovered from the basecase
-nodal net injection). Weights are normalized per zone and timestep, so every
+`gen = load - netinput_ac[i, t]` (active generation recovered from the basecase
+nodal net injection; `netinput_ac` is **import-positive**, i.e.
+`netinput = load + charge - gen`, so storage charge is absorbed into `gen` —
+harmless under the absolute value). Weights are normalized per zone and timestep, so every
 zone column sums to 1 for each `t` (empty zones follow `normalize_empty`, see
 [`build_gsk`](@ref)).
 
@@ -343,7 +346,12 @@ function build_gsk_timeseries(params, strategy::GenLoadGSK, netinput_ac, T;
     for (k, t) in enumerate(times)
         for (i, nlabel) in enumerate(nodes)
             load = haskey(params.nodal_load, nlabel) ? params.nodal_load[nlabel][t] : 0.0
-            gen = netinput_ac[nlabel, t] + load
+            # netinput_ac follows the model's ACINJECTION convention (import-
+            # positive: netinput = load + charge - gen, see the nodal balance in
+            # energy_balances.jl and the NP negation in calc_ram), so generation
+            # is recovered as load - netinput (storage charge is absorbed into
+            # gen; the abs() below makes that harmless for the weight).
+            gen = load - netinput_ac[nlabel, t]
             weights[i] = abs(gen) + abs(load)
         end
         G_data[:, :, k] = _normalize_per_zone(weights, node_to_zone, z, normalize_empty)
