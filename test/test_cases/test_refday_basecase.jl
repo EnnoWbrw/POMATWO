@@ -256,8 +256,8 @@ function test_refday_basecase()
         n3rows = filter(:node => ==("n3"), df)
         getdelta(c) = sum(n3rows.delta[n3rows.component .== c]; init = 0.0)
         @test isapprox(getdelta("conv"), 1.0; atol = 1e-6)     # conv headroom saturated
-        @test isapprox(getdelta("load"), 5.0; atol = 1e-6)     # load headroom saturated
-        @test isapprox(getdelta("sto"),  9.0; atol = 1e-6)     # remainder into storage
+        @test isapprox(getdelta("sto"), 10.0; atol = 1e-6)     # storage saturated (±installed 10)
+        @test isapprox(getdelta("load"), 4.0; atol = 1e-6)     # remainder into load
         @test !("NP" in df.component)                          # no phantom exchange lever
         @test !("np_relax" in df.component)                    # gap fully closed physically
 

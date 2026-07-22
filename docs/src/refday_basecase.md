@@ -119,7 +119,7 @@ scoped), `shift_single` proceeds as follows:
    `RandomRedist`), clipped to physical headroom (conventional and RES between 0 and their
    *availability-weighted* installed capacity at the target hour; storage to ±installed
    power; load cuts limited by the reference load) via bounded waterfilling, cascading down
-   `fallback_order` (default `conv → load → sto`). There is **no** phantom exchange slack:
+   `fallback_order` (default `conv → sto → load`). There is **no** phantom exchange slack:
    a gap no physical lever can absorb is left relaxed toward the reference and recorded as
    `np_relax`.
 5. **Global balance.** With `enforce_balance = true` (default) a final pass forces the
@@ -155,7 +155,7 @@ injection, and is excluded from the reconstruction sum.
     | `res_prestep` | `false` | Combined with `β_RES > 0`, RES is moved twice (warned, not blocked). |
     | `resolution` | `:zonal` | `:nodal` discards the reference day entirely (see above). |
     | `redist` | `GSKRedist(FlatGSK())` | The spatial allocation of every correction is user-chosen. With `GSKRedist`, GSK assumptions enter the basecase *and* enter again through the zonal PTDF — the same heuristic used twice. |
-    | `fallback_order` | `[:conv, :load, :sto]` | Physical levers only. A gap no lever can absorb is relaxed toward the reference (`np_relax`), not faked. |
+    | `fallback_order` | `[:conv, :sto, :load]` | Physical levers only. A gap no lever can absorb is relaxed toward the reference (`np_relax`), not faked. |
     | `enforce_balance` | `true` | Off produces a basecase that need not satisfy `Σ_n injection = 0` — physically inconsistent for the PTDF/FBMC flow calc. |
 
 Two structural points deserve emphasis. First, the bounds: conventional and RES changes

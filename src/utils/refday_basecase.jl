@@ -98,7 +98,7 @@ Apportion the net-position gap among components by user shares.
 - `enforce_balance`: if `true` (default), a final pass forces the whole basecase to
   be globally balanced (`Σ_n injection = 0`, i.e. production = consumption) by
   adjusting conventional generation (load as a last resort). See
-  [`_enforce_global_balance!`](@ref).
+  `_enforce_global_balance!`.
 """
 Base.@kwdef struct ShareShift <: ShiftMethod
     β_RES::Float64  = 0.0
@@ -588,7 +588,7 @@ change is `-delta`.
 
 Components: `"RES_prestep"`, `"RES"`, `"conv"`, `"load"`, `"sto"` (physical
 per-node levers), `"balance"` (per-node conventional-gen/load deltas from the
-global balance pass, [`_enforce_global_balance!`](@ref)), and `"np_relax"` — a
+global balance pass, `_enforce_global_balance!`), and `"np_relax"` — a
 per-zone row (zone label in the `node` column) recording how far the zone's net
 position was left relaxed toward the reference (target NP minus reachable NP).
 `"np_relax"` is an annotation, not a nodal injection delta, so it is excluded
@@ -629,7 +629,7 @@ The gap is closed by physical levers only (RES/conv/load/storage); a zone's
 unreachable remainder is left relaxed toward reference (traced `"np_relax"`).
 When `method.enforce_balance` (default), a final pass forces the whole result to
 be globally balanced (`Σ_n net_injection = 0`) via conventional generation
-(traced `"balance"`); see [`_enforce_global_balance!`](@ref).
+(traced `"balance"`); see `_enforce_global_balance!`.
 
 Pass a `ShiftTraceCollector` as `trace` to record every applied per-node
 injection delta (components `"RES_prestep"`, `"RES"`, `"conv"`, `"load"`,
