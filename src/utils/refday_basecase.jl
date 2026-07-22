@@ -8,10 +8,14 @@
 # position with the target forecast, mimicking the CWE D2CF process.
 #
 # Method: the per-zone net-position gap D(z) = NP_target(z) - NP_current(z) is
-# apportioned among components {RES, conv, load, NP} by user shares β (sum=1);
-# each component's zonal amount is spread to nodes by a redistribution key,
-# clipped to physical headroom; unabsorbed remainder cascades down
-# `fallback_order`, with :NP (unbounded) closing the gap exactly.
+# apportioned among the PHYSICAL components {RES, conv, load, storage} by user
+# shares β; each component's zonal amount is spread to nodes by a redistribution
+# key, clipped to physical headroom. There is no phantom exchange slack: a gap
+# no physical lever can absorb is left relaxed toward the reference (recorded as
+# `np_relax`). A final pass then forces the whole basecase to be globally
+# BALANCED (Σ_n injection = 0, production = consumption) by adjusting conventional
+# generation (load as a last resort), so the net-injection basecase is physically
+# consistent for the PTDF/FBMC flow computation.
 #
 # SIGN CONVENTION: the whole shift pipeline (baseline P, shares, bounds,
 # REFDAY_SHIFT trace deltas) works EXPORT-positive (feed-in: positive =
@@ -77,31 +81,40 @@ RandomRedist(seed::Integer = 0) = RandomRedist(UInt64(seed))
 Apportion the net-position gap among components by user shares.
 
 # Fields
-- `β_RES, β_conv, β_load, β_NP`: apportionment shares of the gap (should sum to 1).
+- `β_RES, β_conv, β_load`: apportionment shares of the gap (should sum to ≤ 1).
+  There is no phantom net-position slack: the gap is closed only by the *physical*
+  levers RES/conv/load/storage. The leftover fraction `1 - β_RES - β_conv - β_load`
+  (plus any saturation remainder) is deliberately left relaxed toward the reference
+  day (recorded as `"np_relax"`), not an exchange slack that manufactures injection.
 - `resolution`: `:zonal` (gap per zone, spread by `redist`) or `:nodal` (gap per
-  node; the output nodal net injection then equals the target's nodal injection).
+  node; the output nodal net injection then equals the target's nodal injection
+  where physically reachable).
 - `res_prestep`: if `true`, hard-set RES to the target first (nodal direct, or
   zonal-scaled preserving reference intra-zone shares), then apportion the rest.
 - `redist`: nodal redistribution key for zonal corrections.
-- `fallback_order`: cascade order for remainders when a component saturates;
-  should end in `:NP` so the gap always closes.
+- `fallback_order`: cascade order for remainders when a component saturates
+  (physical levers only). A zone's gap that no physical lever can absorb is left
+  relaxed toward reference and recorded as `"np_relax"`.
+- `enforce_balance`: if `true` (default), a final pass forces the whole basecase to
+  be globally balanced (`Σ_n injection = 0`, i.e. production = consumption) by
+  adjusting conventional generation (load as a last resort). See
+  [`_enforce_global_balance!`](@ref).
 """
 Base.@kwdef struct ShareShift <: ShiftMethod
     β_RES::Float64  = 0.0
     β_conv::Float64 = 0.5
     β_load::Float64 = 0.5
-    β_NP::Float64   = 0.0
     resolution::Symbol = :zonal
     res_prestep::Bool  = false
     redist::RedistKey  = GSKRedist()
-    fallback_order::Vector{Symbol} = [:conv, :load, :NP]
+    fallback_order::Vector{Symbol} = [:conv, :sto, :load]
+    enforce_balance::Bool = true
 end
 
-"Warn on inconsistent share configuration; error on invalid resolution."
+"Error on invalid share sum or resolution; warn on double-moved RES."
 function validate_shares(m::ShareShift)
-    s = m.β_RES + m.β_conv + m.β_load + m.β_NP
-    isapprox(s, 1.0; atol = 1e-6) || @warn "Shift shares sum to $s, expected 1.0"
-    (:NP in m.fallback_order) || @warn "fallback_order lacks :NP; residual gap may not fully close"
+    s = m.β_RES + m.β_conv + m.β_load
+    s <= 1.0 + 1e-6 || error("Shift shares sum to $s, must be ≤ 1.0 (leftover fraction is np_relax)")
     (m.res_prestep && m.β_RES > 0) && @warn "res_prestep=true with β_RES>0: RES moved twice (hard-set, then balancer)"
     m.resolution in (:zonal, :nodal) || error("resolution must be :zonal or :nodal, got :$(m.resolution)")
     return nothing
@@ -340,10 +353,14 @@ end
 
 Precompute the per-(node, time) lookups used by the shift: RES and conventional
 generation, nodal load, AC net-injection baseline (`P`, **export-positive** —
-see `_ac_injection_baseline`), per-node class capacities, and zone
-maps. All state-dependent data (generation and injection baseline) come from
-the SAME source MarketState selected by `state`. Storage dispatch stays inside
-the net-injection baseline (not a shift lever).
+see `_ac_injection_baseline`), per-(node, time) availability-weighted conv/RES
+generation caps (`gmax_conv`/`gmax_res`, via `calc_gmax`), per-node storage
+discharge/charge power caps (`gmax_sto_dis`/`gmax_sto_chg`), and zone maps. All
+state-dependent data (generation and injection baseline) come from the SAME
+source MarketState selected by `state`. Storage dispatch is also folded into the
+net-injection baseline; the storage power caps additionally make storage a
+bidirectional shift lever (installed power assumed available every timestep — a
+rough approximation ignoring state-of-charge).
 """
 function precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayAheadSource();
                           res_tags = ["solar", "wind"])
@@ -367,14 +384,27 @@ function precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayA
         end
     end
 
-    gmax_conv = Dict(n => 0.0 for n in nodes)
-    gmax_res  = Dict(n => 0.0 for n in nodes)
+    # Per-(node, time) generation caps, availability-weighted (calc_gmax =
+    # avail[p][t] * gmax[p]) so a node's conv/RES shifting headroom reflects the
+    # target hour's derating/outages, not just nameplate. Storage caps are
+    # per-node installed power assumed available at every timestep (a rough
+    # approximation: state-of-charge / energy limits are ignored), split by
+    # direction — discharge (gmax) up, charge (gmax_storage) down.
+    gmax_conv = Dict{Tuple{String,Int},Float64}((n, t) => 0.0 for n in nodes, t in times)
+    gmax_res  = Dict{Tuple{String,Int},Float64}((n, t) => 0.0 for n in nodes, t in times)
+    gmax_sto_dis = Dict(n => 0.0 for n in nodes)
+    gmax_sto_chg = Dict(n => 0.0 for n in nodes)
     for (p, n) in params.plant2node
-        haskey(gmax_conv, n) || continue
+        haskey(gmax_sto_dis, n) || continue
         cls = _classify_plant(p, params, res_tags)
-        g = Float64(get(params.gmax, p, 0.0))
-        cls == :conv && (gmax_conv[n] += g)
-        cls == :res  && (gmax_res[n]  += g)
+        if cls == :conv
+            for t in times; gmax_conv[(n, t)] += calc_gmax(params, p, t); end
+        elseif cls == :res
+            for t in times; gmax_res[(n, t)]  += calc_gmax(params, p, t); end
+        elseif cls == :sto
+            gmax_sto_dis[n] += Float64(get(params.gmax,         p, 0.0))
+            gmax_sto_chg[n] += Float64(get(params.gmax_storage, p, 0.0))
+        end
     end
 
     # AC-only nodal injection baseline (DC excluded), export-positive —
@@ -388,7 +418,7 @@ function precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayA
 
     nodes_in_zone = Dict(z => sort(collect(v)) for (z, v) in params.nodes_in_zone)
 
-    return (; nodes, times, RES, CONV, gmax_conv, gmax_res, P, LOAD, nodes_in_zone)
+    return (; nodes, times, RES, CONV, gmax_conv, gmax_res, gmax_sto_dis, gmax_sto_chg, P, LOAD, nodes_in_zone)
 end
 
 # ---------------------------------------------------------------------------
@@ -469,17 +499,73 @@ function _waterfill(A, znodes, w, lo, hi; iters = 50)
     return applied, remaining
 end
 
-"Per-node signed bounds (Δ injection) available from `comp` at a node."
-function _comp_bounds(comp, n, nd, res_w, conv_w, load_w)
+"Per-node signed bounds (Δ injection) available from `comp` at node `n`, time `t`."
+function _comp_bounds(comp, n, t, nd, res_w, conv_w, load_w)
     if comp == :conv
-        return (-conv_w[n], nd.gmax_conv[n] - conv_w[n])
+        return (-conv_w[n], get(nd.gmax_conv, (n, t), 0.0) - conv_w[n])
     elseif comp == :load          # cut load → raise injection (≤ current load); add load unbounded
         return (-Inf, load_w[n])
     elseif comp == :RES
-        return (-res_w[n], nd.gmax_res[n] - res_w[n])
-    else                          # :NP unbounded (exchange/slack)
-        return (-Inf, Inf)
+        return (-res_w[n], get(nd.gmax_res, (n, t), 0.0) - res_w[n])
+    elseif comp == :sto           # storage: discharge up, charge down; installed power, every t
+        return (-nd.gmax_sto_chg[n], nd.gmax_sto_dis[n])
+    else
+        error("_comp_bounds: unknown shift component :$comp (physical levers only: :RES, :conv, :load, :sto)")
     end
+end
+
+"Below this the basecase is treated as globally balanced (production ≈ consumption)."
+const BALANCE_TOL = 1e-6
+
+"""
+    _enforce_global_balance!(p_new, nd, t, conv_w, load_w, trace)
+
+Force the basecase to represent a globally **balanced** system: drive the total
+net injection `R = Σ_n p_new` (export-positive) to zero so that
+`Σ gen = Σ load + Σ charge` (production = consumption). The correction `-R` is
+applied as physical **conventional generation** adjustments, bounded per node by
+the availability-weighted headroom `[-conv_w[n], gmax_conv[(n,t)] - conv_w[n]]`
+and spread by remaining room. If conventional generation saturates, **load**
+absorbs the residual (add load to shed a surplus, cut load to cover a deficit) —
+which guarantees balance — with a warning. All applied deltas are traced as
+`"balance"`. Because only physical quantities move, every `p_new[n]` remains
+`gen − load − charge`, so each zone's net position stays physically backed.
+"""
+function _enforce_global_balance!(p_new, nd, t, conv_w, load_w, trace)
+    nodes = nd.nodes
+    R = sum(values(p_new))              # export-positive global net injection; want 0
+    abs(R) <= BALANCE_TOL && return p_new
+    A = -R                              # injection change to apply so Σ becomes 0
+
+    # --- primary lever: conventional generation ---
+    lo = Dict(n => -conv_w[n] for n in nodes)
+    hi = Dict(n => get(nd.gmax_conv, (n, t), 0.0) - conv_w[n] for n in nodes)
+    w  = A > 0 ? Dict(n => max(hi[n], 0.0) for n in nodes) :
+                 Dict(n => max(-lo[n], 0.0) for n in nodes)
+    applied, rem = _waterfill(A, nodes, w, lo, hi)
+    for n in nodes
+        _record!(trace, t, n, "balance", applied[n])
+        p_new[n]  += applied[n]
+        conv_w[n] += applied[n]
+    end
+
+    # --- last resort: load (guarantees balance when conv headroom is exhausted) ---
+    if abs(rem) > BALANCE_TOL
+        @warn "refday balance at t=$t: conventional headroom insufficient (residual $(round(rem; digits=3)) MW); adjusting load."
+        loL = Dict(n => -Inf for n in nodes)        # add load ⇒ injection down (unbounded)
+        hiL = Dict(n => load_w[n] for n in nodes)   # cut load ⇒ injection up (≤ current load)
+        wL  = rem > 0 ? Dict(n => max(hiL[n], 0.0) for n in nodes) :
+                        Dict(n => 1.0 for n in nodes)
+        appliedL, rem2 = _waterfill(rem, nodes, wL, loL, hiL)
+        for n in nodes
+            _record!(trace, t, n, "balance", appliedL[n])
+            p_new[n]  += appliedL[n]
+            load_w[n] -= appliedL[n]                # +injection ⇒ load down
+        end
+        abs(rem2) > BALANCE_TOL &&
+            @warn "refday balance at t=$t: could not fully balance (residual $(round(rem2; digits=3)) MW remains)."
+    end
+    return p_new
 end
 
 # ---------------------------------------------------------------------------
@@ -498,8 +584,15 @@ four parallel vectors (`Time`, `node`, `component`, `delta`); convert with
 **export-positive** (feed-in) convention — positive = more generation / less
 load; note the persisted NETINPUT/ACINJECTION result tables use the opposite
 (import-positive) convention. For the `"load"` component the actual load
-change is `-delta`. The `"unabsorbed"` component records (per zone, with the
-zone label in the `node` column) any gap remainder the cascade could not place.
+change is `-delta`.
+
+Components: `"RES_prestep"`, `"RES"`, `"conv"`, `"load"`, `"sto"` (physical
+per-node levers), `"balance"` (per-node conventional-gen/load deltas from the
+global balance pass, [`_enforce_global_balance!`](@ref)), and `"np_relax"` — a
+per-zone row (zone label in the `node` column) recording how far the zone's net
+position was left relaxed toward the reference (target NP minus reachable NP).
+`"np_relax"` is an annotation, not a nodal injection delta, so it is excluded
+from the `netinput_ac = ACINJECTION_src − Σ deltas` reconstruction.
 """
 struct ShiftTraceCollector
     Time::Vector{Int}
@@ -532,9 +625,15 @@ day `t_tgt` under `method`. `t_ref` is either a single time step (global
 reference day) or a per-node map `node => reference_time` (scoped / per-TSO
 matching, where each group borrows its own reference day).
 
-Pass a `ShiftTraceCollector` as `trace` to record every applied
-per-node injection delta (components `"RES_prestep"`, `"RES"`, `"conv"`,
-`"load"`, `"NP"`, `"unabsorbed"`).
+The gap is closed by physical levers only (RES/conv/load/storage); a zone's
+unreachable remainder is left relaxed toward reference (traced `"np_relax"`).
+When `method.enforce_balance` (default), a final pass forces the whole result to
+be globally balanced (`Σ_n net_injection = 0`) via conventional generation
+(traced `"balance"`); see [`_enforce_global_balance!`](@ref).
+
+Pass a `ShiftTraceCollector` as `trace` to record every applied per-node
+injection delta (components `"RES_prestep"`, `"RES"`, `"conv"`, `"load"`,
+`"sto"`, `"balance"`, plus the per-zone `"np_relax"`).
 """
 shift_single(nd, params, t_tgt, t_ref::Integer, method::ShareShift; gsk = nothing, trace = nothing) =
     shift_single(nd, params, t_tgt, Dict(n => Int(t_ref) for n in nd.nodes), method; gsk = gsk, trace = trace)
@@ -578,9 +677,9 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
     # ---- net-position gap apportionment ----
     zones = method.resolution == :nodal ? [(n, [n]) for n in nodes] :
                                           collect(nd.nodes_in_zone)
-    order = unique([:RES, method.fallback_order..., :NP])
+    order = unique([:RES, method.fallback_order...])   # physical levers only (no phantom :NP)
     share = Dict(:RES => method.β_RES, :conv => method.β_conv,
-                 :load => method.β_load, :NP => method.β_NP)
+                 :load => method.β_load)
 
     for (z, znodes) in zones
         NP_tgt = sum(get(nd.P, (n, t_tgt), 0.0) for n in znodes)
@@ -597,7 +696,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
             w  = _redist_weights(method.redist, nd, params, znodes, t_tgt; gsk = gsk)
             lo = Dict{String,Float64}(); hi = Dict{String,Float64}()
             for n in znodes
-                lo[n], hi[n] = _comp_bounds(comp, n, nd, res_w, conv_w, load_w)
+                lo[n], hi[n] = _comp_bounds(comp, n, t_tgt, nd, res_w, conv_w, load_w)
             end
             applied, rem = _waterfill(amount, znodes, w, lo, hi)
             for n in znodes
@@ -609,8 +708,14 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
             end
             carried = rem
         end
-        _record!(trace, t_tgt, string(z), "unabsorbed", carried)
+        # gap the physical levers left open = this zone's NP relaxed toward reference
+        # (the deliberately unshifted 1-β_RES-β_conv-β_load fraction plus any saturation remainder)
+        _record!(trace, t_tgt, string(z), "np_relax", NP_tgt - sum(p_new[n] for n in znodes))
     end
+
+    # global balance: force Σ_n p_new = 0 (production = consumption) via conventional gen
+    method.enforce_balance &&
+        _enforce_global_balance!(p_new, nd, t_tgt, conv_w, load_w, trace)
     return p_new
 end
 
@@ -657,7 +762,9 @@ produced by [`match_by_scope`](@ref)). Returns a Dict with the keys `calc_ram`
 - `:lineflows`   => DenseAxisArray (line × target_time) = PTDFn · netinput
 
 so the reference-day construction is a drop-in replacement for the
-`TwoDayAhead` optimization.
+`TwoDayAhead` optimization. With the shift's `enforce_balance` (default), each
+target column is globally balanced (`Σ_n netinput_ac[n, tt] = 0`, production =
+consumption), keeping the PTDF flow computation physically consistent.
 
 # Scoped (per-TSO) matching
 Pass `scope` (e.g. `ZonalMatchScope()`) together with a `matches` table from
@@ -673,11 +780,14 @@ a `Dict{Symbol,DataFrame}` with:
   metadata, and whether the global fallback was used;
 - `:REFDAY_GROUPS` — group → node membership (join key for `:REFDAY_MATCH`);
 - `:REFDAY_SHIFT`  — sparse per-(Time, node, component) injection deltas from
-  `shift_single`.
+  `shift_single` (physical `RES`/`conv`/`load`/`sto` levers plus `balance`), and
+  per-(Time, zone) `np_relax` rows (zone label in the `node` column) recording
+  how far each zone's net position was left relaxed toward the reference.
 
 Together they reconstruct the construction exactly. Trace deltas are
 export-positive (feed-in) while the persisted `ACINJECTION` (and the returned
-`:netinput_ac`) are import-positive, hence:
+`:netinput_ac`) are import-positive, hence (summing only the per-node injection
+components — `np_relax` is a zone-level annotation, excluded):
 `netinput_ac[n, tt] = ACINJECTION_source(n, ref(n, tt)) − Σ deltas(n, tt)`.
 """
 function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
@@ -685,7 +795,7 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
                                scope::MatchScope = GlobalMatchScope(),
                                fallback_matches = nothing,
                                collect_trace::Bool = false,
-                               source_state::RefdaySourceState = TwoDayAheadSource())
+                               source_state::RefdaySourceState = DayAheadSource())
     validate_shares(method)
     params = results.params
     nd = precompute_nodal(results, source_state; res_tags = res_tags)

@@ -64,10 +64,11 @@ the names suggest. Consequences:
   export-positive (positive = more feed-in), unlike the result tables:
   `netinput_ac[n,tt] = ACINJECTION_source(n, ref(n,tt)) − Σ deltas(n,tt)`.
 - Two result-table quirks compound the confusion: a zonal DA stage writes NO nodal
-  tables (a basecase run has only `2DANETINPUT.arrow`; `DataFiles` falls back to the
-  `2DA` prefix with a warning), and in runs with redispatch the plain `NETINPUT.arrow`
-  comes from the redispatch DCLF stage — never mix these with DA-stage `GEN`/`CHARGE`
-  when checking balances. `ReferenceDayBasecase` takes matching data and injection
+  tables (a basecase run persists nodal tables only under the `2DA` prefix, e.g.
+  `2DANETINPUT.arrow`; load them with `DataFiles(dir; type="2DA")` — a default
+  `type=""` load returns those nodal tables empty, there is no auto-fallback), and in
+  runs with redispatch the plain `NETINPUT.arrow` comes from the redispatch DCLF stage —
+  never mix these with DA-stage `GEN`/`CHARGE` when checking balances. `ReferenceDayBasecase` takes matching data and injection
   baseline from ONE MarketState selected by `source_type` (`""`/`"DA"`, `"2DA"`,
   `"REDISP"` → `RefdaySourceState` dispatch in `refday_basecase.jl`; zonal DA sources
   get their nodal injections computed from plant-level results).

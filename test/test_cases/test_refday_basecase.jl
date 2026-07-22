@@ -22,8 +22,15 @@ function create_refday_test_nd()
         RES  = Dict(("n1",1)=>4.0, ("n2",1)=>1.0, ("n3",1)=>8.0,
                     ("n1",2)=>6.0, ("n2",2)=>2.0, ("n3",2)=>5.0),
         CONV = Dict(("n1",1)=>8.0, ("n2",1)=>2.0, ("n3",1)=>15.0),
-        gmax_conv = Dict("n1"=>20.0, "n2"=>10.0, "n3"=>30.0),
-        gmax_res  = Dict("n1"=>10.0, "n2"=>5.0,  "n3"=>12.0),
+        # conv/RES caps are per-(node, time) (availability-weighted in the real
+        # precompute_nodal); constant over time here so time-agnostic assertions hold.
+        gmax_conv = Dict(("n1",1)=>20.0, ("n2",1)=>10.0, ("n3",1)=>30.0,
+                         ("n1",2)=>20.0, ("n2",2)=>10.0, ("n3",2)=>30.0),
+        gmax_res  = Dict(("n1",1)=>10.0, ("n2",1)=>5.0,  ("n3",1)=>12.0,
+                         ("n1",2)=>10.0, ("n2",2)=>5.0,  ("n3",2)=>12.0),
+        # storage inert here (zero power) → :sto bounds (0,0), cascade unchanged.
+        gmax_sto_dis = Dict("n1"=>0.0, "n2"=>0.0, "n3"=>0.0),
+        gmax_sto_chg = Dict("n1"=>0.0, "n2"=>0.0, "n3"=>0.0),
         P    = Dict(("n1",1)=>10.0, ("n2",1)=>-5.0, ("n3",1)=>20.0,
                     ("n1",2)=>14.0, ("n2",2)=>0.0,  ("n3",2)=>15.0),
         LOAD = Dict(("n1",1)=>3.0, ("n2",1)=>6.0, ("n3",1)=>5.0,
@@ -155,39 +162,164 @@ function test_refday_basecase()
         @test skipped2 == [3]                 # no fallback → hour skipped
     end
 
-    @testset "shift_single: NP closure invariant" begin
+    @testset "shift_single: physical closure (enforce_balance=false)" begin
+        # Without the global balance pass, the physical levers close each zone's gap
+        # exactly when headroom suffices (β sum to 1, no phantom :NP).
         for m in (
-            ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, β_NP=0.0,
-                       resolution=:zonal, redist=RefPropRedist()),
-            ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, β_NP=0.0,
-                       resolution=:zonal, res_prestep=true, redist=RefPropRedist()),
-            ShareShift(β_conv=0.5, β_load=0.5, β_RES=0.0, β_NP=0.0,
-                       resolution=:zonal, redist=LoadPropRedist()),
-            ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0, β_NP=1.0,
-                       resolution=:zonal, redist=RefPropRedist()),
+            ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0,
+                       resolution=:zonal, redist=RefPropRedist(), enforce_balance=false),
+            ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0,
+                       resolution=:zonal, res_prestep=true, redist=RefPropRedist(), enforce_balance=false),
+            ShareShift(β_conv=0.5, β_load=0.5, β_RES=0.0,
+                       resolution=:zonal, redist=LoadPropRedist(), enforce_balance=false),
         )
             @test check_np(POMATWO.shift_single(nd, params, 2, 1, m))
         end
 
-        # nodal resolution reproduces the target nodal injection exactly
-        mD = ShareShift(β_conv=0.5, β_load=0.5, resolution=:nodal, redist=RefPropRedist())
+        # all physical shares 0 ⇒ leftover fraction 1-β_RES-β_conv-β_load = 1: shifts
+        # nothing, p_new stays at the reference seed, and the gap is recorded as np_relax.
+        mNP = ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0,
+                         resolution=:zonal, redist=RefPropRedist(), enforce_balance=false)
+        trNP = POMATWO.ShiftTraceCollector()
+        pNP = POMATWO.shift_single(nd, params, 2, 1, mNP; trace = trNP)
+        @test all(isapprox(pNP[n], nd.P[(n, 1)]; atol = 1e-9) for n in nd.nodes)   # seed unchanged
+        dfNP = POMATWO.shift_trace_df(trNP)
+        @test Set(dfNP.component) == Set(["np_relax"])
+        for (z, znodes) in nd.nodes_in_zone
+            gap = NP_tgt(z) - sum(nd.P[(n, 1)] for n in znodes)
+            @test isapprox(sum(dfNP.delta[dfNP.node .== z]; init = 0.0), gap; atol = 1e-6)
+        end
+
+        # nodal resolution reproduces the target nodal injection exactly (feasible here)
+        mD = ShareShift(β_conv=0.5, β_load=0.5, resolution=:nodal, redist=RefPropRedist(), enforce_balance=false)
         pD = POMATWO.shift_single(nd, params, 2, 1, mD)
         @test all(isapprox(pD[n], nd.P[(n, 2)]; atol = 1e-6) for n in nd.nodes)
 
-        # saturation cascade: tight conv headroom, gap still closes
-        nd_tight = merge(nd, (gmax_conv = Dict("n1"=>9.0, "n2"=>3.0, "n3"=>16.0),))
-        mE = ShareShift(β_conv=1.0, β_load=0.0, resolution=:zonal, redist=RefPropRedist())
+        # tight conv headroom: the gap still closes because load absorbs the fallback
+        # (LoadPropRedist so every node's load room is routable — RefPropRedist would
+        # starve n2, whose target injection is 0, leaving an np_relax remainder instead).
+        nd_tight = merge(nd, (gmax_conv = Dict(("n1",1)=>9.0, ("n2",1)=>3.0, ("n3",1)=>16.0,
+                                               ("n1",2)=>9.0, ("n2",2)=>3.0, ("n3",2)=>16.0),))
+        mE = ShareShift(β_conv=1.0, β_load=0.0, resolution=:zonal, redist=LoadPropRedist(), enforce_balance=false)
         p_tight = POMATWO.shift_single(nd_tight, params, 2, 1, mE)
         @test all(isapprox(sum(p_tight[n] for n in znodes), NP_tgt(z); atol=1e-6)
                   for (z, znodes) in nd.nodes_in_zone)
 
-        # per-node reference map (patchwork) — invariant still closes; map==scalar when constant
-        mC = ShareShift(β_conv=0.5, β_load=0.5, resolution=:zonal, redist=LoadPropRedist())
+        # per-node reference map (patchwork) — closure holds; map==scalar when constant
+        mC = ShareShift(β_conv=0.5, β_load=0.5, resolution=:zonal, redist=LoadPropRedist(), enforce_balance=false)
         p_map = POMATWO.shift_single(nd, params, 2, Dict("n1"=>1,"n2"=>1,"n3"=>2), mC)
         @test check_np(p_map)
         p_s = POMATWO.shift_single(nd, params, 2, 1, mC)
         p_m = POMATWO.shift_single(nd, params, 2, Dict(n=>1 for n in nd.nodes), mC)
         @test all(isapprox(p_s[n], p_m[n]; atol=1e-12) for n in nd.nodes)
+    end
+
+    @testset "storage lever + availability-weighted cap" begin
+        # z2 = [n3]: target gap 15 exceeds conv headroom (1) + load headroom (5);
+        # the 9-MW remainder must be absorbed by storage. z1 = [n1,n2] has zero gap →
+        # untouched. gmax_conv is (node,time)-keyed and differs across time (30 at t=1,
+        # 16 at t=2) to exercise the availability cap. enforce_balance is off here to
+        # isolate the physical cascade (the nd is not globally balanced).
+        nd_sto = (
+            nodes = ["n1", "n2", "n3"],
+            times = [1, 2],
+            RES  = Dict(("n1",1)=>0.0,("n2",1)=>0.0,("n3",1)=>0.0,
+                        ("n1",2)=>0.0,("n2",2)=>0.0,("n3",2)=>0.0),
+            CONV = Dict(("n1",1)=>0.0,("n2",1)=>0.0,("n3",1)=>15.0),
+            gmax_conv = Dict(("n1",1)=>0.0,("n2",1)=>0.0,("n3",1)=>30.0,
+                             ("n1",2)=>0.0,("n2",2)=>0.0,("n3",2)=>16.0),
+            gmax_res  = Dict(("n1",1)=>0.0,("n2",1)=>0.0,("n3",1)=>0.0,
+                             ("n1",2)=>0.0,("n2",2)=>0.0,("n3",2)=>0.0),
+            gmax_sto_dis = Dict("n1"=>0.0,"n2"=>0.0,"n3"=>10.0),
+            gmax_sto_chg = Dict("n1"=>0.0,"n2"=>0.0,"n3"=>10.0),
+            P    = Dict(("n1",1)=>0.0,("n2",1)=>0.0,("n3",1)=>20.0,
+                        ("n1",2)=>0.0,("n2",2)=>0.0,("n3",2)=>35.0),
+            LOAD = Dict(("n1",1)=>0.0,("n2",1)=>0.0,("n3",1)=>5.0,
+                        ("n1",2)=>0.0,("n2",2)=>0.0,("n3",2)=>5.0),
+            nodes_in_zone = Dict("z1"=>["n1","n2"], "z2"=>["n3"]),
+        )
+
+        # availability-weighted conv cap depends on t (30−15 vs 16−15); storage
+        # bounds are ±installed power, time-independent.
+        rw = Dict("n3"=>0.0); cw = Dict("n3"=>15.0); lw = Dict("n3"=>5.0)
+        @test POMATWO._comp_bounds(:conv, "n3", 1, nd_sto, rw, cw, lw)[2] ≈ 15.0
+        @test POMATWO._comp_bounds(:conv, "n3", 2, nd_sto, rw, cw, lw)[2] ≈ 1.0
+        @test POMATWO._comp_bounds(:sto, "n3", 2, nd_sto, rw, cw, lw) == (-10.0, 10.0)
+
+        m_sto = ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0,
+                           resolution=:zonal, redist=RefPropRedist(), enforce_balance=false)
+        tr = POMATWO.ShiftTraceCollector()
+        p = POMATWO.shift_single(nd_sto, params, 2, 1, m_sto; trace = tr)
+        df = POMATWO.shift_trace_df(tr)
+
+        @test isapprox(p["n3"], 35.0; atol = 1e-6)             # gap fully closed
+        n3rows = filter(:node => ==("n3"), df)
+        getdelta(c) = sum(n3rows.delta[n3rows.component .== c]; init = 0.0)
+        @test isapprox(getdelta("conv"), 1.0; atol = 1e-6)     # conv headroom saturated
+        @test isapprox(getdelta("load"), 5.0; atol = 1e-6)     # load headroom saturated
+        @test isapprox(getdelta("sto"),  9.0; atol = 1e-6)     # remainder into storage
+        @test !("NP" in df.component)                          # no phantom exchange lever
+        @test !("np_relax" in df.component)                    # gap fully closed physically
+
+        # storage clipped to installed power: shrink the cap below the remainder →
+        # storage saturates and the unmet 5 MW is left relaxed toward reference.
+        nd_cap = merge(nd_sto, (gmax_sto_dis = Dict("n1"=>0.0,"n2"=>0.0,"n3"=>4.0),
+                                gmax_sto_chg = Dict("n1"=>0.0,"n2"=>0.0,"n3"=>4.0)))
+        tr2 = POMATWO.ShiftTraceCollector()
+        p2 = POMATWO.shift_single(nd_cap, params, 2, 1, m_sto; trace = tr2)
+        df2 = POMATWO.shift_trace_df(tr2)
+        @test isapprox(sum(df2.delta[(df2.node .== "n3") .& (df2.component .== "sto")]; init=0.0), 4.0; atol = 1e-6)
+        @test !("NP" in df2.component)
+        # z2's unmet 5 MW recorded as np_relax (zone label in the node column)
+        @test isapprox(sum(df2.delta[(df2.node .== "z2") .& (df2.component .== "np_relax")]; init=0.0), 5.0; atol = 1e-6)
+        @test isapprox(p2["n3"], 30.0; atol = 1e-6)            # only the physically reachable part
+    end
+
+    @testset "global balance guarantee (enforce_balance=true)" begin
+        Σp(p) = sum(values(p))
+        mBal = ShareShift(β_conv=0.5, β_load=0.5, resolution=:zonal, redist=RefPropRedist())
+
+        # balanced target (Σ P(·,2)=0), ample headroom → zones reach target AND
+        # Σ p_new ≈ 0, with no balance/np_relax corrections.
+        ndB = merge(nd, (P = Dict(("n1",1)=>10.0,("n2",1)=>-4.0,("n3",1)=>-6.0,
+                                  ("n1",2)=>2.0, ("n2",2)=>2.0, ("n3",2)=>-4.0),))
+        trB = POMATWO.ShiftTraceCollector()
+        pB  = POMATWO.shift_single(ndB, params, 2, 1, mBal; trace = trB)
+        dfB = POMATWO.shift_trace_df(trB)
+        @test isapprox(Σp(pB), 0.0; atol = 1e-6)
+        for (z, znodes) in ndB.nodes_in_zone
+            @test isapprox(sum(pB[n] for n in znodes), sum(ndB.P[(n,2)] for n in znodes); atol = 1e-6)
+        end
+        @test !("balance" in dfB.component) && !("np_relax" in dfB.component)
+
+        # surplus target (Σ P(·,2)=+4) → conventional-gen cut restores balance
+        ndS = merge(nd, (P = Dict(("n1",1)=>10.0,("n2",1)=>-4.0,("n3",1)=>-6.0,
+                                  ("n1",2)=>2.0, ("n2",2)=>2.0, ("n3",2)=>0.0),))
+        trS = POMATWO.ShiftTraceCollector()
+        pS  = POMATWO.shift_single(ndS, params, 2, 1, mBal; trace = trS)
+        dfS = POMATWO.shift_trace_df(trS)
+        @test isapprox(Σp(pS), 0.0; atol = 1e-6)
+        @test isapprox(sum(dfS.delta[dfS.component .== "balance"]; init=0.0), -4.0; atol = 1e-6)
+        @test all(in(Set(["RES_prestep","RES","conv","load","sto","balance","np_relax"])), dfS.component)
+        @test !("NP" in dfS.component)
+
+        # deficit target (Σ P(·,2)=−4) → conventional-gen raise restores balance
+        ndD = merge(nd, (P = Dict(("n1",1)=>10.0,("n2",1)=>-4.0,("n3",1)=>-6.0,
+                                  ("n1",2)=>2.0, ("n2",2)=>2.0, ("n3",2)=>-8.0),))
+        trD = POMATWO.ShiftTraceCollector()
+        pD  = POMATWO.shift_single(ndD, params, 2, 1, mBal; trace = trD)
+        dfD = POMATWO.shift_trace_df(trD)
+        @test isapprox(Σp(pD), 0.0; atol = 1e-6)
+        @test isapprox(sum(dfD.delta[dfD.component .== "balance"]; init=0.0), 4.0; atol = 1e-6)
+
+        # conv exhausted → load last-resort guarantees balance (with a warning)
+        pin = Dict("n1"=>3.0, "n2"=>0.0, "n3"=>0.0)                   # surplus R = 3
+        ndZ = merge(nd, (gmax_conv = Dict((n,t)=>0.0 for n in nd.nodes, t in nd.times),))
+        cw  = Dict(n => 0.0 for n in nd.nodes)                        # no conv to cut
+        lw  = Dict(n => 0.0 for n in nd.nodes)
+        trZ = POMATWO.ShiftTraceCollector()
+        @test_logs (:warn, r"insufficient") POMATWO._enforce_global_balance!(pin, ndZ, 2, cw, lw, trZ)
+        @test isapprox(sum(values(pin)), 0.0; atol = 1e-6)
     end
 
     @testset "waterfill bounds and remainder" begin
@@ -203,24 +335,25 @@ function test_refday_basecase()
         @test ap3["a"] == 0.0 && ap3["b"] == 0.0 && rem3 ≈ -2.0
     end
 
-    @testset "validate_shares warnings" begin
-        @test_logs (:warn, r"sum to") POMATWO.validate_shares(
-            ShareShift(β_conv = 0.9, β_load = 0.0, β_RES = 0.0, β_NP = 0.0))
+    @testset "validate_shares errors" begin
+        @test_throws ErrorException POMATWO.validate_shares(
+            ShareShift(β_conv = 0.9, β_load = 0.9, β_RES = 0.0))   # sum > 1
         @test_throws ErrorException POMATWO.validate_shares(
             ShareShift(resolution = :bogus))
     end
 
     @testset "shift_single trace: deltas complete and valid" begin
-        valid_comps = Set(["RES_prestep", "RES", "conv", "load", "NP", "unabsorbed"])
+        # enforce_balance off → isolate the physical cascade + np_relax bookkeeping.
+        valid_comps = Set(["RES_prestep", "RES", "conv", "load", "sto", "balance", "np_relax"])
         for m in (
-            ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, β_NP=0.0,
-                       resolution=:zonal, redist=RefPropRedist()),
-            ShareShift(β_conv=0.5, β_load=0.5, β_RES=0.0, β_NP=0.0,
-                       resolution=:zonal, res_prestep=true, redist=LoadPropRedist()),
+            ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0,
+                       resolution=:zonal, redist=RefPropRedist(), enforce_balance=false),
+            ShareShift(β_conv=0.5, β_load=0.5, β_RES=0.0,
+                       resolution=:zonal, res_prestep=true, redist=LoadPropRedist(), enforce_balance=false),
             ShareShift(β_conv=0.5, β_load=0.5, resolution=:nodal,
-                       res_prestep=true, redist=RefPropRedist()),
-            ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0, β_NP=1.0,
-                       resolution=:zonal, redist=RefPropRedist()),
+                       res_prestep=true, redist=RefPropRedist(), enforce_balance=false),
+            ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0,
+                       resolution=:zonal, redist=RefPropRedist(), enforce_balance=false),
         )
             tr = POMATWO.ShiftTraceCollector()
             p = POMATWO.shift_single(nd, params, 2, 1, m; trace = tr)
@@ -231,20 +364,21 @@ function test_refday_basecase()
             @test all(==(2), df.Time)
             # prestep rows appear iff the pre-step is active
             @test ("RES_prestep" in df.component) == m.res_prestep
-            # :NP always closes the cascade → no unabsorbed remainder
-            @test !("unabsorbed" in df.component)
+            @test !("NP" in df.component)             # no phantom exchange lever
 
-            # deltas are complete: p_new = P_ref + Σ deltas per node
-            nodal = filter(:component => !=("unabsorbed"), df)
+            # deltas are complete: p_new = P_ref + Σ nodal deltas (np_relax excluded)
+            nodal = filter(:component => !=("np_relax"), df)
             for n in nd.nodes
                 d = sum(nodal.delta[nodal.node .== n]; init = 0.0)
                 @test isapprox(p[n], nd.P[(n, 1)] + d; atol = 1e-6)
             end
-            # per-zone: Σ deltas = full net-position gap
+            # per-zone: realized nodal shift + relaxation = full net-position gap
+            relax = filter(:component => ==("np_relax"), df)
             for (z, znodes) in nd.nodes_in_zone
                 dz = sum(nodal.delta[in.(nodal.node, Ref(Set(znodes)))]; init = 0.0)
+                rz = sum(relax.delta[relax.node .== z]; init = 0.0)
                 gap = NP_tgt(z) - sum(nd.P[(n, 1)] for n in znodes)
-                @test isapprox(dz, gap; atol = 1e-6)
+                @test isapprox(dz + rz, gap; atol = 1e-6)
             end
 
             # tracing does not change the result
@@ -354,6 +488,10 @@ function test_refday_trace_e2e()
                 @test isapprox(base[:netinput_ac][n, t], P_src[(n, refmap[(n, t)])] - d;
                                atol = 1e-6)
             end
+            # basecase represents a globally balanced system (production = consumption)
+            for t in 1:4
+                @test isapprox(sum(base[:netinput_ac][n, t] for n in params.sets.N), 0.0; atol = 1e-6)
+            end
             # no trace when disabled
             @test !haskey(build_refday_basecase(bc, params; collect_trace = false), :trace)
 
@@ -406,6 +544,11 @@ function test_refday_trace_e2e()
                 @test isapprox(base_da[:netinput_ac][n, t],
                                imp[(n, refmap_da[(n, t)])] - d; atol = 1e-6)
             end
+            # DA-source basecase is globally balanced too (enforce_balance fixes the
+            # not-necessarily-zero DA injection sum)
+            for t in 1:4
+                @test isapprox(sum(base_da[:netinput_ac][n, t] for n in params.sets.N), 0.0; atol = 1e-6)
+            end
 
             # ── Redispatch source ─────────────────────────────────────────────
             # forecast run has no redispatch results → explicit error
@@ -441,6 +584,9 @@ function test_refday_trace_e2e()
                         init = 0.0)
                 @test isapprox(base_rd[:netinput_ac][n, t],
                                P_rd[(n, refmap_rd[(n, t)])] - d; atol = 1e-6)
+            end
+            for t in 1:4
+                @test isapprox(sum(base_rd[:netinput_ac][n, t] for n in params.sets.N), 0.0; atol = 1e-6)
             end
         end
     end

@@ -51,7 +51,7 @@ The constructor can be called by providing the directory that contains the resul
 - `FBMC_INF::DataFrame`: FBMC infeasibility slack values per CNE line and time period.
 - `REFDAY_MATCH::DataFrame`: Reference-day basecase trace — per (group, target_time) the matched reference time, cluster metadata (may be `missing` where a join found no counterpart) and whether the global fallback match was used. Empty for runs without a [`ReferenceDayBasecase`](@ref).
 - `REFDAY_GROUPS::DataFrame`: Reference-day basecase trace — group → node membership of the matching scope (join with `REFDAY_MATCH` on `:group` for per-node reference times, see [`refday_reference_times`](@ref)). Loaded from the scenario root, not the subrun folders.
-- `REFDAY_SHIFT::DataFrame`: Reference-day basecase trace — sparse per (Time, node, component) net-injection deltas applied by the shift (components `RES_prestep`, `RES`, `conv`, `load`, `NP`, `unabsorbed`; for `load` the actual load change is `-delta`).
+- `REFDAY_SHIFT::DataFrame`: Reference-day basecase trace — sparse per (Time, node, component) net-injection deltas applied by the shift (physical levers `RES_prestep`, `RES`, `conv`, `load`, `sto`, plus `balance` from the global balance pass; for `load` the actual load change is `-delta`). Also carries per (Time, zone) `np_relax` rows (zone label in the `node` column) recording how far each zone's net position was left relaxed toward the reference.
 
 # Constructor
 ```julia
@@ -102,7 +102,6 @@ struct DataFiles
 
         # tables stored once at the scenario root instead of per subrun folder
         root_tables = (:REFDAY_GROUPS,)
-        fallback_tables = Symbol[]
 
         for name in fields
 
@@ -118,15 +117,6 @@ struct DataFiles
             for folder in subrun_folders
                 file = joinpath(folder, "$type$sname.arrow")
                 isfile(file) && push!(table_files, file)
-
-                # If no regular file found, try with "2DA" prefix (for TwoDayAhead basecase results)
-                if !isfile(file)
-                    file_2da = joinpath(folder, "2DA" * "$sname.arrow")
-                    if isfile(file_2da)
-                        push!(table_files, file_2da)
-                        push!(fallback_tables, name)
-                    end
-                end
             end
 
             if !isempty(table_files)
@@ -135,13 +125,6 @@ struct DataFiles
                 self[name] = DataFrame()
             end
         end
-
-        # the 2DA fallback loads tables from a different MarketState (TwoDayAhead)
-        # than requested — say so instead of silently mixing states downstream
-        isempty(fallback_tables) || @warn(
-            "DataFiles: table(s) $(sort(unique(fallback_tables))) not found with prefix " *
-            "'$type' in $dir; loaded the 2DA-prefixed (TwoDayAhead state) files instead. " *
-            "Do not mix these with tables from other states when computing balances.")
 
         values = [self[field] for field in fields]
 

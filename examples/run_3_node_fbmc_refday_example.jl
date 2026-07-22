@@ -1,7 +1,7 @@
 # Flow-based market run with a reference-day (D2CF-style) basecase.
 #
 # Two stages:
-#   1. "Forecast" run: a regular flow-based run whose TwoDayAhead basecase
+#   1. "Forecast" run: a regular flow-based run whose DayAhead basecase
 #      results serve as the reference pool + target forecast.
 #   2. Reference-day run: same setup, but the FBMC basecase is built by
 #      matching + shifting reference days from stage 1 instead of solving
@@ -10,7 +10,8 @@ using POMATWO
 using HiGHS
 using Dates
 
-datapath = joinpath("examples", "test_data_3_nodes_fbmc")
+Pkgdir = pkgdir(POMATWO)
+datapath = joinpath(Pkgdir, "examples", "test_data_3_nodes_fbmc")
 
 data_files = Dict{Symbol,String}(
     :plants => joinpath(datapath, "plants.csv"),
@@ -46,7 +47,7 @@ setup_refday = ModelSetup(;
         GSKStrategy = DispOnlyGSK(),
         basecase = ReferenceDayBasecase(
             source = joinpath(output_path, "forecast"),   # forecast run results
-            source_type = "2DA",                          # its nodal TwoDayAhead tables
+            source_type = "DA",                          # its DayAhead tables
             matching = MatchingConfig(
                 cluster_size = 2,          # 2-step "days" so the 4-step horizon has 2 clusters
                 lookback = 1,
@@ -54,7 +55,7 @@ setup_refday = ModelSetup(;
                 scope = ZonalMatchScope(), # per-TSO matching: each zone borrows its own reference day
             ),
             shift = ShareShift(
-                β_conv = 0.5, β_load = 0.5, β_RES = 0.0, β_NP = 0.0,
+                β_conv = 0.5, β_load = 0.5, β_RES = 0.0,
                 resolution = :zonal,
                 res_prestep = true,        # hard-align RES to the target first
                 redist = GSKRedist(DispOnlyGSK()),
@@ -64,12 +65,9 @@ setup_refday = ModelSetup(;
     RedispatchSetup = DCLF(PhaseAngle),
 )
 mr_refday = ModelRun(params, setup_refday, solver;
-                     scenarioname = "refday", resultdir = output_path, overwrite = true)
+                     scenarioname = "DoD", resultdir = output_path, overwrite = true)
 POMATWO.run(mr_refday)   # note: no TwoDayAhead solve — basecase comes from the reference days
 
 # ---- Compare ----
 results_forecast = DataFiles(joinpath(output_path, "forecast"))
-results_refday   = DataFiles(joinpath(output_path, "refday"))
-println("forecast run states: ", state_sequence(setup_forecast))
-println("refday run states:   ", state_sequence(setup_refday))
-check_infeasibility(results_refday)
+results_Day_of_Delivery  = DataFiles(joinpath(output_path, "DoD"))

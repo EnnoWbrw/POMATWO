@@ -21,12 +21,12 @@ using POMATWO: dict_to_matrix, zone_to_zone_ptdf, define_cne!,
     add_weekday!, match_by_cluster, match_by_scope, build_refday_basecase,
     calc_fbmc_params
 
-pretty(x) = (show(stdout, "text/plain", x); println())
 
 # -----------------------------------------------------------------------------
 # 1. Load the v2 FBMC test system
 # -----------------------------------------------------------------------------
-datapath = joinpath("examples", "test_data_3_nodes_v2_fbmc")
+Pkgdir = pkgdir(POMATWO)
+datapath = joinpath(Pkgdir, "examples", "test_data_3_nodes_v2_fbmc")
 data_files = Dict{Symbol,String}(
     :plants  => joinpath(datapath, "plants.csv"),
     :nodes   => joinpath(datapath, "nodes.csv"),
@@ -40,41 +40,8 @@ data_files = Dict{Symbol,String}(
 params, report = load_data_with_report(data_files)
 print_report(report; show_notes = false)
 
-println("\nnodes         = ", params.sets.N)
-println("zones         = ", params.sets.Z)
-println("lines         = ", params.sets.L)
-println("dispatchable  = ", params.sets.DISP)   # p1 gas, p4 coal (wind/solar excluded)
-println("slack         = ", params.slack)
-println("nodes_in_zone = ", params.nodes_in_zone)
-
-output_path = "results_v2_fbmc_refday"
-solver = HiGHS.Optimizer
-
 # -----------------------------------------------------------------------------
-# 2. Nodal PTDF   (PTDFn = Bline * inv(Bbus_reduced))
-# -----------------------------------------------------------------------------
-PTDFn = dict_to_matrix(params.ptdf)
-println("\n=== Nodal PTDF (l x n) ===")
-pretty(PTDFn)
-
-# -----------------------------------------------------------------------------
-# 3. GSK & zonal PTDF — contrast: FlatGSK vs DispOnlyGSK
-#    Zone Z2 = {n2 (wind), n3 (coal)}:
-#      Flat     -> [0.5, 0.5]
-#      DispOnly -> [0.0, 1.0]   (only dispatchable coal at n3 counts)
-# -----------------------------------------------------------------------------
-for strat in (FlatGSK(), DispOnlyGSK())
-    println("\n=== GSK = ", strat, " ===")
-    G = build_gsk(params, strat; normalize_empty = :flat)
-    println("-- GSK (n x z) --");                  pretty(G)
-    PTDFz = zonal_ptdf(PTDFn, G)
-    println("-- zonal PTDF = PTDFn*GSK (l x z) --"); pretty(PTDFz)
-    PTDFzz = zone_to_zone_ptdf(PTDFz; exclude_self = true)
-    println("-- zone-to-zone PTDF (l x zonepairs) --"); pretty(PTDFzz)
-end
-
-# -----------------------------------------------------------------------------
-# 4. Stage 1 — forecast run (optimization basecase; its 2DA tables are the
+# 2. Stage 1 — forecast run (optimization basecase; its DA tables are the
 #    reference pool for the reference-day method)
 # -----------------------------------------------------------------------------
 setup_forecast = ModelSetup(;
@@ -86,8 +53,8 @@ mr_forecast = ModelRun(params, setup_forecast, solver;
     scenarioname = "forecast", resultdir = output_path, overwrite = true)
 POMATWO.run(mr_forecast)
 
-ref = DataFiles(joinpath(output_path, "forecast"); type = "2DA")
-println("\n=== 2DA reference pool: nodal ACINJECTION ===");  pretty(ref.NETINPUT)
+ref = DataFiles(joinpath(output_path, "forecast");)
+
 
 # -----------------------------------------------------------------------------
 # 5. Reference-day matching (cluster_size = 2 -> 2 clusters over the 4-step horizon)
@@ -119,16 +86,16 @@ pretty(match_by_cluster(gen_df; kw...))
 #    injection exactly, :zonal keeps the reference-day texture reshaped to the NP.
 # -----------------------------------------------------------------------------
 shifts = Dict(
-    :zonal => ShareShift(β_conv = 0.5, β_load = 0.5, β_RES = 0.0, β_NP = 0.0,
+    :zonal => ShareShift(β_conv = 0.5, β_load = 0.5, β_RES = 0.0,
                          resolution = :zonal, res_prestep = true,
                          redist = GSKRedist(DispOnlyGSK())),
-    :nodal => ShareShift(β_conv = 0.5, β_load = 0.5, β_RES = 0.0, β_NP = 0.0,
+    :nodal => ShareShift(β_conv = 0.5, β_load = 0.5, β_RES = 0.0,
                          resolution = :nodal, res_prestep = true,
                          redist = GSKRedist(DispOnlyGSK())),
 )
 for res in (:zonal, :nodal)
     bc = ReferenceDayBasecase(source = joinpath(output_path, "forecast"),
-        source_type = "2DA", matching = cfg, shift = shifts[res])
+        source_type = "DA", matching = cfg, shift = shifts[res])
     base = build_refday_basecase(bc, params)
     println("\n=== BASECASE (", res, " shift) ===")
     println("-- :netinput_ac (n x t) --"); pretty(base[:netinput_ac])
@@ -152,17 +119,17 @@ for res in (:zonal, :nodal)
         MarketType      = ZonalMarket(FlowBased(
             GSKStrategy = DispOnlyGSK(),
             basecase    = ReferenceDayBasecase(
-                source = joinpath(output_path, "forecast"), source_type = "2DA",
+                source = joinpath(output_path, "forecast"), source_type = "DA",
                 matching = cfg, shift = shifts[res]),
         )),
         RedispatchSetup = DCLF(PhaseAngle),
     )
     mr = ModelRun(params, setup, solver;
-        scenarioname = "refday_$(res)", resultdir = output_path, overwrite = true)
+        scenarioname = "DoD_$(res)", resultdir = output_path, overwrite = true)
     POMATWO.run(mr)
-    out = DataFiles(joinpath(output_path, "refday_$(res)"))
-    println("\n=== refday market — ", res, " basecase: GEN ===");      pretty(out.GEN)
-    println("=== refday market — ", res, " basecase: EXCHANGE ===");   pretty(out.EXCHANGE)
+    out = DataFiles(joinpath(output_path, "DoD_$(res)"))
+    println("\n=== Day of Delivery market — ", res, " basecase shift: GEN ===");      pretty(out.GEN)
+    println("=== Day of Delivery market — ", res, " basecase shift: EXCHANGE ===");   pretty(out.EXCHANGE)
     println("state_sequence: ", state_sequence(setup))  # note: no TwoDayAhead
     check_infeasibility(out)
 
