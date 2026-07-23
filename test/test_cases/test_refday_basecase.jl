@@ -469,6 +469,8 @@ function test_refday_trace_e2e()
             for sub in ("subrun_t1-t2", "subrun_t3-t4")
                 @test isfile(joinpath(scen, sub, "REFDAY_MATCH.arrow"))
                 @test isfile(joinpath(scen, sub, "REFDAY_SHIFT.arrow"))
+                # flow-based domain persisted per subrun (DayAhead stage, no prefix)
+                @test isfile(joinpath(scen, sub, "RAM.arrow"))
             end
             @test isfile(joinpath(scen, "REFDAY_GROUPS.arrow"))
 
@@ -505,11 +507,29 @@ function test_refday_trace_e2e()
             rt = refday_reference_times(out)
             @test nrow(rt) == length(params.sets.N) * 4
 
+            # RAM table: one row per CNE line and timestep, covering both splits, with
+            # the 70%-rule reproducible from the persisted columns alone
+            @test !isempty(out.RAM)
+            @test sort(unique(out.RAM.Time)) == [1, 2, 3, 4]
+            @test Set(out.RAM.index) == Set(out.FBMC_INF.index)
+            @test nrow(out.RAM) == length(unique(out.RAM.index)) * 4
+            @test nrow(unique(out.RAM[:, [:index, :Time]])) == nrow(out.RAM)
+            for r in eachrow(out.RAM)
+                @test isfinite(r.RAM_POS) && isfinite(r.RAM_NEG) && isfinite(r.F0)
+                @test r.fmax == params.acline_capacity[r.index]
+                @test r.RAM_POS ≈ max(r.fmax - r.F0 - r.FRM * r.fmax, r.minRAM * r.fmax)
+                @test r.RAM_NEG ≈ min(-r.fmax - r.F0 + r.FRM * r.fmax, -r.minRAM * r.fmax)
+            end
+
             # non-refday results read back with empty trace tables
             fc_out = DataFiles(joinpath(tmpdir, "forecast"))
             @test isempty(fc_out.REFDAY_MATCH) && isempty(fc_out.REFDAY_GROUPS) &&
                   isempty(fc_out.REFDAY_SHIFT)
             @test isempty(@test_logs (:warn, r"no reference-day trace") refday_reference_times(fc_out))
+            # ... but the RAM table is written for the OptimizationBasecase run too
+            @test !isempty(fc_out.RAM)
+            @test sort(unique(fc_out.RAM.Time)) == [1, 2, 3, 4]
+            @test all(isfinite, fc_out.RAM.F0)
 
             # ── DayAhead source: zonal DA persists no nodal tables → nodal ────
             # injections computed from plant-level GEN/CHARGE + nodal_load.

@@ -262,6 +262,15 @@ function test_read_output()
             end
 
             # =================================================================
+            @testset "DataFiles -- RAM empty without flow-based coupling" begin
+                # The :RAM table is only appended by add_exchange(::FlowBased);
+                # NTC / nodal runs must read back an empty frame, not error.
+                for r in (results_zonal, results_redisp, results_nodal, results_prosumer)
+                    @test isempty(r.RAM)
+                end
+            end
+
+            # =================================================================
             @testset "DataFiles -- split time horizon" begin
                 results_split = with_logger(logger) do
                     setup = ModelSetup(

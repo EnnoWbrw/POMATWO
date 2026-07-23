@@ -682,8 +682,9 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     @unpack ntc,
     dcline_capacity, 
     dc_start, 
-    dc_end, 
+    dc_end,
     nodes_in_zone,
+    acline_capacity,
     cne = sr.modelrun.params
     fbmc_params = sr.market_state.fbmc_params
     connected_zones_ac = find_connected_zones_ac(sr.modelrun.params)
@@ -799,6 +800,7 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
     df_ntc(sr.results)
     df_exchange(sr.results)
     df_fbmc_inf(sr.results)
+    df_ram(sr.results)
 
     append_results!(sr.results, :BIL_EXCHANGE, DataFrame(
         From = [z for (z, zz) in connected_zones_ac for t in T],
@@ -818,5 +820,22 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
         Time = repeat(collect(T), outer = length(cne)),
         FBMC_INF_POS = [FBMC_INF_POS[l, t] for l in cne for t in T],
         FBMC_INF_NEG = [FBMC_INF_NEG[l, t] for l in cne for t in T],
+    ))
+
+    # Persist the flow-based domain that bound this stage: the RAM used by the
+    # constraints above plus the basecase reference flow F0 it was derived from. Plain
+    # floats, computed before the solve — they pass through fetch_results untouched.
+    # `:F0`/`:minRAM`/`:FRM` are absent from hand-built fbmc_params dicts (see
+    # _run_intraday), hence the NaN fallbacks.
+    F0 = get(fbmc_params, :F0, nothing)
+    append_results!(sr.results, :RAM, DataFrame(
+        index = repeat(cne, inner = length(T)),
+        Time = repeat(collect(T), outer = length(cne)),
+        RAM_POS = [fbmc_params[:RAM][l, t, "pos"] for l in cne for t in T],
+        RAM_NEG = [fbmc_params[:RAM][l, t, "neg"] for l in cne for t in T],
+        F0 = [isnothing(F0) ? NaN : F0[l, t] for l in cne for t in T],
+        fmax = [get(acline_capacity, l, 0.0) for l in cne for t in T],
+        FRM = fill(get(fbmc_params, :FRM, NaN), length(cne) * length(T)),
+        minRAM = fill(get(fbmc_params, :minRAM, NaN), length(cne) * length(T)),
     ))
 end

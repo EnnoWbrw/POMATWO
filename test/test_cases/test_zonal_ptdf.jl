@@ -772,6 +772,21 @@ function test_zonal_ptdf()
         @test size(fb[:RAM]) == (length(params.cne), length(T), 2)
         @test all(isfinite.(fb[:RAM].data))
 
+        # F0 and the 70%-rule fractions are exposed alongside RAM so they can be
+        # persisted (:RAM result table). The rule must be reproducible from
+        # (F0, fmax, FRM, minRAM) alone — that is what the persisted table promises.
+        @test size(fb[:F0]) == (length(params.cne), length(T))
+        @test all(isfinite.(fb[:F0].data))
+        @test fb[:minRAM] == 0.7
+        @test fb[:FRM] == 0.1
+        for l in params.cne, t in T
+            fmax = params.acline_capacity[l]
+            @test fb[:RAM][l, t, "pos"] ≈
+                  max(fmax - fb[:F0][l, t] - fb[:FRM] * fmax, fb[:minRAM] * fmax)
+            @test fb[:RAM][l, t, "neg"] ≈
+                  min(-fmax - fb[:F0][l, t] + fb[:FRM] * fmax, -fb[:minRAM] * fmax)
+        end
+
         # Static strategy still returns 2D matrices (regression)
         empty!(params.cne)
         fb_static = POMATWO.calc_fbmc_params(POMATWO.FlatGSK(), params, basecase, T)

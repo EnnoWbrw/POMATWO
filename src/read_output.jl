@@ -49,6 +49,7 @@ The constructor can be called by providing the directory that contains the resul
 - `NodalMarketBalance::DataFrame`: Market balance data at the nodal level.
 - `NodalMarketRedispBalance::DataFrame`: Redispatch-adjusted nodal market balance.
 - `FBMC_INF::DataFrame`: FBMC infeasibility slack values per CNE line and time period.
+- `RAM::DataFrame`: Flow-based domain as used by the day-ahead FBMC constraints, per CNE line and time period: `RAM_POS`/`RAM_NEG` (remaining available margin), `F0` (basecase reference flow the RAM was derived from), `fmax` (line capacity) and the `FRM`/`minRAM` fractions of that run. The 70 %-rule is reproducible from the table alone: `RAM_POS == max(fmax - F0 - FRM*fmax, minRAM*fmax)`. Empty for runs without a flow-based exchange formulation.
 - `REFDAY_MATCH::DataFrame`: Reference-day basecase trace — per (group, target_time) the matched reference time, cluster metadata (may be `missing` where a join found no counterpart) and whether the global fallback match was used. Empty for runs without a [`ReferenceDayBasecase`](@ref).
 - `REFDAY_GROUPS::DataFrame`: Reference-day basecase trace — group → node membership of the matching scope (join with `REFDAY_MATCH` on `:group` for per-node reference times, see [`refday_reference_times`](@ref)). Loaded from the scenario root, not the subrun folders.
 - `REFDAY_SHIFT::DataFrame`: Reference-day basecase trace — sparse per (Time, node, component) net-injection deltas applied by the shift (physical levers `RES_prestep`, `RES`, `conv`, `load`, `sto`, plus `balance` from the global balance pass; for `load` the actual load change is `-delta`). Also carries per (Time, zone) `np_relax` rows (zone label in the `node` column) recording how far each zone's net position was left relaxed toward the reference.
@@ -85,6 +86,7 @@ struct DataFiles
     NodalMarketBalance::DataFrame
     NodalMarketRedispBalance::DataFrame
     FBMC_INF::DataFrame
+    RAM::DataFrame
     REFDAY_MATCH::DataFrame
     REFDAY_GROUPS::DataFrame
     REFDAY_SHIFT::DataFrame

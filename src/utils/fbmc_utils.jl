@@ -210,11 +210,25 @@ The calculation follows the standard FBMC methodology:
   accessible as `ram[l, t, "pos"]` or `ram[l, t, "neg"]`
 """
 function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxisArray, PTDFzz::DenseAxisArray, PTDFn::DenseAxisArray, T::UnitRange; minRAM::Float64=0.7, FRM::Float64=0.1)
+    F0 = _basecase_f0(params, TwoDayAhead_results, PTDFz, T)
+    return _ram_from_f0(params, F0, T; minRAM=minRAM, FRM=FRM)
+end
+
+"""
+    _basecase_f0(params, basecase_results, PTDFz, T) -> DenseAxisArray (cne × t)
+
+Basecase reference flow `f0[l,t]` per CNE line — step 1 of [`calc_ram`](@ref), split out
+so the value can be persisted alongside the RAM it produces (see the `:F0` entry of
+[`calc_fbmc_params`](@ref)).
+
+`basecase_results` is any dict with `:lineflows` (l×t) and `:netinput_ac` (n×t).
+"""
+function _basecase_f0(params::Parameters, basecase_results::Dict, PTDFz::DenseAxisArray, T::UnitRange)
     cne_lines = params.cne
 
-    # lineflows[l, t] and netinput[n, t] from TwoDayAhead basecase
-    lineflows    = TwoDayAhead_results[:lineflows]
-    netinput_ac  = TwoDayAhead_results[:netinput_ac]
+    # lineflows[l, t] and netinput[n, t] from the basecase
+    lineflows    = basecase_results[:lineflows]
+    netinput_ac  = basecase_results[:netinput_ac]
 
     # Net position (export-positive) per zone per timestep:
     # NP[z, t] = -Σ_n∈z netinput_ac[n, t], since netinput_ac follows the
@@ -245,9 +259,9 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     # so the FBMC domain silently never binds. Nothing errors. Guarded by the
     # "reference-reproduction invariant" testset in test/test_cases/test_zonal_ptdf.jl.
     # (_ptdfz handles both static l×z and time-dependent l×z×t PTDFz matrices.)
-    l0 = Dict{Tuple{String, Int}, Float64}()
-    for l in cne_lines, t in T
-        l0[l, t] = -lineflows[l, t] - sum(_ptdfz(PTDFz, l, z, t) * NP[z, t] for z in zones)
+    f0_data = Array{Float64, 2}(undef, length(cne_lines), length(T))
+    for (i, l) in enumerate(cne_lines), (j, t) in enumerate(T)
+        f0_data[i, j] = -lineflows[l, t] - sum(_ptdfz(PTDFz, l, z, t) * NP[z, t] for z in zones)
     end
     # Steps to include non flow based zones (which is not currently accounted for).
     # ENTSO-E notation below writes Fref for the reference flow; in THIS model that is
@@ -261,6 +275,18 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     #              0.2 ∙ 𝐹𝑚𝑎𝑥 − (𝐹𝑚𝑎𝑥 − 𝐹𝑅𝑀 − 𝐹0FB), 0)
     # see: https://www.acer.europa.eu/sites/default/files/documents/Media/News/Documents/Amendment-DA-CCM-CCR-2026.pdf
     # P. 32 ff.
+
+    return Containers.DenseAxisArray(f0_data, cne_lines, collect(T))
+end
+
+"""
+    _ram_from_f0(params, F0, T; minRAM, FRM) -> DenseAxisArray (cne × t × direction)
+
+Steps 2–3 of [`calc_ram`](@ref): apply the Additional Margin Requirement (70 %-rule) to
+the basecase reference flows `F0` from [`_basecase_f0`](@ref).
+"""
+function _ram_from_f0(params::Parameters, F0::DenseAxisArray, T::UnitRange; minRAM::Float64=0.7, FRM::Float64=0.1)
+    cne_lines = params.cne
 
     # Build RAM as DenseAxisArray indexed by (line, t, direction)
     # RAM_pos[l,t]: maximum flow in positive direction
@@ -279,7 +305,7 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
         f_max   = get(params.acline_capacity, line, 0.0)
         frm_abs = FRM * f_max
         for (j, t) in enumerate(T)
-            f0       = l0[line, t]
+            f0       = F0[line, t]
             init_pos = f_max - f0 - frm_abs
             init_neg = -f_max - f0 + frm_abs
             amr_pos  = max(0.0,  minRAM *  f_max - init_pos)
@@ -334,7 +360,9 @@ Calculate FBMC parameters: GSK, PTDFn, PTDFz, PTDFzz.
     * `:PTDFn` => Nodal PTDF matrix (l×n)
     * `:PTDFz` => Zonal PTDF matrix (l×z)
     * `:PTDFzz` => Zone-to-zone PTDF matrix (l×m)
-    * `:RAM` => Dict mapping lines to remaining available margin
+    * `:RAM` => Remaining available margin (cne×t×direction)
+    * `:F0` => Basecase reference flow the RAM was derived from (cne×t)
+    * `:minRAM`, `:FRM` => the fractions used for this calculation
 """
 function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Dict, T; kwargs...)
     # Extract GSKStrategy from the market setup and delegate to the strategy-based core
@@ -371,13 +399,17 @@ function calc_fbmc_params(gsk_strategy::GSKStrategy, params::Parameters, TwoDayA
     cne = params.cne
     PTDFz  = _select_lines(PTDFz, cne)
     PTDFzz = PTDFzz[cne, :]
-    RAM = calc_ram(params, TwoDayAhead_result, PTDFz, PTDFzz, PTDFn, T; minRAM=minRAM, FRM=FRM)
+    F0 = _basecase_f0(params, TwoDayAhead_result, PTDFz, T)
+    RAM = _ram_from_f0(params, F0, T; minRAM=minRAM, FRM=FRM)
     fbmc_params = Dict(
         :GSK => GSK,
         :PTDFn => PTDFn,
         :PTDFz => PTDFz,
         :PTDFzz => PTDFzz,
-        :RAM => RAM 
+        :RAM => RAM,
+        :F0 => F0,
+        :minRAM => minRAM,
+        :FRM => FRM,
     )
     return fbmc_params
 end

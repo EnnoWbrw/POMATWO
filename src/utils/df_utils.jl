@@ -135,6 +135,28 @@ function df_fbmc_inf(dict)
 end
 
 """
+Initializes the :RAM DataFrame in the results dictionary if it does not exist.
+Stores the flow-based Remaining Available Margin per CNE line and time period, together
+with the basecase reference flow `F0` it was derived from and the parameters of the
+70 %-rule (`fmax`, `FRM`, `minRAM`). Plain floats — computed before the solve, not
+model variables.
+"""
+function df_ram(dict)
+    if !haskey(dict, :RAM)
+        dict[:RAM] = DataFrame(;
+            index = String[],
+            Time = Int[],
+            RAM_POS = Float64[],
+            RAM_NEG = Float64[],
+            F0 = Float64[],
+            fmax = Float64[],
+            FRM = Float64[],
+            minRAM = Float64[],
+        )
+    end
+end
+
+"""
 Initializes the :BIL_EXCHANGE DataFrame in the results dictionary if it does not exist.
 Stores bilateral exchange results for each zone pair and time period.
 """
