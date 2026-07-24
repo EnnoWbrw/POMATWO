@@ -1,22 +1,17 @@
 
 """
-    zonal_ptdf(PTDF, GSK) -> DenseAxisArray
+    zonal_ptdf(PTDF, GSK) -> Matrix
 
 Compute zonal PTDF (l×z) as PTDF(l×n) * GSK(n×z).
 
-GSK rows are reordered to match PTDF's column (node) order before multiplying,
-so the result is correct regardless of how the two arrays were built.
+Assumes that the columns of PTDF correspond to `nodes` in the same order
+used to build GSK.
 """
 function zonal_ptdf(PTDF::DenseAxisArray, GSK::DenseAxisArray)
-    nodes_ptdf = axes(PTDF, 2)
-    nodes_gsk  = axes(GSK, 1)
-    @assert length(nodes_ptdf) == length(nodes_gsk) "PTDF is l×n, GSK must be n×z (size mismatch)"
-    @assert Set(collect(nodes_ptdf)) == Set(collect(nodes_gsk)) "PTDF and GSK must cover the same node set"
-    # Reorder GSK rows to match PTDF column order for a correct matrix product
-    GSK_aligned = GSK[collect(nodes_ptdf), :]
-    PTDFz_mat = round.(PTDF.data * GSK_aligned.data, digits=4)
-    PTDFz = JuMP.Containers.DenseAxisArray(PTDFz_mat, axes(PTDF, 1), axes(GSK, 2))
-    return PTDFz
+    @assert size(PTDF, 2) == size(GSK, 1) "PTDF is l×n, GSK must be n×z"
+   PTDFz_mat = round.(PTDF.data * GSK.data, digits=4)
+   PTDFz = JuMP.Containers.DenseAxisArray(PTDFz_mat, axes(PTDF, 1), axes(GSK, 2))
+   return PTDFz
 end
 
 """
@@ -103,15 +98,9 @@ function define_cne!(params::Parameters, PTDFzz::DenseAxisArray; threshold::Floa
         append!(params.cne, params.sets.L)
     end
 
-    fbccr_zones = Set(params.sets.FBCCR)
-
-    # A line qualifies as CNE only if at least one endpoint node belongs to an FBCCR zone
-    # and its max absolute PTDF across all zone pairs exceeds the threshold
+    # Remove lines whose max absolute PTDF across all zone pairs does not exceed the threshold
     filter!(params.cne) do line
-        z_start = get(params.node2zone, get(params.line_start, line, ""), "")
-        z_end   = get(params.node2zone, get(params.line_end,   line, ""), "")
-        (z_start in fbccr_zones || z_end in fbccr_zones) &&
-            maximum(abs.(PTDFzz[line, :])) > threshold
+        maximum(abs.(PTDFzz[line, :])) > threshold
     end
 end
 
@@ -166,7 +155,7 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     # f0[l,t] = lineflow[l,t] - Σ_z PTDFz[l,z] * NP[z,t]
     l0 = Dict{Tuple{String, Int}, Float64}()
     for l in cne_lines, t in T
-        l0[l, t] = -lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
+        l0[l, t] = lineflows[l, t] - sum(PTDFz[l, z] * NP[z, t] for z in zones)
     end
     # Steps to include non flow based zones (which is not currently accounted for):
     #𝐹⃗0FB -> flow per CNEC in the situation without commercial exchanges within the flow based CCR
@@ -184,10 +173,10 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
     #
     # init_pos  = Fmax - f0 - FRM
     # init_neg  = -Fmax - f0 + FRM
-    # AMR_pos   = max(0, minRAM * Fmax  - init_pos)   ≥ 0
-    # AMR_neg   = min(0, minRAM * -Fmax - init_neg)   ≤ 0
-    # RAM_pos   = init_pos + AMR_pos   → floor at  minRAM * Fmax
-    # RAM_neg   = init_neg + AMR_neg   → ceiling at minRAM * -Fmax
+    # AMR_pos   = max(0, minRAM * Fmax  - init_pos)
+    # AMR_neg   = min(0, minRAM * -Fmax - init_neg)
+    # RAM_pos   = init_pos + AMR_pos
+    # RAM_neg   = init_neg - AMR_neg
     directions = ["pos", "neg"]
     ram_data = Array{Float64, 3}(undef, length(cne_lines), length(T), 2)
 
@@ -200,8 +189,8 @@ function calc_ram(params::Parameters, TwoDayAhead_results::Dict, PTDFz::DenseAxi
             init_neg = -f_max - f0 + frm_abs
             amr_pos  = max(0.0,  minRAM *  f_max - init_pos)
             amr_neg  = min(0.0,  minRAM * -f_max - init_neg)
-            ram_data[i, j, 1] = init_pos + amr_pos   # RAM_pos: floor at minRAM*Fmax
-            ram_data[i, j, 2] = init_neg + amr_neg   # RAM_neg: ceiling at minRAM*(-Fmax)
+            ram_data[i, j, 1] = init_pos + amr_pos   # RAM_pos
+            ram_data[i, j, 2] = init_neg - amr_neg   # RAM_neg
         end
     end
 

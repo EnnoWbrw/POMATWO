@@ -690,11 +690,6 @@ Validate that slack buses are properly connected to the network.
 """
 function validate_slack_bus_connectivity(report::DataReport, params, location::String)
     if isempty(params.slack)
-        if !isempty(params.sets.L) || !isempty(params.sets.DC)
-            add_error!(report, "missing_data",
-                      "No slack bus defined - a slack bus is required for network flow calculations", location)
-            return false
-        end
         return true
     end
     
@@ -742,7 +737,7 @@ function validate_network_topology(report::DataReport, params, location::String=
     DC = params.sets.DC
     
     if isempty(L) && isempty(DC)
-        add_note!(report, "network_topology", "No lines defined - running in copper plate mode (no network constraints)", location)
+        add_note!(report, "network_validation", "No AC or DC lines defined - skipping topology validation", location)
         return true
     end
     

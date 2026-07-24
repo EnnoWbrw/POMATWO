@@ -219,6 +219,17 @@ end
 
 read_csv(file) = CSV.read(file, DataFrame, stringtype = String)
 
+function _value_if_exists(node, symbol::Symbol)
+    try
+        return value.(node[symbol])
+    catch err
+        if err isa KeyError
+            return nothing
+        end
+        rethrow()
+    end
+end
+
 function prev_results_for_redispatch(sr::SubRun)
     d = sr.vars
 
@@ -233,11 +244,28 @@ end
 function prev_results_for_fbmc(sr::SubRun)
     d = sr.vars
 
+    disp_generation = something(
+        _value_if_exists(d[:disp], :GEN),
+        _value_if_exists(d[:disp], :GEN_REDISP),
+    )
+    ndisp_cu = something(
+        _value_if_exists(d[:ndisp], :CU),
+        _value_if_exists(d[:ndisp], :CU_REDISP),
+    )
+    sto_generation = something(
+        _value_if_exists(d[:sto], :GEN),
+        _value_if_exists(d[:sto], :GEN_REDISP),
+    )
+    sto_charge = something(
+        _value_if_exists(d[:sto], :CHARGE),
+        _value_if_exists(d[:sto], :CHARGE_REDISP),
+    )
+
     return Dict(
-        :disp_generation => value.(d[:disp][:GEN]),
-        :ndisp_cu => value.(d[:ndisp][:CU]),
-        :sto_generation => value.(d[:sto][:GEN]),
-        :sto_charge => value.(d[:sto][:CHARGE]),
+        :disp_generation => disp_generation,
+        :ndisp_cu => ndisp_cu,
+        :sto_generation => sto_generation,
+        :sto_charge => sto_charge,
         :lineflows => value.(d[:network][:LINEFLOW]),
         :netinput_ac => value.(d[:network][:ACINJECTION]),
     )
