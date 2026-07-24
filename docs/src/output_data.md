@@ -7,6 +7,11 @@ DataFiles
 ```@docs
 check_infeasibility
 ```
+Each market state writes its tables under its own filename prefix, so the stages of one run cannot overwrite each other. The prefix and the names accepted by `DataFiles(dir; type = ...)` are given by:
+```@docs
+POMATWO.result_prefix
+POMATWO.market_state_type
+```
 The following functions can be used to create some useful tables automatically.
 ```@docs
 transform_results_by_type

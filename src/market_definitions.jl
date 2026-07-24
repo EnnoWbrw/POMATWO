@@ -416,7 +416,7 @@ const MARKET_STATE_ALIASES = Dict{String,DataType}(
 
 Resolve a market-state name to its type. Accepts the canonical type name
 (`"Redispatch"`, `"TwoDayAhead"`, ...) as well as the legacy short aliases
-`"DA"`, `"2DA"` and `"REDISP"` (see [`MARKET_STATE_ALIASES`](@ref)).
+`"DA"`, `"2DA"` and `"REDISP"` (see `MARKET_STATE_ALIASES`).
 
 Canonical names are resolved by lookup rather than from a table, so states added later
 need no registration here.
