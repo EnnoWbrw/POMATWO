@@ -68,7 +68,7 @@ function test_read_output()
                 setup = ModelSetup(
                     TimeHorizon     = TimeHorizon(stop=4),
                     MarketType      = ZonalMarket(),
-                    ProsumerSetup   = ProsumerOptimization(sell_price=0.10, buy_price=0.25, retail_type=:buy_price),
+                    ProsumerSetup   = ProsumerOptimization(sell_price=80.0, buy_price=250.0, retail_type=:buy_price),
                     RedispatchSetup = NoRedispatch(),
                 )
                 mr = ModelRun(params_with_prs, setup, solver;
@@ -288,6 +288,112 @@ function test_read_output()
                 # Split horizon: 2 subruns -> GEN should still have 4 timesteps total
                 @test !isempty(results_split.GEN)
                 @test length(unique(results_split.GEN.Time)) == 4
+            end
+
+            # =================================================================
+            # Per-market-state result files. Every stage writes under its own prefix
+            # (`DayAhead_GEN.arrow`, ...), so the redispatch stage can no longer overwrite
+            # the day-ahead's nodal tables the way it used to.
+            @testset "DataFiles -- per-state result files" begin
+                dir = joinpath(tmpdir, "ro_redisp")
+                files = reduce(vcat, [readdir(d) for d in filter(isdir, readdir(dir, join=true))])
+                arrows = filter(f -> endswith(f, ".arrow"), files)
+
+                @test any(startswith(f, "DayAhead_") for f in arrows)
+                @test any(startswith(f, "Redispatch_") for f in arrows)
+                # nothing unprefixed survives from a stage
+                @test !("GEN.arrow" in arrows)
+                @test !("NETINPUT.arrow" in arrows)
+
+                da = with_logger(logger) do; DataFiles(dir, DayAhead) end
+                rd = with_logger(logger) do; DataFiles(dir, Redispatch) end
+
+                # a zonal day-ahead persists no nodal tables, so here they belong to the
+                # redispatch stage alone
+                @test isempty(da.NETINPUT)
+                @test !isempty(da.GEN)
+                @test !isempty(rd.NETINPUT)
+                @test !isempty(rd.REDISP)
+                @test isempty(rd.GEN)          # the redispatch stage writes no GEN table
+
+                # the composite default keeps the pre-change view: GEN from the day-ahead,
+                # the nodal tables from the last stage that wrote them. Reloaded because
+                # earlier testsets mutate `results_redisp.GEN` in place.
+                fresh = with_logger(logger) do; DataFiles(dir) end
+                @test isequal(fresh.GEN, da.GEN)
+                @test isequal(fresh.NETINPUT, rd.NETINPUT)
+
+                # a *nodal* day-ahead does persist them, and both stages are now readable
+                ndir = joinpath(tmpdir, "ro_nodal")
+                nda = with_logger(logger) do; DataFiles(ndir, DayAhead) end
+                @test !isempty(nda.NETINPUT)
+            end
+
+            # =================================================================
+            @testset "DataFiles -- state dispatch, aliases and bad names" begin
+                dir = joinpath(tmpdir, "ro_redisp")
+                by_type  = with_logger(logger) do; DataFiles(dir, Redispatch) end
+                by_alias = with_logger(logger) do; DataFiles(dir; type = "REDISP") end
+                by_name  = with_logger(logger) do; DataFiles(dir; type = "Redispatch") end
+                @test isequal(by_type.NETINPUT, by_alias.NETINPUT)
+                @test isequal(by_type.NETINPUT, by_name.NETINPUT)
+
+                @test POMATWO.result_prefix(Redispatch) == "Redispatch"
+                @test POMATWO.market_state_type("2DA") === TwoDayAhead
+                @test POMATWO.market_state_type("DA") === DayAhead
+                @test POMATWO.trymarket_state_type("BIL") === nothing
+                @test_throws ErrorException DataFiles(dir; type = "NotAState")
+            end
+
+            # =================================================================
+            @testset "DataFiles -- BIL_EXCHANGE is readable" begin
+                # Regression: the table was renamed from NTC to BIL_EXCHANGE but DataFiles
+                # kept only the old field, so bilateral exchange could not be read at all.
+                @test hasproperty(results_zonal, :BIL_EXCHANGE)
+                # this dataset has a single zone, so there are no zone pairs to exchange
+                # between; the table must still load with its schema rather than be absent
+                @test issubset(["From", "To", "Time", "BIL_EXCHANGE"],
+                               names(results_zonal.BIL_EXCHANGE))
+                @test isfile(joinpath(tmpdir, "ro_zonal", "subrun_t1-t4",
+                                      "DayAhead_BIL_EXCHANGE.arrow"))
+            end
+
+            # =================================================================
+            @testset "DataFiles -- legacy result directories still load" begin
+                # A directory holding no stage-prefixed file is read under the old names.
+                legacy = mkpath(joinpath(tmpdir, "ro_legacy", "subrun_t1-t4"))
+                Arrow.write(joinpath(legacy, "GEN.arrow"),
+                            DataFrame(index = ["p1"], Time = [1], GEN = [10.0]))
+                Arrow.write(joinpath(legacy, "NETINPUT.arrow"),
+                            DataFrame(index = ["n1"], Time = [1], NETINPUT = [-10.0]))
+                Arrow.write(joinpath(legacy, "2DANETINPUT.arrow"),
+                            DataFrame(index = ["n1"], Time = [1], NETINPUT = [-99.0]))
+                Arrow.write(joinpath(legacy, "NTC.arrow"),
+                            DataFrame(From = ["Z1"], To = ["Z2"], Time = [1], BIL_EXCHANGE = [5.0]))
+
+                dir = joinpath(tmpdir, "ro_legacy")
+                old = with_logger(logger) do; DataFiles(dir) end
+                @test old.GEN.GEN == [10.0]
+                @test old.NETINPUT.NETINPUT == [-10.0]
+                @test old.NTC.BIL_EXCHANGE == [5.0]          # legacy field still populated
+                @test old.BIL_EXCHANGE.BIL_EXCHANGE == [5.0] # and reachable under the new name
+
+                # the basecase is still addressable, and is NOT confused with the day-ahead
+                bc = with_logger(logger) do; DataFiles(dir, TwoDayAhead) end
+                @test bc.NETINPUT.NETINPUT == [-99.0]
+
+                # a legacy stage request falls back to the unprefixed files
+                rd = with_logger(logger) do; DataFiles(dir, Redispatch) end
+                @test rd.NETINPUT.NETINPUT == [-10.0]
+
+                # ... but a basecase request on a directory that has none must stay empty
+                bare = mkpath(joinpath(tmpdir, "ro_legacy2", "subrun_t1-t4"))
+                Arrow.write(joinpath(bare, "GEN.arrow"),
+                            DataFrame(index = ["p1"], Time = [1], GEN = [1.0]))
+                empty_bc = with_logger(logger) do
+                    DataFiles(joinpath(tmpdir, "ro_legacy2"), TwoDayAhead)
+                end
+                @test isempty(empty_bc.GEN)
             end
         end  # mktempdir
     end  # testset

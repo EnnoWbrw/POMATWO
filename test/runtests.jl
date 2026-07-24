@@ -146,33 +146,91 @@ function create_mock_datafiles(;
     return results
 end
 
+"""
+    quiet(f)
+
+Run `f` with the terminal silenced, so that a passing run prints nothing but the final
+`Test Summary`. Three separate noise sources are covered:
+
+- `@info`/`@warn`/`@debug` (data-load warnings, per-subrun solve status) — `NullLogger`.
+- `println` (`print_report` from `load_data`) — `stdout`.
+- `ProgressMeter` spinners (`_run_states`) — `stderr`.
+
+Solver logs are already off unless a test sets `ModelRun(verbose = true)`.
+
+`stdout`/`stderr` are captured to a temp file rather than thrown away, because `Test`
+prints each failure's expression and values to `stdout` the moment it is recorded — that
+detail is not in the summary. The capture is therefore replayed whenever the enclosing
+testset has a non-pass, or when `f` throws.
+
+Set `POMATWO_TEST_QUIET=0` to get the full live output back.
+
+The `include`s and the calls to the included functions must sit in **separate** `quiet`
+calls: under Julia 1.12 world-age rules a closure cannot call a method that was defined
+after it started running (`MethodError: ... method too new to be called from this world`).
+"""
+function quiet(f)
+    get(ENV, "POMATWO_TEST_QUIET", "1") in ("1", "true") || return f()
+    ts = Test.get_testset()
+    logfile = joinpath(mktempdir(), "pomatwo_test_output.log")
+    replay() = print(read(logfile, String))
+    io = open(logfile, "w")
+    try
+        redirect_stdout(io) do
+            redirect_stderr(io) do
+                with_logger(NullLogger()) do
+                    f()
+                end
+            end
+        end
+    catch
+        close(io)
+        replay()
+        rethrow()
+    end
+    close(io)
+    has_nonpass(ts) && replay()
+end
+
+# `DefaultTestSet` stores only non-passing results plus nested testsets; passes are counted.
+has_nonpass(ts::Test.DefaultTestSet) = any(has_nonpass, ts.results)
+has_nonpass(::Union{Test.Fail,Test.Error}) = true
+has_nonpass(::Any) = false
+
 @testset "POMATWO.jl" begin
-    include(joinpath("test_cases", "cases.jl"))
-    include(joinpath("test_cases", "test_data_load.jl"))
-    include(joinpath("test_cases", "test_model_config.jl"))
-    include(joinpath("test_cases", "test_data_reporting.jl"))
-    include(joinpath("test_cases", "test_network_validation.jl"))
-    include(joinpath("test_cases", "test_ptdf_omission.jl"))
-    include(joinpath("test_cases", "test_data_load_validations.jl"))
-    include(joinpath("test_cases", "test_read_output.jl"))
-    include(joinpath("test_cases", "test_zonal_ptdf.jl"))
-    include(joinpath("test_cases", "test_utils.jl"))
-    include(joinpath("test_cases", "test_custom_component.jl"))
-    include(joinpath("test_cases", "test_storage_boundary.jl"))
-    include(joinpath("test_cases", "test_refday_basecase.jl"))
-    include(joinpath("test_cases", "test_redispatch.jl"))
-    include(joinpath("test_cases", "test_objectives.jl"))
-    test_data_load()
-    test_model_creation()
-    test_data_reporting()
-    test_read_output()
-    test_zonal_ptdf()
-    test_utils()
-    test_custom_component()
-    test_storage_boundary()
-    test_refday_basecase()
-    test_refday_trace_e2e()
-    test_redispatch()
-    test_objectives()
+    quiet() do
+        include(joinpath("test_cases", "cases.jl"))
+        include(joinpath("test_cases", "test_data_load.jl"))
+        include(joinpath("test_cases", "test_model_config.jl"))
+        include(joinpath("test_cases", "test_data_reporting.jl"))
+        include(joinpath("test_cases", "test_network_validation.jl"))
+        include(joinpath("test_cases", "test_ptdf_omission.jl"))
+        include(joinpath("test_cases", "test_data_load_validations.jl"))
+        include(joinpath("test_cases", "test_read_output.jl"))
+        include(joinpath("test_cases", "test_zonal_ptdf.jl"))
+        include(joinpath("test_cases", "test_utils.jl"))
+        include(joinpath("test_cases", "test_custom_component.jl"))
+        include(joinpath("test_cases", "test_storage_boundary.jl"))
+        include(joinpath("test_cases", "test_refday_basecase.jl"))
+        include(joinpath("test_cases", "test_redispatch.jl"))
+        include(joinpath("test_cases", "test_objectives.jl"))
+        include(joinpath("test_cases", "test_expected_results.jl"))
+    end
+    quiet() do
+        test_data_load()
+        test_model_creation()
+        test_retail_types()
+        test_data_reporting()
+        test_read_output()
+        test_zonal_ptdf()
+        test_utils()
+        test_custom_component()
+        test_storage_boundary()
+        test_refday_basecase()
+        test_refday_trace_e2e()
+        test_redispatch()
+        test_objectives()
+        test_expected_results()
+    end
 end
  

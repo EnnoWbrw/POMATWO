@@ -119,9 +119,7 @@ function postprocess!(
     return nothing
 end
 
-# filename prefix for result files of a state (TwoDayAhead results are prefixed "2DA")
-result_prefix(::MarketState) = ""
-result_prefix(::TwoDayAhead) = "2DA"
+# `result_prefix` lives in market_definitions.jl, next to the MarketState definitions.
 
 # progress/log label of a state
 state_label(::Type{TwoDayAhead}) = "TwoDayAhead"
@@ -162,8 +160,19 @@ function record_carry!(
     return nothing
 end
 
+function record_carry!(
+    ::CarryOverStorage, sr::SubRun{MT,PS,RD,MS}, ctx::Dict,
+) where {MT<:MarketType,PS<:ProsumerSetup,RD<:RedispatchSetup,MS<:ProsumerOptimizationState}
+    PRS_STO = sr.modelrun.params.sets.PRS_STO
+    isempty(PRS_STO) && return nothing
+    LVL = sr.vars[:prosumer][:PRS_STO_LVL]
+    tend = sr.market_state.Time[end]
+    ctx[:prs_sto_lvl_start] = Dict(p => value(LVL[p, tend]) for p in PRS_STO)
+    return nothing
+end
+
 # context keys that survive from one time split into the next
-const CARRY_KEYS = (:sto_lvl_start, :sto_lvl_start_redisp)
+const CARRY_KEYS = (:sto_lvl_start, :sto_lvl_start_redisp, :prs_sto_lvl_start)
 
 # Splits are independent unless storage levels are carried between them.
 _parallel_splits_ok(mr::ModelRun) =

@@ -238,22 +238,32 @@ struct RedispatchSource  <: RefdaySourceState end
 """
     _source_state(source_type::AbstractString) -> RefdaySourceState
 
-Map the `source_type` config string to its dispatch type:
-`"2DA"` → `TwoDayAheadSource` (2DA-prefixed result tables),
+Map the `source_type` config string to its dispatch type. The short strings are the
+legacy aliases of the market states (see `market_state_type`), kept because they are part
+of the public `ReferenceDayBasecase` API:
+`"2DA"` → `TwoDayAheadSource` (`TwoDayAhead_*` result tables),
 `""`/`"DA"` → `DayAheadSource` (plain day-ahead tables; nodal
 injections are computed from plant-level results when the DA market was
 zonal), `"REDISP"` → `RedispatchSource` (redispatch results).
 """
 _source_state(source_type::AbstractString) =
-    source_type == "2DA"           ? TwoDayAheadSource() :
-    source_type in ("", "DA")      ? DayAheadSource() :
-    source_type == "REDISP"        ? RedispatchSource() :
-    error("ReferenceDayBasecase: unknown source_type = \"$source_type\". " *
-          "Supported: \"\"/\"DA\" (day-ahead), \"2DA\" (TwoDayAhead), \"REDISP\" (redispatch).")
+    isempty(source_type) ? DayAheadSource() :
+    _source_state(market_state_type(source_type))
+
+_source_state(::Type{TwoDayAhead}) = TwoDayAheadSource()
+_source_state(::Type{DayAhead})    = DayAheadSource()
+_source_state(::Type{Redispatch})  = RedispatchSource()
+_source_state(::Type{MS}) where {MS<:MarketState} = error(
+    "ReferenceDayBasecase: market state $(nameof(MS)) cannot serve as a basecase source. " *
+    "Supported: \"\"/\"DA\" (day-ahead), \"2DA\" (TwoDayAhead), \"REDISP\" (redispatch).")
+
+"The `MarketState` whose result tables this source state reads."
+_source_market_state(::TwoDayAheadSource) = TwoDayAhead
+_source_market_state(::DayAheadSource)    = DayAhead
+_source_market_state(::RedispatchSource)  = Redispatch
 
 "Table prefix `DataFiles` needs for this source state."
-_datafiles_type(::RefdaySourceState)  = ""
-_datafiles_type(::TwoDayAheadSource)  = "2DA"
+_datafiles_type(s::RefdaySourceState) = result_prefix(_source_market_state(s))
 
 "Generation table (columns `index`, `Time`, `GEN`) of the source state."
 _source_gen(::RefdaySourceState, ref::DataFiles) = ref.GEN

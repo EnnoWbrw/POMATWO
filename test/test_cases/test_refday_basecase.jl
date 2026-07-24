@@ -96,10 +96,12 @@ function test_refday_basecase()
         @test POMATWO._source_state("2DA")    isa POMATWO.TwoDayAheadSource
         @test POMATWO._source_state("REDISP") isa POMATWO.RedispatchSource
         @test_throws ErrorException POMATWO._source_state("bogus")
-        # table prefix DataFiles needs per state
-        @test POMATWO._datafiles_type(POMATWO.TwoDayAheadSource()) == "2DA"
-        @test POMATWO._datafiles_type(POMATWO.DayAheadSource())    == ""
-        @test POMATWO._datafiles_type(POMATWO.RedispatchSource())  == ""
+        # table prefix DataFiles needs per state. Each stage now writes under its own
+        # namespace, so DayAhead and Redispatch are no longer both "" (which used to work
+        # only because the redispatch stage overwrote the day-ahead's files).
+        @test POMATWO._datafiles_type(POMATWO.TwoDayAheadSource()) == "TwoDayAhead"
+        @test POMATWO._datafiles_type(POMATWO.DayAheadSource())    == "DayAhead"
+        @test POMATWO._datafiles_type(POMATWO.RedispatchSource())  == "Redispatch"
     end
 
     @testset "GSKRedist: time-dependent strategy uses per-timestep GLSK weights" begin
@@ -470,7 +472,7 @@ function test_refday_trace_e2e()
                 @test isfile(joinpath(scen, sub, "REFDAY_MATCH.arrow"))
                 @test isfile(joinpath(scen, sub, "REFDAY_SHIFT.arrow"))
                 # flow-based domain persisted per subrun (DayAhead stage, no prefix)
-                @test isfile(joinpath(scen, sub, "RAM.arrow"))
+                @test isfile(joinpath(scen, sub, "DayAhead_RAM.arrow"))
             end
             @test isfile(joinpath(scen, "REFDAY_GROUPS.arrow"))
 

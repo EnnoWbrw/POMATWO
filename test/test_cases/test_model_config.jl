@@ -5,8 +5,8 @@ market_types = [
 
 prosumer_setups = [
     NoProsumer(),
-    ProsumerOptimization(sell_price=0.10, buy_price=0.25, retail_type=:buy_price),
-    ProsumerOptimization(sell_price=0.15, buy_price=0.30, retail_type=:flat),
+    ProsumerOptimization(sell_price=80.0, buy_price=250.0, retail_type=:buy_price),
+    ProsumerOptimization(sell_price=90.0, buy_price=300.0, retail_type=:flat),
 ]
 
 redispatch_setups = [
@@ -72,7 +72,6 @@ function test_model_creation()
 
                         # --- Non-negativity of primary decision variables ---
                         @test check_nonneg(results.GEN, :GEN)
-                        @test check_nonneg(results.FEEDIN, :FEEDIN)
                         @test check_nonneg(results.CHARGE, :CHARGE)
                         @test check_nonneg(results.STO_LVL, :STO_LVL)
 
@@ -112,5 +111,64 @@ function test_model_creation()
                 end
             end
         end
+    end
+end
+
+"""
+Retail tariff types must actually behave differently.
+
+The `:flat` tariff used to be `mean([min(price, 0) for t in T])`, which is identically 0
+for any non-negative day-ahead price — so `:flat` and `:buy_price` produced identical
+prosumer behaviour, and eight of the scenarios in the old grid were silent duplicates.
+It is now the mean *non-negative* price. `netzentgelte` moved onto the setup at the same
+time; all three prices are EUR/MWh, the unit `mc` uses everywhere else.
+"""
+function test_retail_types()
+    @testset "Prosumer retail tariffs" begin
+        solver = HiGHS.Optimizer
+        params = load_data(cases["case 2"][:data_files])
+
+        run_retail(rt, name, tmpdir; netzentgelte = 250.0) = with_logger(NullLogger()) do
+            setup = ModelSetup(
+                TimeHorizon     = TimeHorizon(stop = 4),
+                MarketType      = ZonalMarket(),
+                ProsumerSetup   = ProsumerOptimization(
+                    sell_price = 80.0, buy_price = 250.0,
+                    retail_type = rt, netzentgelte = netzentgelte),
+                RedispatchSetup = NoRedispatch(),
+            )
+            mr = ModelRun(params, setup, solver;
+                resultdir = tmpdir, scenarioname = name, overwrite = true)
+            POMATWO.run(mr)
+            sort(DataFiles(joinpath(tmpdir, name)).PRS, :Time)
+        end
+
+        tmpdir = mktempdir()
+
+        # Day-ahead prices here are 7/7/7/25 EUR/MWh, so the flat tariff is their mean,
+        # 11.5 — which is *below* the 80 EUR/MWh sell price. With the grid fee switched
+        # off the two tariffs therefore imply opposite strategies: under `:buy_price`
+        # (250) self-consumption is worth more than selling, under `:flat` it pays to sell
+        # everything and buy the demand back. Before the fix `:flat` was identically 0,
+        # so the two were indistinguishable.
+        buy_free  = run_retail(:buy_price, "retail_buy_free", tmpdir; netzentgelte = 0.0)
+        flat_free = run_retail(:flat, "retail_flat_free", tmpdir; netzentgelte = 0.0)
+
+        @test sum(flat_free.PRS_BUY)  > sum(buy_free.PRS_BUY) + 1.0
+        @test sum(flat_free.PRS_SELL) > sum(buy_free.PRS_SELL) + 1.0
+        @test sum(flat_free.PRS_SELF) < sum(buy_free.PRS_SELF) - 1.0
+
+        # A large enough grid fee swamps the difference between the two tariffs: both end
+        # up far above the sell price, so the optimal behaviour coincides again.
+        buy  = run_retail(:buy_price, "retail_buy", tmpdir)
+        flat = run_retail(:flat, "retail_flat", tmpdir)
+        @test sum(buy.PRS_BUY) ≈ sum(flat.PRS_BUY) atol = 1e-6
+
+        # A grid fee is a cost on buying, so removing it can never reduce purchases.
+        @test sum(buy_free.PRS_BUY) >= sum(buy.PRS_BUY) - 1e-6
+
+        @test ProsumerOptimization(sell_price = 1.0).netzentgelte == 250.0
+        @test ProsumerOptimization(sell_price = 1.0).self_discharge == 0.999
+        @test_throws ErrorException ProsumerOptimization(sell_price = 1.0, retail_type = :nope)
     end
 end

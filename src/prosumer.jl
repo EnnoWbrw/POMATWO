@@ -26,7 +26,7 @@ function add_prosumer(sr::SubRun{MT,PS,RD,MS}
 
     T = sr.market_state.Time
     @unpack PRS, PRS_STO = sr.modelrun.params.sets
-    @unpack gmax, gmax_storage, storage, prs_demand, avail = sr.modelrun.params
+    @unpack gmax, gmax_storage, storage, prs_demand, avail, eta = sr.modelrun.params
     m = sr.prosumer
 
     generation = Dict((prs, t) => gmax[prs] * avail[prs][t] for prs in PRS, t in T)
@@ -52,14 +52,23 @@ function add_prosumer(sr::SubRun{MT,PS,RD,MS}
         PRS_SELF[prs, t] + PRS_SELL[prs, t] + (prs in PRS_STO ? PRS_STO_IN[prs, t] : 0)
     )
 
-    @constraint(
-        m,
-        StorageBalance[prs = PRS_STO, t = T],
-        PRS_STO_LVL[prs, t] ==
-        0.999 * PRS_STO_LVL[prs, prev_period(T, t)] + 0.9 * PRS_STO_IN[prs, t] #todo: should be eta in the future
-        -
-        PRS_STO_OUT[prs, t] / 0.9
-    )
+    # Storage level of the first hour of a split connects to `setup.StorageBoundary`, the
+    # same boundary condition the system storages use (see `add_storage`). Efficiency is
+    # the plant's own `eta`; the hourly retention is `ProsumerOptimization.self_discharge`.
+    boundary = sr.modelrun.setup.StorageBoundary
+    self_discharge = sr.modelrun.setup.ProsumerSetup.self_discharge
+    for prs in PRS_STO, t in T
+        prev_lvl =
+            t == T[1] ?
+            initial_level(boundary, sr, PRS_STO_LVL, prs, T, :prs_sto_lvl_start) :
+            PRS_STO_LVL[prs, prev_period(T, t)]
+        @constraint(
+            m,
+            PRS_STO_LVL[prs, t] ==
+            self_discharge * prev_lvl + eta[prs] * PRS_STO_IN[prs, t] -
+            PRS_STO_OUT[prs, t] / eta[prs]
+        )
+    end
 
     @constraint(
         m,
@@ -100,16 +109,19 @@ function add_prosumer_objective(sr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,P
     if po.retail_type == :buy_price
         price = Dict((prs, t) => po.buy_price for prs in PRS, t in T)
     elseif po.retail_type == :flat
+        # Flat tariff: the mean non-negative day-ahead price over the time span. Negative
+        # hours are floored at zero rather than being the only hours that count — the
+        # latter made the flat tariff identically zero whenever prices were positive.
         price = assign_price_to_prs(sr)
         intermediate_mean =
-            Dict(prs => mean([min(price[prs, t], 0) for t in T]) for prs in PRS)
+            Dict(prs => mean([max(price[prs, t], 0) for t in T]) for prs in PRS)
         price = Dict((prs, t) => intermediate_mean[prs] for prs in PRS, t in T)
     elseif po.retail_type == :realtime
         price = assign_price_to_prs(sr)
     end
 
     sell_price = po.sell_price
-    netzentgelte = 250
+    netzentgelte = po.netzentgelte
 
     @objective(
         m,

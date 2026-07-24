@@ -153,38 +153,61 @@ Represents a market setup with no prosumer participation.
 struct NoProsumer <: ProsumerSetup end
 
 """
-    ProsumerOptimization(; sell_price, buy_price=0, retail_type=:buy_price)
+    ProsumerOptimization(; sell_price, buy_price=0, retail_type=:buy_price,
+                           netzentgelte=250.0, self_discharge=0.999)
 
 Represents a prosumer setup where prosumer actions are explicitly optimized with respect to market conditions.
 
-# Keyword Arguments
-- `sell_price::Float64`: Price at which the prosumer can sell electricity to the market or grid.
-- `buy_price::Float64`: Price at which the prosumer buys electricity from the market/grid. Defaults to `0`.
-- `retail_type::Symbol`: Retail tariff structure. Must be one of `:buy_price`, `:flat`, or `:realtime`. Default is `:buy_price`.
+!!! note "Units"
+    All prices are **EUR/MWh**, the same unit as the marginal costs of every other
+    technology. Earlier versions passed values such as `0.22` here while adding a hardcoded
+    grid fee of `250`, mixing EUR/kWh with EUR/MWh.
 
-An error is thrown if `retail_type` is not valid.
+# Keyword Arguments
+- `sell_price::Float64`: Price (EUR/MWh) at which the prosumer sells electricity to the grid.
+- `buy_price::Float64`: Price (EUR/MWh) the prosumer pays for electricity, used when
+  `retail_type = :buy_price`. Defaults to `0`.
+- `retail_type::Symbol`: Retail tariff structure, one of
+  - `:buy_price` — the flat `buy_price` above,
+  - `:flat` — the mean non-negative day-ahead price of the time span,
+  - `:realtime` — the day-ahead price of each hour.
+  Default is `:buy_price`.
+- `netzentgelte::Float64`: Grid fee (EUR/MWh) added on top of the retail price for every
+  MWh the prosumer buys. Defaults to `250.0`.
+- `self_discharge::Float64`: Share of the prosumer storage level retained per hour, in
+  `[0, 1]`. Defaults to `0.999`. Charging/discharging efficiency is *not* set here — it
+  comes from the plant's `eta` in the input data.
+
+An error is thrown if `retail_type` is not valid or `self_discharge` is outside `[0, 1]`.
 
 # Example
 ```julia
-ProsumerOptimization(sell_price=0.12, buy_price=0.22)
+ProsumerOptimization(sell_price = 80.0, buy_price = 250.0)
 ```
 """
 struct ProsumerOptimization <: ProsumerSetup
     sell_price::Float64
     buy_price::Float64
     retail_type::Symbol
+    netzentgelte::Float64
+    self_discharge::Float64
 
     function ProsumerOptimization(;
         sell_price,
         buy_price = 0,
         retail_type::Symbol = :buy_price,
+        netzentgelte::Real = 250.0,
+        self_discharge::Real = 0.999,
     )
 
         if !(retail_type in [:buy_price, :flat, :realtime])
             error("retail_type must be one of [:buy_price, :flat, :realtime]")
         end
+        if !(0 <= self_discharge <= 1)
+            error("self_discharge must be between 0 and 1, got $self_discharge")
+        end
 
-        return new(sell_price, buy_price, retail_type)
+        return new(sell_price, buy_price, retail_type, netzentgelte, self_discharge)
     end
 end
 
@@ -358,4 +381,66 @@ Represents a two-day-ahead market stage. Also referred to as base-case for flow-
 """
 struct TwoDayAhead <: MarketState
     Time::UnitRange{Int}
+end
+
+### Result-file namespacing
+#
+# Every MarketState writes its result tables under its own filename prefix, so two stages
+# of the same run can never overwrite each other (they did until this was introduced: a
+# redispatch stage clobbered the day-ahead's NETINPUT/LINEFLOW/DCLINEFLOW).
+
+"""
+    result_prefix(state) -> String
+
+Filename prefix namespacing one market state's result tables, e.g. `DayAhead_GEN.arrow`.
+
+Derived from the state's type name, so a new [`MarketState`](@ref) subtype is covered
+automatically and two states can never collide on the same prefix. Accepts a state
+instance, a state type, or one of the legacy strings understood by
+[`market_state_type`](@ref).
+"""
+result_prefix(::Type{MS}) where {MS<:MarketState} = string(nameof(MS))
+result_prefix(ms::MarketState) = result_prefix(typeof(ms))
+result_prefix(s::AbstractString) = result_prefix(market_state_type(s))
+
+# Short strings that predate the per-state prefixes and are part of the public API:
+# `DataFiles(dir; type = ...)` and `ReferenceDayBasecase(source_type = ...)`.
+const MARKET_STATE_ALIASES = Dict{String,DataType}(
+    "DA"     => DayAhead,
+    "2DA"    => TwoDayAhead,
+    "REDISP" => Redispatch,
+)
+
+"""
+    market_state_type(s::AbstractString) -> DataType
+
+Resolve a market-state name to its type. Accepts the canonical type name
+(`"Redispatch"`, `"TwoDayAhead"`, ...) as well as the legacy short aliases
+`"DA"`, `"2DA"` and `"REDISP"` (see [`MARKET_STATE_ALIASES`](@ref)).
+
+Canonical names are resolved by lookup rather than from a table, so states added later
+need no registration here.
+"""
+function market_state_type(s::AbstractString)
+    T = trymarket_state_type(s)
+    T === nothing && error(
+        "Unknown market state \"$s\". Use a MarketState type name (e.g. \"DayAhead\", " *
+        "\"Redispatch\") or one of the aliases $(sort(collect(keys(MARKET_STATE_ALIASES)))).")
+    return T
+end
+
+"""
+    trymarket_state_type(s::AbstractString) -> Union{DataType,Nothing}
+
+Like [`market_state_type`](@ref) but returns `nothing` instead of throwing. Used to test
+whether a filename fragment names a market state.
+"""
+function trymarket_state_type(s::AbstractString)
+    haskey(MARKET_STATE_ALIASES, s) && return MARKET_STATE_ALIASES[s]
+    sym = Symbol(s)
+    if isdefined(@__MODULE__, sym)
+        T = getfield(@__MODULE__, sym)
+        T isa DataType && T <: MarketState && return T
+    end
+    return nothing
 end

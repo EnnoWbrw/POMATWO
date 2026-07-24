@@ -115,6 +115,55 @@ function test_storage_boundary()
             @testset "invalid start_share" begin
                 @test_throws ErrorException CarryOverStorage(start_share = 1.5)
             end
+
+            # =========================================================================
+            # Prosumer storage used to hardcode a cyclic-per-split level and a 0.9
+            # round-trip efficiency, ignoring `StorageBoundary` and the plant's own `eta`.
+            @testset "prosumer storage honours StorageBoundary and eta" begin
+                prs_params = load_data(cases["case 2"][:data_files])
+                @test prs_params.sets.PRS_STO == ["prs_n2"]
+                eta = prs_params.eta["prs_n2"]
+
+                run_prs(boundary, name; self_discharge = 0.999) = begin
+                    setup = ModelSetup(
+                        TimeHorizon = TimeHorizon(stop = 4, split = 2),
+                        MarketType = ZonalMarket(),
+                        ProsumerSetup = ProsumerOptimization(
+                            sell_price = 80.0, buy_price = 250.0,
+                            self_discharge = self_discharge),
+                        StorageBoundary = boundary,
+                    )
+                    mr = ModelRun(prs_params, setup, solver;
+                        resultdir = tmpdir, scenarioname = name, overwrite = true)
+                    POMATWO.run(mr)
+                    sort(DataFiles(joinpath(tmpdir, name)).PRS, :Time)
+                end
+
+                cyc = run_prs(CyclicStorage(), "prs_cyclic")
+                car = run_prs(CarryOverStorage(), "prs_carry")
+
+                lvl(df, t) = only(filter(r -> r.Time == t, df)).PRS_STO_LVL
+                sto_in(df, t) = only(filter(r -> r.Time == t, df)).PRS_STO_IN
+                sto_out(df, t) = only(filter(r -> r.Time == t, df)).PRS_STO_OUT
+                bal(df, t, prev) =
+                    0.999 * prev + eta * sto_in(df, t) - sto_out(df, t) / eta
+
+                # CyclicStorage: each split wraps onto itself (t1 <- t2, t3 <- t4)
+                @test lvl(cyc, 1) ≈ bal(cyc, 1, lvl(cyc, 2)) atol = 1e-6
+                @test lvl(cyc, 3) ≈ bal(cyc, 3, lvl(cyc, 4)) atol = 1e-6
+
+                # CarryOverStorage: the second split starts from where the first ended,
+                # and the very first hour starts from start_share * capacity = 0
+                @test lvl(car, 3) ≈ bal(car, 3, lvl(car, 2)) atol = 1e-6
+                @test lvl(car, 1) ≈ bal(car, 1, 0.0) atol = 1e-6
+
+                # self_discharge is honoured: with full retention the balance closes on 1.0
+                keep = run_prs(CarryOverStorage(), "prs_nodecay"; self_discharge = 1.0)
+                @test lvl(keep, 1) ≈ eta * sto_in(keep, 1) - sto_out(keep, 1) / eta atol = 1e-6
+
+                @test_throws ErrorException ProsumerOptimization(
+                    sell_price = 1.0, self_discharge = 1.5)
+            end
         end
     end
 end

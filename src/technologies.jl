@@ -454,6 +454,17 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
 
     ### to dataframe
     df_redispatch(mr.results)
+    df_sto(mr.results)
+
+    # Persist the redispatch storage trajectory. It is written under this stage's own
+    # prefix (Redispatch_STO_LVL.arrow) and surfaces as `DataFiles.STO_LVL_REDISP`.
+    append_results!(mr.results, :STO_LVL, DataFrame(
+        index = repeat(S, inner = length(T)),
+        Time = repeat(collect(T), outer = length(S)),
+        STO_LVL = [STO_LVL_REDISP[s, t] for s in S for t in T],
+        storage = [storage[s] for s in S for t in T],
+        inf = [INF[s, t] for s in S for t in T],
+    ))
 
     append_results!(mr.results, :REDISP, DataFrame(
         index = repeat(S, inner = length(T)),

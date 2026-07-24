@@ -140,7 +140,7 @@ function test_redispatch()
                     setup = ModelSetup(
                         TimeHorizon     = TimeHorizon(stop=4),
                         MarketType      = ZonalMarket(),
-                        ProsumerSetup   = ProsumerOptimization(sell_price=0.10, buy_price=0.25, retail_type=:buy_price),
+                        ProsumerSetup   = ProsumerOptimization(sell_price=80.0, buy_price=250.0, retail_type=:buy_price),
                         RedispatchSetup = DCLF(),
                     )
                     mr = ModelRun(params_prs, setup, solver;

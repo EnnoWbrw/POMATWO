@@ -14,14 +14,22 @@ function fetch_results(sr::SubRun)
     end
 end
 
-function write_results(sr::SubRun; format = "arrow", prefix = "")
+"""
+    write_results(sr::SubRun; format = "arrow", prefix = result_prefix(sr.market_state))
+
+Persist the subrun's result tables as `<prefix>_<TABLE>.<format>` in the split's folder.
+The prefix namespaces the market state (see [`result_prefix`](@ref)) so stages of the same
+run cannot overwrite each other's tables.
+"""
+function write_results(sr::SubRun; format = "arrow", prefix = result_prefix(sr.market_state))
     scen_dir = sr.modelrun.scen_dir
     t1, tend = sr.market_state.Time[[1, end]]
     sr_dir = mkpath(joinpath(scen_dir, "subrun_t$(t1)-t$(tend)"))
 
     for (varname, df) in sr.results
 
-        filename = joinpath(sr_dir, prefix * string(varname) * "." * format)
+        stem = isempty(prefix) ? string(varname) : string(prefix, "_", varname)
+        filename = joinpath(sr_dir, stem * "." * format)
 
         if format == "arrow"
             try

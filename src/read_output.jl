@@ -34,17 +34,19 @@ The constructor can be called by providing the directory that contains the resul
 # Fields
 - `params::Parameters`: Configuration and model parameters loaded from `params.jld2`.
 - `CHARGE::DataFrame`: Charging data for storage units.
-- `EXCHANGE::DataFrame`: Cross-border or inter-zonal energy exchange data.
-- `FEEDIN::DataFrame`: Feed-in data from renewable or other sources.
+- `EXCHANGE::DataFrame`: Net position per zone.
+- `BIL_EXCHANGE::DataFrame`: Bilateral exchange per zone pair (`From`, `To`).
 - `GEN::DataFrame`: Power generation data.
 - `REDISP::DataFrame`: Redispatch actions and adjustments.
-- `PRS::DataFrame`: Price or reserve-related data.
+- `PRS::DataFrame`: Prosumer results.
 - `LINEFLOW::DataFrame`: AC line power flow data.
 - `DCLINEFLOW::DataFrame`: DC line power flow data.
 - `NETINPUT::DataFrame`: Net input to zones or nodes.
-- `NTC::DataFrame`: Net Transfer Capacities between zones.
-- `STO_LVL::DataFrame`: Storage level data.
-- `STO_LVL_REDISP::DataFrame`: Redispatch-related storage level changes.
+- `NTC::DataFrame`: **Legacy.** The name `BIL_EXCHANGE` was written under before the
+  rename; populated only when loading a result directory produced by an older version.
+- `STO_LVL::DataFrame`: Storage level data of the day-ahead stage.
+- `STO_LVL_REDISP::DataFrame`: Storage levels of the redispatch stage (equivalently
+  `DataFiles(dir, Redispatch).STO_LVL`).
 - `ZonalMarketBalance::DataFrame`: Market balance data aggregated per zone.
 - `NodalMarketBalance::DataFrame`: Market balance data at the nodal level.
 - `NodalMarketRedispBalance::DataFrame`: Redispatch-adjusted nodal market balance.
@@ -54,10 +56,28 @@ The constructor can be called by providing the directory that contains the resul
 - `REFDAY_GROUPS::DataFrame`: Reference-day basecase trace — group → node membership of the matching scope (join with `REFDAY_MATCH` on `:group` for per-node reference times, see [`refday_reference_times`](@ref)). Loaded from the scenario root, not the subrun folders.
 - `REFDAY_SHIFT::DataFrame`: Reference-day basecase trace — sparse per (Time, node, component) net-injection deltas applied by the shift (physical levers `RES_prestep`, `RES`, `conv`, `load`, `sto`, plus `balance` from the global balance pass; for `load` the actual load change is `-delta`). Also carries per (Time, zone) `np_relax` rows (zone label in the `node` column) recording how far each zone's net position was left relaxed toward the reference.
 
-# Constructor
+# Constructors
 ```julia
-DataFiles(dir::String)
+DataFiles(dir::String)                      # composite view across stages (see below)
+DataFiles(dir::String, Redispatch)          # one market state, dispatched on its type
+DataFiles(dir::String; type = "REDISP")     # same, by name or legacy alias
 ```
+
+Each [`MarketState`](@ref) writes its result tables under its own filename prefix
+(`DayAhead_GEN.arrow`, `Redispatch_NETINPUT.arrow`, ...; see [`result_prefix`](@ref)), so
+stages of the same run never overwrite each other.
+
+`DataFiles(dir)` returns a **composite** view: per table the latest pipeline stage that
+wrote it wins (`Redispatch` > `ProsumerOptimizationState` > `DayAhead`), which is what a
+single result set looked like before the per-stage prefixes existed. `TwoDayAhead` is
+excluded — a flow-based basecase is reachable only via an explicit
+`DataFiles(dir, TwoDayAhead)`. Two tables are pinned rather than resolved by recency:
+`STO_LVL` always comes from the day-ahead, and the redispatch levels appear as
+`STO_LVL_REDISP`.
+
+Result directories written before per-stage prefixes still load: a directory containing no
+stage-prefixed file at all is treated as a legacy layout and read under the old names.
+
 # Example
 ```julia
 
@@ -65,6 +85,9 @@ results_path = joinpath("results", scen_name)
 
 ### reading in the result files
 results = DataFiles(results_path)
+
+### only the day-ahead stage, e.g. to inspect flows the redispatch stage used to overwrite
+da = DataFiles(results_path, DayAhead)
 ```
 """
 struct DataFiles
@@ -72,7 +95,7 @@ struct DataFiles
 
     CHARGE::DataFrame
     EXCHANGE::DataFrame
-    FEEDIN::DataFrame
+    BIL_EXCHANGE::DataFrame
     GEN::DataFrame
     REDISP::DataFrame
     PRS::DataFrame
@@ -91,13 +114,13 @@ struct DataFiles
     REFDAY_GROUPS::DataFrame
     REFDAY_SHIFT::DataFrame
 
-    function DataFiles(dir;type="")
-        if !(type in ["", "2DA"])
-            @error "Type '$type' not recognized. Defaulting to empty string. Supported types are: '' for regular results and '2DA' for TwoDayAhead basecase results."           
-        end
-
+    function DataFiles(dir; type = nothing)
         folders = filter(isdir, readdir(dir, join = true))
         subrun_folders = filter(x -> occursin(r"subrun", x), folders)
+        legacy = _is_legacy_layout(subrun_folders)
+
+        # `type = ""` kept meaning "everything in one view" before per-stage prefixes
+        state = (type === nothing || isempty(type)) ? nothing : market_state_type(type)
 
         self = Dict{Symbol,DataFrame}()
         fields = fieldnames_excl(DataFiles, [:params])
@@ -106,26 +129,12 @@ struct DataFiles
         root_tables = (:REFDAY_GROUPS,)
 
         for name in fields
-
-            table_files = String[]
-            sname = string(name)
-
             if name in root_tables
-                file = joinpath(dir, "$sname.arrow")
+                file = joinpath(dir, "$name.arrow")
                 self[name] = isfile(file) ? load_arrow_unlocked([file]) : DataFrame()
                 continue
             end
-
-            for folder in subrun_folders
-                file = joinpath(folder, "$type$sname.arrow")
-                isfile(file) && push!(table_files, file)
-            end
-
-            if !isempty(table_files)
-                self[name] = load_arrow_unlocked(table_files)
-            else
-                self[name] = DataFrame()
-            end
+            self[name] = _load_table(subrun_folders, name, state, legacy)
         end
 
         values = [self[field] for field in fields]
@@ -169,6 +178,88 @@ struct DataFiles
         return new(params, values...)
     end
 end
+
+"""
+    DataFiles(dir, ::Type{MS}) where {MS<:MarketState}
+
+Load the result tables written by one market state, e.g.
+`DataFiles(dir, Redispatch)`. Preferred over the string form.
+"""
+DataFiles(dir, ::Type{MS}) where {MS<:MarketState} = DataFiles(dir; type = result_prefix(MS))
+
+### Result-file resolution
+#
+# A stage-prefixed file is `<StateName>_<TABLE>.arrow`. A directory holding none of those
+# was written before per-stage prefixes existed and is read under the old names instead.
+# Detection is per directory, not per file, so an explicit `type = "2DA"` on a legacy
+# directory can never silently fall back to day-ahead data.
+
+"""Canonical stage prefix of a result filename, or `nothing` when it carries none."""
+function _file_stage(filename::AbstractString)
+    i = findfirst('_', filename)
+    i === nothing && return nothing
+    T = trymarket_state_type(filename[1:prevind(filename, i)])
+    return T === nothing ? nothing : result_prefix(T)
+end
+
+_is_legacy_layout(subrun_folders) = !any(
+    _file_stage(f) !== nothing
+    for folder in subrun_folders for f in readdir(folder) if endswith(f, ".arrow")
+)
+
+# Stages that make up the default composite view, latest pipeline stage first. TwoDayAhead
+# is deliberately absent: a flow-based basecase is only reachable by asking for it. A new
+# MarketState needs an entry here only if it should take part in the default view.
+const COMPOSITE_STATES = (Redispatch, ProsumerOptimizationState, DayAhead)
+
+# Tables that belong to the run rather than to a market state, and so are never prefixed.
+const UNPREFIXED_TABLES = (:REFDAY_MATCH, :REFDAY_SHIFT)
+
+const _Candidate = Tuple{Union{DataType,Nothing},Symbol}
+
+"""
+    _candidates(field, state, legacy) -> Vector{_Candidate}
+
+Files to try for one `DataFiles` field, in priority order. `nothing` as the state means the
+legacy unprefixed name.
+"""
+function _candidates(field::Symbol, state, legacy::Bool)::Vector{_Candidate}
+    # Reference-day traces belong to the run, not to a stage, and are always unprefixed.
+    field in UNPREFIXED_TABLES && return _Candidate[(nothing, field)]
+    # `STO_LVL` has always meant the day-ahead levels; the redispatch stage's levels are a
+    # separate field, so neither is resolved by recency.
+    if state === nothing
+        field === :STO_LVL        && return [(DayAhead, :STO_LVL), (nothing, :STO_LVL)]
+        field === :STO_LVL_REDISP && return [(Redispatch, :STO_LVL), (nothing, :STO_LVL_REDISP)]
+        field === :NTC            && return [(nothing, :NTC)]           # pre-rename name only
+        field === :BIL_EXCHANGE   && return vcat([(S, field) for S in COMPOSITE_STATES],
+                                                 [(nothing, :BIL_EXCHANGE), (nothing, :NTC)])
+        return vcat([(S, field) for S in COMPOSITE_STATES], [(nothing, field)])
+    end
+    # explicit stage
+    field === :STO_LVL_REDISP &&
+        return state === Redispatch ? _Candidate[(Redispatch, :STO_LVL)] : _Candidate[]
+    field === :NTC && return legacy ? _Candidate[(nothing, :NTC)] : _Candidate[]
+    out = _Candidate[(state, field)]
+    legacy && push!(out, (nothing, field))
+    return out
+end
+
+"""Legacy filename of `table` for `state`: unprefixed, except the basecase's `2DA`."""
+_legacy_name(state, table::Symbol) = state === TwoDayAhead ? "2DA$table" : string(table)
+
+function _load_table(subrun_folders, field::Symbol, state, legacy::Bool)
+    for (S, table) in _candidates(field, state, legacy)
+        # a legacy directory holds no prefixed files at all, so only try those it can have
+        S !== nothing && legacy && continue
+        fname = S === nothing ? _legacy_name(state, table) : "$(result_prefix(S))_$(table)"
+        files = [joinpath(folder, "$fname.arrow") for folder in subrun_folders]
+        filter!(isfile, files)
+        isempty(files) || return load_arrow_unlocked(files)
+    end
+    return DataFrame()
+end
+
 function load_arrow_unlocked(files::Vector{String})
     dfs = DataFrame[]
     sizehint!(dfs, length(files))
@@ -526,7 +617,8 @@ Checks all infeasibility slack variables written to the result tables:
 | `NodalMarketBalance` | `LL`, `CU` | Nodal lost load / curtailment not handled by plant specific curtailment |
 | `NodalMarketRedispBalance` | `LL`, `CU` | Redispatch nodal lost load / curtailment  not handled by plant specific curtailment |
 | `FBMC_INF` | `FBMC_INF_POS`, `FBMC_INF_NEG` | FBMC RAM constraint slacks |
-| `STO_LVL` | `inf` | Storage balance slack (`INF_POS - INF_NEG`, signed) |
+| `STO_LVL` | `inf` | Day-ahead storage balance slack (`INF_POS - INF_NEG`, signed) |
+| `STO_LVL_REDISP` | `inf` | Redispatch storage balance slack (signed) |
 | `PRS` | `INF` | Prosumer energy balance slack |
 
 # Arguments
@@ -588,8 +680,10 @@ function check_infeasibility(results::DataFiles; tol::Float64=1e-6)
     _check!("FBMC_INF", results.FBMC_INF, :FBMC_INF_POS)
     _check!("FBMC_INF", results.FBMC_INF, :FBMC_INF_NEG)
 
-    # Storage balance slack: signed expression INF_POS - INF_NEG stored as `inf`
+    # Storage balance slack: signed expression INF_POS - INF_NEG stored as `inf`.
+    # Both stages have their own storage balance, so both are scanned.
     _check!("STO_LVL", results.STO_LVL, :inf; signed=true)
+    _check!("STO_LVL_REDISP", results.STO_LVL_REDISP, :inf; signed=true)
 
     # Prosumer energy balance slack
     _check!("PRS", results.PRS, :INF)

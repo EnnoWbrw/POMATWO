@@ -126,8 +126,10 @@ function test_custom_component()
                     resultdir = tmpdir, scenarioname = "capex", overwrite = true)
                 @test POMATWO.run(mr) === nothing
                 subdir = joinpath(tmpdir, "capex", "subrun_t1-t2")
-                @test isfile(joinpath(subdir, "CANDIDATE.arrow"))
-                cand = DataFrame(Arrow.Table(joinpath(subdir, "CANDIDATE.arrow")))
+                # result tables of user components are namespaced by their market state
+                # like every other table (DayAhead_CANDIDATE.arrow)
+                @test isfile(joinpath(subdir, "DayAhead_CANDIDATE.arrow"))
+                cand = DataFrame(Arrow.Table(joinpath(subdir, "DayAhead_CANDIDATE.arrow")))
                 @test all(isa.(cand.CAP, Real))          # values, not VariableRefs
                 @test first(cand.CAP) > 1.0              # investment happened
                 @test all(cand.GEN .<= cand.CAP .+ 1e-6) # capacity limit respected
