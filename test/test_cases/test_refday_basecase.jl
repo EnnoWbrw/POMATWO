@@ -11,6 +11,11 @@ function create_refday_test_params()
         sets = sets,
         node2zone = Dict("n1" => "z1", "n2" => "z1", "n3" => "z2"),
         nodes_in_zone = Dict("z1" => ["n1", "n2"], "z2" => ["n3"]),
+        nodal_load = Dict{String,POMATWO.ConcreteProfile}(
+            "n1" => POMATWO.FixedProfile(3.0),
+            "n2" => POMATWO.FixedProfile(6.0),
+            "n3" => POMATWO.FixedProfile(5.0),
+        ),
     )
 end
 
@@ -141,6 +146,70 @@ function test_refday_basecase()
         mg = match_by_scope(toy, GlobalMatchScope(), params; kw...)
         mc = match_by_cluster(toy; kw...)
         @test mg[:, [:target_time, :matched_time]] == mc[:, [:target_time, :matched_time]]
+    end
+
+    @testset "add_zonecol!: node -> zone column" begin
+        df = DataFrame(node = ["n3", "n1", "n2"])
+        POMATWO.add_zonecol!(df, params)
+        @test df.zone == ["z2", "z1", "z1"]
+        df2 = DataFrame(node = ["n1"])
+        out = POMATWO.add_zonecol(df2, params)   # out-of-place leaves input untouched
+        @test out.zone == ["z1"] && !("zone" in names(df2))
+    end
+
+    @testset "LOAD/NP match rows: tags, resolution, zero-fill" begin
+        # nodal load rows: one per node × time, real node, zone from node2zone
+        ln = POMATWO._load_match_rows(params, [1, 2]; nodal = true)
+        @test names(ln) == string.(POMATWO._MATCH_FRAME_COLS)
+        @test nrow(ln) == 6 && all(ln.plant_type .== POMATWO._LOAD_MATCH_TAG)
+        @test all(ln.GEN .== 0.0) && all(ln.NP .== 0.0)
+        r = only(filter(x -> x.node == "n2" && x.Time == 1, ln))
+        @test r.LOAD == 6.0 && r.zone == "z1"
+
+        # zonal load rows: one per zone × time, load summed, representative node
+        lz = POMATWO._load_match_rows(params, [1]; nodal = false)
+        @test nrow(lz) == 2
+        z1 = only(filter(x -> x.zone == "z1", lz))
+        @test z1.LOAD == 9.0 && z1.node == "n1"   # 3 + 6, min-id node
+        z2 = only(filter(x -> x.zone == "z2", lz))
+        @test z2.LOAD == 5.0 && z2.node == "n3"
+
+        # NP rows from an export-positive injection baseline P
+        P = Dict(("n1", 1) => 10.0, ("n2", 1) => -5.0, ("n3", 1) => 20.0)
+        np = POMATWO._np_match_rows(params, P, [1])
+        @test nrow(np) == 2 && all(np.plant_type .== POMATWO._NP_MATCH_TAG)
+        @test all(np.GEN .== 0.0) && all(np.LOAD .== 0.0)
+        @test only(filter(x -> x.zone == "z1", np)).NP == 5.0    # 10 + (-5)
+        @test only(filter(x -> x.zone == "z2", np)).NP == 20.0
+
+        # normalize zero-fills any absent value column and pins the schema
+        part = DataFrame(index = ["p1"], Time = [1], plant_type = ["onwind"],
+                         node = ["n1"], zone = ["z1"], GEN = [5.0])
+        norm = POMATWO._normalize_match_part(part)
+        @test names(norm) == string.(POMATWO._MATCH_FRAME_COLS)
+        @test norm.LOAD == [0.0] && norm.NP == [0.0] && norm.GEN == [5.0]
+    end
+
+    @testset "match_valuecols: LOAD signal steers the reference day" begin
+        # One node, cluster_size=1. GEN makes cluster 3 ≡ cluster 1; LOAD ≡ cluster 2.
+        frame = DataFrame(
+            Time       = [1, 2, 3, 1, 2, 3],
+            plant_type = ["onwind","onwind","onwind",
+                          POMATWO._LOAD_MATCH_TAG, POMATWO._LOAD_MATCH_TAG, POMATWO._LOAD_MATCH_TAG],
+            node       = fill("n1", 6),
+            GEN        = [5.0, 1.0, 5.0, 0.0, 0.0, 0.0],
+            LOAD       = [0.0, 0.0, 0.0, 1.0, 9.0, 9.0],
+        )
+        frame[!, :Cluster]   = frame.Time
+        frame[!, :IsWeekend] = fill(false, 6)
+        base = (lookback = 2, keycols = [:plant_type, :node], value_methods = [median],
+                weights = Dict{Symbol,Float64}(), exact_weekend = false)
+
+        gen_only = match_by_cluster(frame; valuecols = [:GEN], base...)
+        @test only(filter(r -> r.target_cluster == 3, gen_only)).matched_cluster == 1
+
+        with_load = match_by_cluster(frame; valuecols = [:GEN, :LOAD], base...)
+        @test only(filter(r -> r.target_cluster == 3, with_load)).matched_cluster == 2
     end
 
     @testset "match_by_cluster: weekend relax fallback keeps coverage" begin

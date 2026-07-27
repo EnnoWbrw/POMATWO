@@ -137,7 +137,17 @@ Options for the reference-day matching stage of [`ReferenceDayBasecase`](@ref).
 - `lookback::Int = 14`: candidate window (clusters before the target, cyclic).
 - `exact_weekend::Bool = true`: match weekend↔weekend / workday↔workday, with
   automatic relaxation when no same-type candidate exists (never drops timesteps).
-- `keycols::Vector{Symbol} = [:plant_type, :node]`: profile grouping keys.
+- `keycols::Vector{Symbol} = [:plant_type, :node]`: profile grouping keys. A
+  `:zone` column is always available (put it in `keycols` to match zonal LOAD/NP
+  under `GlobalMatchScope`).
+- `match_valuecols::Vector{Symbol} = [:GEN]`: which quantities the reference-day
+  distance compares — a subset of `{:GEN, :LOAD, :NP}` (renewable generation,
+  load, zonal net position). The default `[:GEN]` reproduces the original
+  renewable-only matching. `:LOAD` is nodal when `:node ∈ keycols`, otherwise
+  zonal; `:NP` is always zonal (derived from the source state's nodal injection
+  baseline). `value_methods` and `weights` apply to every requested quantity.
+  NOTE: LOAD/NP are typically ~GW and dominate the raw L1 distance unless
+  down-weighted, e.g. `weights = Dict(:LOAD_median => 1e-3, :NP_median => 1e-3)`.
 - `value_methods::Vector{Function} = [median, maximum]`: per-cluster statistics.
 - `weights::Dict = Dict{Tuple{Symbol,String},Float64}()`: distance weights
   (per value/statistic column, optionally refined per plant type).
@@ -152,6 +162,7 @@ Base.@kwdef struct MatchingConfig
     lookback::Int = 14
     exact_weekend::Bool = true
     keycols::Vector{Symbol} = [:plant_type, :node]
+    match_valuecols::Vector{Symbol} = [:GEN]
     value_methods::Vector{Function} = [median, maximum]
     weights::Dict = Dict{Tuple{Symbol,String},Float64}()
     res_tags::Vector{String} = ["solar", "wind"]
@@ -865,6 +876,109 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
 end
 
 # ---------------------------------------------------------------------------
+# Extra matching signals (load, net position)
+#
+# The reference-day distance can compare LOAD and NP alongside GEN
+# (MatchingConfig.match_valuecols). They are stacked as extra rows on the match
+# frame, discriminated by a sentinel :plant_type, with the non-applicable value
+# columns zero-filled — so build_cluster_profiles / profile_distance / refday_weights
+# handle them unchanged (a GEN row has LOAD = NP = 0 on both sides of the join, so
+# it contributes nothing to the LOAD/NP distance, and vice-versa).
+# ---------------------------------------------------------------------------
+
+"Sentinel :plant_type / :index tags marking stacked LOAD and NP match rows."
+const _LOAD_MATCH_TAG = "__LOAD__"
+const _NP_MATCH_TAG   = "__NP__"
+
+"Unified column schema every part of the stacked match frame carries."
+const _MATCH_FRAME_COLS = [:index, :Time, :plant_type, :node, :zone, :GEN, :LOAD, :NP]
+
+"Representative (min-id) node of zone `z`, used to keep zonal LOAD/NP rows in the right `match_by_scope` group."
+_zone_repr_node(params::Parameters, z) = first(sort(collect(params.nodes_in_zone[z])))
+
+"""
+    _load_match_rows(params, times; nodal) -> DataFrame
+
+Stacked LOAD rows (tagged `__LOAD__`) over `times`. `nodal = true` emits one row
+per node (`LOAD = _nodal_load_at`); `nodal = false` aggregates load to the zone
+(`node` set to the zone's representative node so scoped matching keeps it).
+"""
+function _load_match_rows(params::Parameters, times; nodal::Bool)
+    idx  = String[]; T = Int[]; nd = String[]; zn = String[]; val = Float64[]
+    if nodal
+        for n in sort(collect(params.sets.N)), t in times
+            push!(idx, _LOAD_MATCH_TAG); push!(T, t)
+            push!(nd, n); push!(zn, params.node2zone[n])
+            push!(val, _nodal_load_at(params, n, t))
+        end
+    else
+        for z in sort(collect(params.sets.Z)), t in times
+            push!(idx, _LOAD_MATCH_TAG); push!(T, t)
+            push!(nd, _zone_repr_node(params, z)); push!(zn, z)
+            push!(val, sum(_nodal_load_at(params, n, t) for n in params.nodes_in_zone[z]; init = 0.0))
+        end
+    end
+    return DataFrame(index = idx, Time = T, plant_type = fill(_LOAD_MATCH_TAG, length(T)),
+                     node = nd, zone = zn, GEN = zeros(length(T)), LOAD = val, NP = zeros(length(T)))
+end
+
+"""
+    _np_match_rows(params, P, times) -> DataFrame
+
+Stacked zonal net-position rows (tagged `__NP__`) over `times`.
+`NP[z,t] = Σ_{n∈z} P[n,t]` from the source state's nodal injection baseline
+`P` (`_ac_injection_baseline`, export-positive). `node` is the zone's representative node.
+"""
+function _np_match_rows(params::Parameters, P::AbstractDict, times)
+    idx = String[]; T = Int[]; nd = String[]; zn = String[]; val = Float64[]
+    for z in sort(collect(params.sets.Z)), t in times
+        push!(idx, _NP_MATCH_TAG); push!(T, t)
+        push!(nd, _zone_repr_node(params, z)); push!(zn, z)
+        push!(val, sum(get(P, (n, t), 0.0) for n in params.nodes_in_zone[z]; init = 0.0))
+    end
+    return DataFrame(index = idx, Time = T, plant_type = fill(_NP_MATCH_TAG, length(T)),
+                     node = nd, zone = zn, GEN = zeros(length(T)), LOAD = zeros(length(T)), NP = val)
+end
+
+"Normalize a match-frame part to `_MATCH_FRAME_COLS` (zero-filling any missing value column)."
+function _normalize_match_part(df)
+    df = copy(df)
+    for c in (:GEN, :LOAD, :NP)
+        c in propertynames(df) || (df[!, c] = zeros(nrow(df)))
+    end
+    return df[:, _MATCH_FRAME_COLS]
+end
+
+"""
+    _assemble_match_frame(ref, state, cfg, gen_df) -> DataFrame
+
+Build the combined reference-day match frame for `cfg.match_valuecols`: the RES
+`gen_df` (when `:GEN` requested) plus stacked LOAD / NP rows, all sharing
+`_MATCH_FRAME_COLS`, with `:Cluster` / `:Weekday` / `:IsWeekend` added once. LOAD
+resolution is nodal iff `:node ∈ cfg.keycols`, else zonal.
+"""
+function _assemble_match_frame(ref::DataFiles, state::RefdaySourceState,
+                               cfg::MatchingConfig, gen_df)
+    params = ref.params
+    times = sort(unique(Int.(_source_gen(state, ref).Time)))
+    parts = DataFrame[]
+    if :GEN in cfg.match_valuecols
+        gd = add_zonecol(gen_df, params)
+        push!(parts, _normalize_match_part(gd))
+    end
+    if :LOAD in cfg.match_valuecols
+        push!(parts, _load_match_rows(params, times; nodal = :node in cfg.keycols))
+    end
+    if :NP in cfg.match_valuecols
+        push!(parts, _np_match_rows(params, _ac_injection_baseline(state, ref), times))
+    end
+    frame = vcat(parts...)
+    add_time_cluster!(frame, cfg.cluster_size)
+    add_weekday!(frame, cfg.start_date)
+    return frame
+end
+
+# ---------------------------------------------------------------------------
 # Config-driven entry point (used by the solving pipeline)
 # ---------------------------------------------------------------------------
 
@@ -934,25 +1048,34 @@ function build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters;
         "ReferenceDayBasecase: node set of the source results does not match the current model.")
     _validate_refday_source(state, ref, bc.source_type)
 
-    # --- renewable frame + matching (from the same MarketState as the shift) ---
-    gen_df = copy(_source_gen(state, ref))
-    add_planttype!(gen_df, ref.params)
-    filter_powerplants!(gen_df; type_in_planttype = cfg.res_tags)
-    isempty(gen_df) && error("ReferenceDayBasecase: no plants match res_tags = $(cfg.res_tags).")
-    add_nodecol!(gen_df, ref.params)
-    add_time_cluster!(gen_df, cfg.cluster_size)
-    add_weekday!(gen_df, cfg.start_date)
+    # --- matching signals (from the same MarketState as the shift) ---
+    isempty(cfg.match_valuecols) &&
+        error("ReferenceDayBasecase: match_valuecols is empty; request at least one of :GEN, :LOAD, :NP.")
+    bad = setdiff(cfg.match_valuecols, [:GEN, :LOAD, :NP])
+    isempty(bad) ||
+        error("ReferenceDayBasecase: unsupported match_valuecols $bad (allowed: :GEN, :LOAD, :NP).")
 
-    kw = (lookback = cfg.lookback, keycols = cfg.keycols, valuecols = [:GEN],
+    gen_df = nothing
+    if :GEN in cfg.match_valuecols
+        gen_df = copy(_source_gen(state, ref))
+        add_planttype!(gen_df, ref.params)
+        filter_powerplants!(gen_df; type_in_planttype = cfg.res_tags)
+        isempty(gen_df) && error("ReferenceDayBasecase: no plants match res_tags = $(cfg.res_tags).")
+        add_nodecol!(gen_df, ref.params)
+    end
+
+    match_df = _assemble_match_frame(ref, state, cfg, gen_df)
+
+    kw = (lookback = cfg.lookback, keycols = cfg.keycols, valuecols = cfg.match_valuecols,
           value_methods = cfg.value_methods, weights = cfg.weights,
           exact_weekend = cfg.exact_weekend)
 
     if cfg.scope isa GlobalMatchScope
-        matches = match_by_cluster(gen_df; kw...)
+        matches = match_by_cluster(match_df; kw...)
         fallback = nothing
     else
-        matches = match_by_scope(gen_df, cfg.scope, ref.params; kw...)
-        fallback = match_by_cluster(gen_df; kw...)   # global fallback for unmatched groups
+        matches = match_by_scope(match_df, cfg.scope, ref.params; kw...)
+        fallback = match_by_cluster(match_df; kw...)   # global fallback for unmatched groups
     end
 
     return build_refday_basecase(ref, matches, bc.shift;

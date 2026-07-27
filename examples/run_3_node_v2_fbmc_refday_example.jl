@@ -19,7 +19,7 @@ using Dates
 using POMATWO: dict_to_matrix, zone_to_zone_ptdf, define_cne!,
     add_planttype!, filter_powerplants!, add_nodecol!, add_time_cluster!,
     add_weekday!, match_by_cluster, match_by_scope, build_refday_basecase,
-    calc_fbmc_params
+    calc_fbmc_params, _assemble_match_frame, _source_state
 
 
 # -----------------------------------------------------------------------------
@@ -72,13 +72,42 @@ add_weekday!(gen_df, cfg.start_date)
 println("\n=== renewable frame (the matching signal) ===")
 pretty(gen_df[:, [:index, :plant_type, :node, :Time, :GEN, :Cluster]])
 
-kw = (lookback = cfg.lookback, keycols = cfg.keycols, valuecols = [:GEN],
+kw = (lookback = cfg.lookback, keycols = cfg.keycols, valuecols = cfg.match_valuecols,
       value_methods = cfg.value_methods, weights = cfg.weights,
       exact_weekend = cfg.exact_weekend)
 println("\n=== match_by_scope (per-zone reference days) ===")
 pretty(match_by_scope(gen_df, cfg.scope, ref.params; kw...))
 println("\n=== match_by_cluster (global fallback) ===")
 pretty(match_by_cluster(gen_df; kw...))
+
+# -----------------------------------------------------------------------------
+# 5b. Matching on additional signals: load and net position (match_valuecols).
+#     LOAD/NP are stacked as extra rows (sentinel plant_type) on the match frame;
+#     LOAD is nodal when :node is a keycol, else zonal, and NP is always zonal.
+#     value_methods and weights apply to every signal — down-weight the ~GW
+#     load/NP terms so they do not swamp the renewable distance.
+# -----------------------------------------------------------------------------
+cfg_multi = MatchingConfig(cluster_size = 2, lookback = 1, exact_weekend = true,
+    scope = ZonalMatchScope(), match_valuecols = [:GEN, :LOAD, :NP],
+    weights = Dict(:LOAD_median => 1e-3, :LOAD_maximum => 1e-3,
+                   :NP_median => 1e-3,   :NP_maximum => 1e-3))
+
+# gen_res is the same renewable frame from above, before cluster/weekday columns
+gen_res = copy(ref.GEN)
+add_planttype!(gen_res, ref.params)
+filter_powerplants!(gen_res; type_in_planttype = cfg_multi.res_tags)
+add_nodecol!(gen_res, ref.params)
+
+match_frame = _assemble_match_frame(ref, _source_state("DA"), cfg_multi, gen_res)
+println("\n=== combined match frame (GEN + LOAD + NP rows) ===")
+pretty(match_frame[:, [:plant_type, :node, :zone, :Time, :GEN, :LOAD, :NP, :Cluster]])
+
+kw_multi = (lookback = cfg_multi.lookback, keycols = cfg_multi.keycols,
+            valuecols = cfg_multi.match_valuecols, value_methods = cfg_multi.value_methods,
+            weights = cfg_multi.weights, exact_weekend = cfg_multi.exact_weekend)
+println("\n=== match_by_scope with GEN + LOAD + NP ===")
+pretty(match_by_scope(match_frame, cfg_multi.scope, ref.params; kw_multi...))
+
 
 # -----------------------------------------------------------------------------
 # 6. Shift + basecase assembly — contrast: :zonal vs :nodal resolution

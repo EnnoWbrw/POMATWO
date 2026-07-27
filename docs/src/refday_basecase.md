@@ -53,6 +53,13 @@ Implemented in `src/utils/refday_matching.jl`, configured by [`MatchingConfig`](
    contains one of the `res_tags` substrings (default `"solar"`, `"wind"`) are kept. Per
    cluster, their generation is aggregated by `keycols` (default `(plant_type, node)`)
    using the statistics in `value_methods` (default `median` and `maximum`).
+   - **Additional signals.** `match_valuecols` (default `[:GEN]`) selects which quantities
+     the distance compares — any subset of `{:GEN, :LOAD, :NP}` (renewable generation,
+     load, zonal net position). `:LOAD` is nodal when `:node ∈ keycols`, otherwise zonal;
+     `:NP` is always zonal (derived from the source state's nodal injection baseline).
+     `value_methods` and `weights` apply to every requested signal. Because LOAD/NP are
+     typically ~GW and would dominate the raw L1 distance, down-weight them via `weights`,
+     e.g. `Dict(:LOAD_median => 1e-3, :NP_median => 1e-3)`.
 3. **Distance.** Similarity between two clusters is the weighted distance between
    their profiles ([`match_by_cluster`](@ref); weights per statistic column, optionally
    per plant type).

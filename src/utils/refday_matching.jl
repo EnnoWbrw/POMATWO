@@ -155,6 +155,21 @@ function add_nodecol(df, params::Parameters)
     return df
 end
 
+# NOTE: named add_zonecol! (not add_zone!) for the same reason as add_nodecol!
+# above — avoid shadowing any Plasmo/OptiGraph import.
+"Add a `:zone` column from a `:node` column via `params.node2zone` (in-place)."
+function add_zonecol!(df, params::Parameters)
+    df[!, :zone] = [params.node2zone[row.node] for row in eachrow(df)]
+    return df
+end
+
+"Add a `:zone` column from a `:node` column via `params.node2zone` (out-of-place)."
+function add_zonecol(df, params::Parameters)
+    df = copy(df)
+    add_zonecol!(df, params)
+    return df
+end
+
 # ---------------------------------------------------------------------------
 # Profiles and distances
 # ---------------------------------------------------------------------------
