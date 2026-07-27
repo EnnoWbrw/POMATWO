@@ -78,6 +78,7 @@ function df_netinput(dict)
             index = String[],
             Time = Int[],
             NETINPUT = AffOrVarOrFloatOrInt[],
+            ACINJECTION = AffOrVarOrFloatOrInt[],
             DELTA = AffOrVarOrFloatOrInt[],
         )
     end
@@ -94,7 +95,6 @@ function df_lineflow(dict)
             Time = Int[],
             LINEFLOW = AffOrVar[],
             line_capacity = Float64[],
-            lineinf = VariableRef[],
         )
     end
 
@@ -104,7 +104,6 @@ function df_lineflow(dict)
             Time = Int[],
             DCLINEFLOW = AffOrVarOrFloatOrInt[],
             line_capacity = Float64[],
-            lineinf = VariableRef[],
         )
     end
 end
@@ -121,13 +120,50 @@ function df_exchange(dict)
 end
 
 """
-Initializes the :NTC DataFrame in the results dictionary if it does not exist.
-Stores NTC results for each zone pair and time period.
+Initializes the :FBMC_INF DataFrame in the results dictionary if it does not exist.
+Stores FBMC infeasibility slack values for each CNE line and time period.
+"""
+function df_fbmc_inf(dict)
+    if !haskey(dict, :FBMC_INF)
+        dict[:FBMC_INF] = DataFrame(;
+            index = String[],
+            Time = Int[],
+            FBMC_INF_POS = VariableRef[],
+            FBMC_INF_NEG = VariableRef[],
+        )
+    end
+end
+
+"""
+Initializes the :RAM DataFrame in the results dictionary if it does not exist.
+Stores the flow-based Remaining Available Margin per CNE line and time period, together
+with the basecase reference flow `F0` it was derived from and the parameters of the
+70 %-rule (`fmax`, `FRM`, `minRAM`). Plain floats — computed before the solve, not
+model variables.
+"""
+function df_ram(dict)
+    if !haskey(dict, :RAM)
+        dict[:RAM] = DataFrame(;
+            index = String[],
+            Time = Int[],
+            RAM_POS = Float64[],
+            RAM_NEG = Float64[],
+            F0 = Float64[],
+            fmax = Float64[],
+            FRM = Float64[],
+            minRAM = Float64[],
+        )
+    end
+end
+
+"""
+Initializes the :BIL_EXCHANGE DataFrame in the results dictionary if it does not exist.
+Stores bilateral exchange results for each zone pair and time period.
 """
 function df_ntc(dict)
-    if !haskey(dict, :NTC)
-        dict[:NTC] =
-            DataFrame(; From = String[], To = String[], Time = Int[], NTC = VariableRef[])
+    if !haskey(dict, :BIL_EXCHANGE)
+        dict[:BIL_EXCHANGE] =
+            DataFrame(; From = String[], To = String[], Time = Int[], BIL_EXCHANGE = VariableRef[])
     end
 end
 
@@ -202,6 +238,23 @@ function df_prosumer(dict)
     end
 end
 
+"""
+    append_results!(results, key, tbl)
+
+Add a block of result rows (built column-wise, see the builders in technologies.jl)
+to the result table `key`. Replaces the empty schema-seeded table on first append so
+columns keep their concrete types; later appends promote column types as needed.
+"""
+function append_results!(results::Dict{Symbol,DataFrame}, key::Symbol, tbl::DataFrame)
+    isempty(tbl) && return get(results, key, tbl)
+    if haskey(results, key) && !isempty(results[key])
+        append!(results[key], tbl; promote = true)
+    else
+        results[key] = tbl
+    end
+    return results[key]
+end
+
 read_csv(file) = CSV.read(file, DataFrame, stringtype = String)
 
 function prev_results_for_redispatch(sr::SubRun)
@@ -212,5 +265,18 @@ function prev_results_for_redispatch(sr::SubRun)
         :ndisp_cu => value.(d[:ndisp][:CU]),
         :sto_generation => value.(d[:sto][:GEN]),
         :sto_charge => value.(d[:sto][:CHARGE]),
+    )
+end
+
+function prev_results_for_fbmc(sr::SubRun)
+    d = sr.vars
+
+    return Dict(
+        :disp_generation => value.(d[:disp][:GEN]),
+        :ndisp_cu => value.(d[:ndisp][:CU]),
+        :sto_generation => value.(d[:sto][:GEN]),
+        :sto_charge => value.(d[:sto][:CHARGE]),
+        :lineflows => value.(d[:network][:LINEFLOW]),
+        :netinput_ac => value.(d[:network][:ACINJECTION]),
     )
 end

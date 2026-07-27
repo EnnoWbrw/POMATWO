@@ -1,4 +1,4 @@
-"""
+﻿"""
 Test suite for data load validations including:
 - Time horizon length checks (row count vs TimeHorizon.stop)
 - Node consistency checks for demand and availability
@@ -300,17 +300,21 @@ Test suite for data load validations including:
     end
     
     @testset "Base Validation Still Works" begin
-        # Test that validate_params(params) without setup still works
+        # validate_params requires ModelSetup; use a default one so time-horizon
+        # check compares against stop=8760 (well above the 3-element profile)
         params = create_test_params(
             nodes=["n1"],
             slack=["n1"]
         )
         params.nodal_load["n1"] = POMATWO.HourlyProfile([10.0, 20.0, 30.0])
         
-        report = POMATWO.validate_params(params)  # Without setup
+        report = POMATWO.validate_params(params, ModelSetup(TimeHorizon=TimeHorizon()))
         
-        # Should complete without errors (no time horizon check)
-        @test !report.has_errors
+        # Profile length (3) < default stop (8760) â†’ length mismatch error is expected
+        # but no topology or data-completeness errors should appear
+        topo_errors = filter(e -> e.category != "timeseries_length_mismatch",
+                             POMATWO.get_errors(report))
+        @test isempty(topo_errors)
     end
     
     @testset "Empty Nodal Availability Produces Note" begin

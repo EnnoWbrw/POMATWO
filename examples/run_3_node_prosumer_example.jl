@@ -25,15 +25,13 @@ params = load_data(data_files)
 # set scenario name 
 scen_name = "3_nodes_prosumer"
 
-# define output path for data transfer
-output_path = "results/"
 
 ### Defining a test setup for a model run that stops after 4 timesteps
 setup = ModelSetup(;
     Scenario = "TestSetup",
     TimeHorizon = TimeHorizon(stop = 4),
     MarketType = ZonalMarket(),
-    ProsumerSetup = ProsumerOptimization(sell_price=0.12, buy_price=0.22),
+    ProsumerSetup = ProsumerOptimization(sell_price=80.0, buy_price=250.0),  # EUR/MWh
     RedispatchSetup = DCLF(PhaseAngle)
 )
 

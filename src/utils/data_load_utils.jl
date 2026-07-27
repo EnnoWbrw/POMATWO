@@ -1,31 +1,21 @@
 """
-    isinvertible(A::Matrix{Float64}) -> Bool
-
-Check if matrix A is invertible by computing its determinant with high precision.
-Uses BigFloat arithmetic to avoid numerical errors, with tolerance 1e-18.
-"""
-isinvertible(A::Matrix{Float64}) = !isapprox(det(BigFloat.(A)), 0, atol = 1e-18)
-
-"""
-    diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String})
+    diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String}, report::DataReport, location::String)
 
 Diagnostic function to identify why a matrix is singular.
 Checks for network islands, zero rows/columns, and rank deficiency.
+Diagnostic results are written to `report` via the `DataReport` API.
 """
-function diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String})
+function diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector{String}, report::DataReport, location::String="singular matrix diagnostics")
     n = size(b_red, 1)
-    
-    println("\n" * "="^60)
-    println("SINGULAR MATRIX DIAGNOSTICS")
-    println("="^60)
     
     # Check determinant
     det_val = det(BigFloat.(b_red))
-    println("Determinant: ", det_val)
     
     # Check rank
     r = rank(b_red)
-    println("Rank: $r / $n (deficit: $(n - r))")
+    add_note!(report, "singular_matrix_diagnostics",
+              "Determinant: $det_val, Rank: $r / $n (deficit: $(n - r))",
+              location)
     
     # Check for zero or near-zero rows/columns
     row_norms = [norm(b_red[i, :]) for i in 1:n]
@@ -35,50 +25,137 @@ function diagnose_singular_matrix(b_red::Matrix{Float64}, included_nodes::Vector
     zero_cols = findall(x -> x < 1e-10, col_norms)
     
     if !isempty(zero_rows)
-        println("\nNodes with near-zero rows (likely isolated or faulty line data):")
-        for i in zero_rows
-            println("  - $(included_nodes[i]) (row $i, norm: $(row_norms[i]))")
-        end
+        nodes_str = join(["$(included_nodes[i]) (row $i, norm: $(row_norms[i]))" for i in zero_rows], ", ")
+        add_warning!(report, "singular_matrix_diagnostics",
+                     "Nodes with near-zero rows (likely isolated or faulty line data): $nodes_str",
+                     location)
     end
     
     if !isempty(zero_cols)
-        println("\nNodes with near-zero columns (likely isolated or faulty line data):")
-        for j in zero_cols
-            println("  - $(included_nodes[j]) (col $j, norm: $(col_norms[j]))")
-        end
+        nodes_str = join(["$(included_nodes[j]) (col $j, norm: $(col_norms[j]))" for j in zero_cols], ", ")
+        add_warning!(report, "singular_matrix_diagnostics",
+                     "Nodes with near-zero columns (likely isolated or faulty line data): $nodes_str",
+                     location)
     end
     
     # Check condition number
     cond_num = cond(b_red)
-    println("\nCondition number: $cond_num")
     if cond_num > 1e12
-        println("  ⚠️  Matrix is severely ill-conditioned!")
+        add_warning!(report, "singular_matrix_diagnostics",
+                     "Condition number: $cond_num — matrix is severely ill-conditioned!",
+                     location)
+    else
+        add_note!(report, "singular_matrix_diagnostics",
+                  "Condition number: $cond_num",
+                  location)
     end
     
     # Check for disconnected components (simplified check)
     # A connected network should have rank = n-1 for the Laplacian-like matrix
-    println("\nExpected rank for connected network: $(n-1)")
-    println("Actual rank: $r")
     if r < n - 1
-        println("  ⚠️  Network likely has $(n - r) disconnected islands!")
+        add_error!(report, "singular_matrix_diagnostics",
+                   "Expected rank for connected network: $(n-1), actual rank: $r — network likely has $(n - r) disconnected islands!",
+                   location)
+    else
+        add_note!(report, "singular_matrix_diagnostics",
+                  "Expected rank for connected network: $(n-1), actual rank: $r",
+                  location)
     end
     
     # Show diagonal values
     diag_vals = diag(b_red)
-    println("\nDiagonal value statistics:")
-    println("  Min: $(minimum(diag_vals))")
-    println("  Max: $(maximum(diag_vals))")
-    println("  Mean: $(sum(diag_vals) / n)")
+    add_note!(report, "singular_matrix_diagnostics",
+              "Diagonal value statistics — Min: $(minimum(diag_vals)), Max: $(maximum(diag_vals)), Mean: $(sum(diag_vals) / n)",
+              location)
     
     near_zero_diag = findall(x -> abs(x) < 1e-6, diag_vals)
     if !isempty(near_zero_diag)
-        println("\nNodes with near-zero diagonal (suspicious):")
-        for i in near_zero_diag
-            println("  - $(included_nodes[i]): $(diag_vals[i])")
+        nodes_str = join(["$(included_nodes[i]): $(diag_vals[i])" for i in near_zero_diag], ", ")
+        add_warning!(report, "singular_matrix_diagnostics",
+                     "Nodes with near-zero diagonal (suspicious): $nodes_str",
+                     location)
+    end
+end
+
+"""
+    diagnose_missing_slacks(island_nodes, slack_list, params, report, location)
+
+Identify disconnected AC islands among nodes included in the PTDF calculation and
+report which islands are missing a slack bus. Suggests a candidate slack node for
+each island that currently lacks one.
+
+Called automatically when the B-matrix is found to be singular.
+Diagnostic results are written to `report` via the `DataReport` API.
+"""
+function diagnose_missing_slacks(island_nodes::Vector{String}, slack_list::Vector{String}, params::Parameters, report::DataReport, location::String="island slack diagnostics")
+    island_node_set = Set(island_nodes)
+    L = params.sets.L
+
+    # Build AC-only adjacency restricted to included nodes
+    adjacency = Dict{String, Vector{String}}(n => String[] for n in island_nodes)
+    for l in L
+        s = get(params.line_start, l, nothing)
+        e = get(params.line_end,   l, nothing)
+        if !isnothing(s) && !isnothing(e) && s in island_node_set && e in island_node_set
+            push!(adjacency[s], e)
+            push!(adjacency[e], s)
         end
     end
-    
-    println("="^60 * "\n")
+
+    # DFS to find connected components
+    visited = Set{String}()
+    islands = Vector{Vector{String}}()
+    for start in island_nodes
+        if !(start in visited)
+            island = String[]
+            stack = [start]
+            while !isempty(stack)
+                node = pop!(stack)
+                if !(node in visited)
+                    push!(visited, node)
+                    push!(island, node)
+                    for nb in adjacency[node]
+                        !(nb in visited) && push!(stack, nb)
+                    end
+                end
+            end
+            push!(islands, island)
+        end
+    end
+
+    slack_set = Set(slack_list)
+
+    add_note!(report, "island_slack_diagnostics",
+              "Found $(length(islands)) AC island(s) among $(length(island_nodes)) nodes. Each island requires exactly 1 slack bus.",
+              location)
+
+    n_missing = 0
+    for (i, island) in enumerate(sort(islands, by=length, rev=true))
+        slack_in_island = filter(n -> n in slack_set, island)
+        has_slack = !isempty(slack_in_island)
+
+        if has_slack
+            add_note!(report, "island_slack_diagnostics",
+                      "Island $i ($(length(island)) nodes): OK — slack: $(join(slack_in_island, ", "))",
+                      location)
+        else
+            n_missing += 1
+            candidate = first(sort(island))
+            add_error!(report, "island_slack_diagnostics",
+                       "Island $i ($(length(island)) nodes): NO SLACK — suggested candidate: $candidate",
+                       location)
+        end
+    end
+
+    if n_missing > 0
+        add_error!(report, "island_slack_diagnostics",
+                   "Identified $n_missing island(s) without a slack bus. Each island must have exactly 1 slack node defined in the input data to ensure a non-singular B-matrix. Check report for details and suggested candidate nodes for slack assignment.",
+                   location)
+    else
+        add_note!(report, "island_slack_diagnostics",
+                  "All islands already have a slack node. Singularity is likely caused by zero/near-zero line reactances — check line parameters.",
+                  location)
+    end
 end
 
 function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
@@ -110,11 +187,9 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
 
     if !issymmetric(b)
         @warn "B-matrix is not symmetric. This indicates a numerical or algorithmic issue."
-        if !isnothing(report)
             add_error!(report, "matrix_calculation", 
                         "B-matrix is not symmetric - indicates numerical or algorithmic issue", 
                         "PTDF calculation")
-        end
     end
 
     calc_PTDF!(h, b, slack, N, L, params, report)
@@ -173,62 +248,47 @@ function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{S
     else
         # Create reduced B-matrix (excluding slack and omitted nodes)
         b_red = b[included_idx, included_idx]
+        b_red_inv = zeros(size(b_red))
 
-        if !isinvertible(b_red)
-            # Matrix is singular - try to provide helpful diagnostic
-            @warn """
-            B-matrix is singular (determinant is zero).
-            This typically indicates:
-            - Isolated network sections (islands)
-            - Missing or zero line reactances
-            - Duplicate or contradictory line definitions
-            
-            Network topology issues:
-            - Total nodes: $(length(N))
-            - Slack nodes: $(length(slack_idx)) at $(slack_list)
-            - Omitted nodes: $(length(omit_idx))
-            - Nodes in calculation: $(length(included_idx))
-            - Lines: $(length(L))
-            
-            Attempting pseudoinverse for PTDF calculation (may produce inaccurate results).
-            """
-            
-            # Run detailed diagnostics
-            included_nodes = N[included_idx]
-            diagnose_singular_matrix(b_red, included_nodes)
-            
-            # Add warning to report
-            if !isnothing(report)
-                add_warning!(report, "ptdf_calculation", 
-                            "B-matrix is singular - using pseudoinverse (may produce inaccurate PTDF values). See console output for detailed diagnostics.", 
-                            "PTDF calculation")
-            end
-            
-            # Use pseudoinverse as fallback
-            b_red_inv = pinv(b_red)
-        else
-            # Try regular inversion, catch singularity errors
-            try
-                b_red_inv = inv(b_red)
-            catch e
-                if e isa LinearAlgebra.SingularException
-                    @warn """
-                    Matrix inversion failed despite full rank.
-                    This may indicate numerical conditioning issues.
-                    Using pseudoinverse as fallback.
-                    """
-                    
-                    # Add warning to report
-                    if !isnothing(report)
-                        add_warning!(report, "ptdf_calculation", 
-                                    "Matrix inversion failed despite determinant check - using pseudoinverse due to numerical conditioning issues", 
-                                    "PTDF calculation")
-                    end
-                    
-                    b_red_inv = pinv(b_red)
-                else
-                    rethrow(e)
-                end
+        # Try regular inversion first. This avoids expensive and numerically fragile
+        # determinant checks on very large matrices.
+        try
+            b_red_inv = inv(b_red)
+        catch e
+            if e isa LinearAlgebra.SingularException
+                @warn """
+                B-matrix inversion failed (singular matrix).
+                This typically indicates:
+                - Isolated network sections (islands)
+                - Missing or zero line reactances
+                - Duplicate or contradictory line definitions
+                
+                Network topology issues:
+                - Total nodes: $(length(N))
+                - Slack nodes: $(length(slack_idx)) at $(slack_list)
+                - Omitted nodes: $(length(omit_idx))
+                - Nodes in calculation: $(length(included_idx))
+                - Lines: $(length(L))
+                
+                Attempting pseudoinverse for PTDF calculation (may produce inaccurate results).
+                """
+
+                # Run detailed diagnostics on reduced matrix
+                included_nodes = N[included_idx]
+           
+                diagnose_singular_matrix(b_red, included_nodes, report, "PTDF calculation")
+    
+
+                # For island-slack diagnostics include slack buses (omit only PTDF-omitted nodes)
+                island_nodes_idx = setdiff(1:length(N), omit_idx)
+                island_nodes = N[island_nodes_idx]
+                    diagnose_missing_slacks(island_nodes, slack_list, params, report, "PTDF calculation")
+                    add_warning!(report, "ptdf_calculation", 
+                                "B-matrix is singular - using pseudoinverse (may produce inaccurate PTDF values). Check report for detailed island slack diagnostics.", 
+                                "PTDF calculation")
+                b_red_inv = pinv(b_red)
+            else
+                rethrow(e)
             end
         end
 
@@ -246,6 +306,7 @@ function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{S
         params.ptdf[(L[l], N[n])] = ptdf[l, n]
     end
 end
+
 
 function calc_mc!(params)
 
@@ -392,3 +453,161 @@ function create_subsets!(params::Parameters)
 end
 
 calc_gmax(params::Parameters, p::String, t::Int) = params.avail[p][t] * params.gmax[p]
+
+function find_connected_zones(params::Parameters)
+    @unpack L, DC = params.sets
+    @unpack line_start, line_end, dc_start, dc_end, node2zone = params
+    
+    connected_zones = Set{Tuple{String, String}}()
+    
+    # Check AC lines for inter-zonal connections
+    for l in L
+        z_start = node2zone[line_start[l]]
+        z_end = node2zone[line_end[l]]
+        if z_start != z_end
+            push!(connected_zones, (z_start, z_end))
+            push!(connected_zones, (z_end, z_start))
+        end
+    end
+    
+    # Check DC lines for inter-zonal connections
+    for dc in DC
+        z_start = node2zone[dc_start[dc]]
+        z_end = node2zone[dc_end[dc]]
+        if z_start != z_end
+            push!(connected_zones, (z_start, z_end))
+            push!(connected_zones, (z_end, z_start))
+        end
+    end
+    
+    return collect(connected_zones)
+end
+
+function find_connected_zones_ac(params::Parameters)
+    @unpack L, DC = params.sets
+    @unpack line_start, line_end, dc_start, dc_end, node2zone = params
+    
+    connected_zones = Set{Tuple{String, String}}()
+    
+    # Check AC lines for inter-zonal connections
+    for l in L
+        z_start = node2zone[line_start[l]]
+        z_end = node2zone[line_end[l]]
+        if z_start != z_end
+            push!(connected_zones, (z_start, z_end))
+            push!(connected_zones, (z_end, z_start))
+        end
+    end
+    return collect(connected_zones)
+end
+
+
+# Store coordinates for a single node row into params.node_coords
+function _load_node_coords!(params::Parameters, row, report::DataReport, location::String)
+    if "lat" in names(row) && "lon" in names(row)
+        if !ismissing(row[:lat]) && !ismissing(row[:lon])
+            params.node_coords[row[:index]] = [row[:lon], row[:lat]]
+        else
+            params.node_coords[row[:index]] = [0.0, 0.0]
+            add_note!(report, "missing_coordinates",
+                     "Node $(row[:index]) missing coordinates, using [0.0, 0.0]", location)
+        end
+    elseif "latitude" in names(row) && "longitude" in names(row)
+        if !ismissing(row[:latitude]) && !ismissing(row[:longitude])
+            params.node_coords[row[:index]] = [row[:longitude], row[:latitude]]
+        else
+            params.node_coords[row[:index]] = [0.0, 0.0]
+            add_note!(report, "missing_coordinates",
+                     "Node $(row[:index]) missing coordinates, using [0.0, 0.0]", location)
+        end
+    else
+        params.node_coords[row[:index]] = [0.0, 0.0]
+    end
+end
+
+# Load nodes using the legacy 0/1 slack format (deprecated).
+# Emits a deprecation warning. Each node with slack=1 becomes a standalone slack bus;
+# no slack_zone grouping is built.
+function _add_nodes_legacy!(params::Parameters, df_nodes::AbstractDataFrame, report::DataReport, location::String)
+    add_warning!(report, "deprecated_slack_format",
+        "The numeric 0/1 'slack' column format is deprecated. " *
+        "Use node index references instead: set each node's 'slack' value to the " *
+        "index of its slack bus (or to its own index if it IS the slack bus). " *
+        "Support for the 0/1 format may be removed in a future version.", location)
+
+    for row in eachrow(df_nodes)
+        if ismissing(row[:index]) || ismissing(row[:zone]) || ismissing(row[:slack])
+            add_warning!(report, "incomplete_data",
+                        "Skipping node row with missing critical data", location)
+            continue
+        end
+
+        push!(params.sets.N, row[:index])
+        params.node2zone[row[:index]] = row[:zone]
+
+        if row[:slack] == 1 || row[:slack] == 1.0 || row[:slack] == "1"
+            push!(params.slack, string(row[:index]))
+        end
+
+        _load_node_coords!(params, row, report, location)
+    end
+end
+
+# Validate the reference-based slack column and raise errors for inconsistencies.
+function _validate_slack_references(df_nodes::AbstractDataFrame, report::DataReport, location::String)
+    non_missing_slack = collect(skipmissing(df_nodes[!, :slack]))
+    all_indices = Set(string.(skipmissing(df_nodes[!, :index])))
+
+    # Every slack value must point to a known node index
+    for s in unique(non_missing_slack)
+        if !(string(s) in all_indices)
+            add_error!(report, "invalid_slack_reference",
+                      "Slack value '$s' does not match any node index", location)
+        end
+    end
+
+    # A node referenced as a slack bus by others must also reference itself
+    index_to_slack = Dict(string(row[:index]) => string(row[:slack])
+                          for row in eachrow(df_nodes)
+                          if !ismissing(row[:index]) && !ismissing(row[:slack]))
+    for s in unique(values(index_to_slack))
+        if haskey(index_to_slack, s) && index_to_slack[s] != s
+            add_error!(report, "invalid_slack_reference",
+                      "Node '$s' is referenced as a slack bus by other nodes, " *
+                      "but its own 'slack' value is '$(index_to_slack[s])'. " *
+                      "A slack bus must reference itself.", location)
+        end
+    end
+end
+
+# Load nodes using the reference-based slack format.
+# Builds both params.slack (self-referencing nodes) and params.slack_zone (all groups).
+function _add_nodes_reference!(params::Parameters, df_nodes::AbstractDataFrame, report::DataReport, location::String)
+    _validate_slack_references(df_nodes, report, location)
+
+    for row in eachrow(df_nodes)
+        if ismissing(row[:index]) || ismissing(row[:zone]) || ismissing(row[:slack])
+            add_warning!(report, "incomplete_data",
+                        "Skipping node row with missing critical data", location)
+            continue
+        end
+
+        push!(params.sets.N, row[:index])
+        params.node2zone[row[:index]] = row[:zone]
+        _load_node_coords!(params, row, report, location)
+    end
+
+    # Slack buses are the nodes whose slack value equals their own index
+    for row in eachrow(df_nodes)
+        if !ismissing(row[:index]) && !ismissing(row[:slack]) &&
+           string(row[:index]) == string(row[:slack])
+            push!(params.slack, string(row[:index]))
+        end
+    end
+
+    # Group every node by its slack reference to build slack_zone
+    for gdf in groupby(df_nodes, :slack)
+        s = string(first(gdf[!, :slack]))
+        params.slack_zone[s] = string.(gdf[!, :index])
+    end
+end

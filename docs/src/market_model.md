@@ -34,9 +34,10 @@ Depending on the chosen setup, the market balance will either be zonal, or nodal
 #### Nodal Market Balance
 ```math
 \begin{aligned}
- &\sum_{u \ in \ n}^U GEN_{u,t} +
-    \sum_{s \ in \ n}^S (GEN_{s,t} -CHARGE_{s,t})
-    &+ INJ_{n,t} - CU_{n,t}\\ = &load_{n,t} - LL_{n,t} & \forall \ n \in N, t \in T
+    \sum_{u \in n}^U GEN_{u,t} +
+    \sum_{s \in n}^S (GEN_{s,t} - CHARGE_{s,t})
+    + INJ_{n,t} - CU_{n,t}
+    &= load_{n,t} - LL_{n,t}, & \forall \ n \in N, t \in T
 \end{aligned}
 ```
 
@@ -49,7 +50,7 @@ CHARGE_{s,t} \cdot \eta_{s} - \frac{GEN_{s,t}}{\eta_{s}} + inflow_{s,t},
 ```
 
 ### Exchange
-The following exchange equation only applies in zonal markets, where electricity transmission within a given zone is neglected and only cross border flows are depicted using a simple approach based on net transfer capacities and an import-export balance. Nodal markets on the other hand already take the physical characteristics of the transmission grid into accound (a describtion of lineflow constraints can be found in section [Line Flow Constraints](@ref) and [3. AC Power Flow Linearization](@ref)) 
+The following exchange equation only applies in zonal markets, where electricity transmission within a given zone is neglected and only cross-border flows are depicted using a simple approach based on net transfer capacities and an import–export balance. Nodal markets, on the other hand, already take the physical characteristics of the transmission grid into account (a description of line-flow constraints can be found in section [Line Flow Constraints](@ref) and [3. AC Power Flow Linearization](@ref)) 
 ```math
 EX_{z,t}^{net} = \sum_{zz}^Z EX_{zz,z,t} - EX_{z,zz,t},
 \qquad \forall \ z \in Z, t \in T

@@ -168,6 +168,41 @@ function print_report(report::DataReport; show_notes::Bool=true, show_warnings::
 end
 
 """
+    export_report(report::DataReport, path::String; delimiter::Char=',')
+
+Export the data report to a CSV file.
+
+The output file contains one row per report item with columns `level`, `category`,
+`message`, and `location`, making it straightforward to filter and sort in any
+spreadsheet or data tool.
+
+# Arguments
+- `report::DataReport`: The report to export.
+- `path::String`: File path for the output CSV.
+- `delimiter::Char`: Column separator (default `,`).
+
+# Example
+```julia
+params, report = load_data_with_report(data_files)
+export_report(report, "report.csv")
+```
+"""
+function export_report(report::DataReport, path::Union{String, Nothing} = nothing)
+    df = DataFrame(
+        level    = [string(item.level) for item in report.items],
+        category = [item.category      for item in report.items],
+        message  = [item.message       for item in report.items],
+        location = [item.location      for item in report.items],
+    )
+    if path !== nothing
+        complete_path = joinpath(path, "data_report.csv")
+    else
+         complete_path = "data_report.csv"
+    end
+    CSV.write(complete_path, df)
+end
+
+"""
     validate_file_exists(report::DataReport, path::String, description::String="file")
 
 Validate that a file exists and is readable, adding appropriate reports.
@@ -655,6 +690,11 @@ Validate that slack buses are properly connected to the network.
 """
 function validate_slack_bus_connectivity(report::DataReport, params, location::String)
     if isempty(params.slack)
+        if !isempty(params.sets.L) || !isempty(params.sets.DC)
+            add_error!(report, "missing_data",
+                      "No slack bus defined - a slack bus is required for network flow calculations", location)
+            return false
+        end
         return true
     end
     
@@ -702,7 +742,7 @@ function validate_network_topology(report::DataReport, params, location::String=
     DC = params.sets.DC
     
     if isempty(L) && isempty(DC)
-        add_note!(report, "network_validation", "No AC or DC lines defined - skipping topology validation", location)
+        add_note!(report, "network_topology", "No lines defined - running in copper plate mode (no network constraints)", location)
         return true
     end
     

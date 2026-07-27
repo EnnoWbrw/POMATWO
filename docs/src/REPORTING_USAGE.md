@@ -43,6 +43,12 @@ print_report(report)
 - `configuration_error`: Critical setup issues
 - `incomplete_data`: Rows with missing critical information
 
+## Exporting the Report to CSV
+```@docs
+export_report
+```
+
+
 ## Detailed Validations
 
 ### Plants Data Validation
@@ -54,10 +60,12 @@ print_report(report)
 
 ### Nodes Data Validation
 -  Required columns: `index`, `zone`, `slack`
--  Slack bus configuration: exactly one node with `slack = 1`
--  Binary values: `slack` ∈ {0, 1}
+-  Slack bus configuration: each node's `slack` value references the index of its slack bus (a node referencing itself is its own slack bus)
 -  No duplicate node indices
 -  Coordinate validation (if provided)
+
+!!! note "Legacy format"
+    A `slack` column containing only `0` and `1` is still accepted but triggers a deprecation warning. Migrate to the reference format described in [File Structure `:nodes`](@ref).
 
 ### Zones Data Validation
 -  Required columns: `index`

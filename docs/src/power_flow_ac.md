@@ -46,7 +46,7 @@ Thus, the equations simplify to:
 \end{aligned}
 ```
 
-Assumption 2 is based on the observation that the phase angle difference ``\theta\_{n,m}`` is very small. The cosine of ``\theta`` converges to 1 as ``\theta``approaches 0. The small-angle approximation states that ``\sin(\theta) \approx \theta``for very small ``\theta\`` (in radians).
+Assumption 2 is based on the observation that the phase angle difference ``\theta\_{n,m}`` is very small. The cosine of ``\theta`` converges to 1 as ``\theta`` approaches 0. The small-angle approximation states that ``\sin(\theta) \approx \theta``for very small ``\theta\`` (in radians).
 
 With the small-angle approximation, the above equations further simplify to:
 

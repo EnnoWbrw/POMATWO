@@ -12,12 +12,14 @@ checkdocs=:public,
 authors = "Enno Wiebrow, Kristin Dietrich, Mario Kendziorski", 
 pages = [
     "Home" => "index.md",
-    "Model Data" => Any["Input Data Formats" => "input_data.md",
-                        "Input Data Reports" => "REPORTING_USAGE.md",
-                        "Output Data" => "output_data.md"
+    "Model Data" => Any["Data Input Formats" => "input_data.md",
+                        "Data Input Reports" => "REPORTING_USAGE.md",
+                        "Data Output" => "output_data.md"
     ],
     "Model Configuration" => Any["Market Definition" => "market_definitions.md",
-                                 "Model Creation" => "Model_config.md" ],
+                                 "FBMC Reference-Day Basecase" => "refday_basecase.md",
+                                 "Model Creation" => "Model_config.md",
+                                 "Extending the Model" => "extending.md" ],
     "Mathematical Model" => Any[
             "Nomenclature" => "nomenclature.md",
             "Market Model" => "market_model.md",

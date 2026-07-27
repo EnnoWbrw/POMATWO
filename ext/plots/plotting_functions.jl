@@ -1,238 +1,193 @@
-function stack_vals(df, col)
-    types, mat = @chain df begin
-        @rsubset :variable == col
-        unstack(:plant_type, :value, combine = sum)
-        select!(Not([:Time, :variable]))
-        disallowmissing!
-        names(_), Array(_)
-    end
+const DEFAULT_PLOT_COLORS = Dict(
+    "exchange" => "#9526b7",
+    "LL" => "#ff0000",
+    "CU" => "#ff7373",
+    "Net injection" => "#b2a1d5",
+)
 
-    return types, Matrix{Float64}(cumsum(mat, dims = 2))
+_time_values(time_horizon) = collect(time_horizon)
+_time_set(time_horizon) = Set(_time_values(time_horizon))
+_plot_colors(results) = merge(copy(results.params.colors), DEFAULT_PLOT_COLORS)
+_series_values(df, col) = hasproperty(df, col) ? collect(getproperty(df, col)) : Float64[]
+_color_for(colors, type) = get(colors, type, :gray60)
+
+function _value_at(profile, t)
+    try
+        value = profile[t]
+        return ismissing(value) ? 0.0 : Float64(value)
+    catch
+        return 0.0
+    end
+end
+
+function _load_at(params, zone, t)
+    nodes = get(params.nodes_in_zone, zone, String[])
+    isempty(nodes) && return 0.0
+    return sum(_value_at(params.nodal_load[n], t) / 1e3 for n in nodes if haskey(params.nodal_load, n); init = 0.0)
+end
+
+function _empty_dispatch_cache(time_values)
+    return (
+        time = time_values,
+        pos_types = String[],
+        pos_mat = zeros(Float64, length(time_values), 0),
+        neg_types = String[],
+        neg_mat = zeros(Float64, length(time_values), 0),
+    )
+end
+
+function _matrix_for_types(df, time_values, types)
+    mat = zeros(Float64, length(time_values), length(types))
+    type_pos = Dict(type => i for (i, type) in enumerate(types))
+    time_pos = Dict(t => i for (i, t) in enumerate(time_values))
+    for row in eachrow(df)
+        ti = get(time_pos, row.Time, nothing)
+        ci = get(type_pos, row.plant_type, nothing)
+        if ti !== nothing && ci !== nothing
+            mat[ti, ci] += row.value
+        end
+    end
+    return mat
+end
+
+function _dispatch_cache(df, time_values)
+    isempty(df) && return _empty_dispatch_cache(time_values)
+
+    pos_df = filter(:value => >=(0), df)
+    neg_df = filter(:value => <(0), df)
+    pos_types = sort(unique(String.(pos_df.plant_type)))
+    neg_types = sort(unique(String.(neg_df.plant_type)))
+    pos_mat = cumsum(_matrix_for_types(pos_df, time_values, pos_types), dims = 2)
+    neg_mat = cumsum(_matrix_for_types(neg_df, time_values, neg_types), dims = 2)
+
+    return (
+        time = time_values,
+        pos_types = pos_types,
+        pos_mat = pos_mat,
+        neg_types = neg_types,
+        neg_mat = neg_mat,
+    )
+end
+
+function _with_plant_metadata(df, params, time_set)
+    isempty(df) && return DataFrame()
+    filtered = filter(:Time => t -> t in time_set, df)
+    isempty(filtered) && return DataFrame()
+    enriched = transform(
+        filtered,
+        :index => ByRow(i -> get(params.plant2zone, i, missing)) => :zone,
+        :index => ByRow(i -> get(params.plant_type, i, "unknown")) => :plant_type,
+    )
+    dropmissing!(enriched, :zone)
+    return enriched
+end
+
+function _aggregate_by_zone_type(df, value_col, scalefactor; sign = 1.0)
+    isempty(df) && return DataFrame(zone = String[], Time = Int[], plant_type = String[], value = Float64[])
+    grouped = groupby(df, [:zone, :Time, :plant_type])
+    return combine(grouped, value_col => (x -> sign * scalefactor * sum(x)) => :value)
+end
+
+function _aggregate_exchange(results, scalefactor, time_set)
+    isempty(results.EXCHANGE) && return DataFrame(zone = String[], Time = Int[], plant_type = String[], value = Float64[])
+    df = filter(:Time => t -> t in time_set, results.EXCHANGE)
+    isempty(df) && return DataFrame(zone = String[], Time = Int[], plant_type = String[], value = Float64[])
+    transform!(df, :index => :zone)
+    df.plant_type .= "exchange"
+    grouped = groupby(df, [:zone, :Time, :plant_type])
+    return combine(grouped, :EXCHANGE => (x -> scalefactor * sum(x)) => :value)
+end
+
+function _aggregate_zonal_balance(results, scalefactor, time_set, col, plant_type; sign = 1.0)
+    isempty(results.ZonalMarketBalance) && return DataFrame(zone = String[], Time = Int[], plant_type = String[], value = Float64[])
+    df = filter(:Time => t -> t in time_set, results.ZonalMarketBalance)
+    isempty(df) && return DataFrame(zone = String[], Time = Int[], plant_type = String[], value = Float64[])
+    transform!(df, :Zone => :zone)
+    df.plant_type .= plant_type
+    grouped = groupby(df, [:zone, :Time, :plant_type])
+    return combine(grouped, col => (x -> sign * scalefactor * sum(x)) => :value)
+end
+
+function _aggregate_node_table_by_zone(df, params, time_set, index_col, value_col, plant_type, scalefactor; sign = 1.0)
+    isempty(df) && return DataFrame(zone = String[], Time = Int[], plant_type = String[], value = Float64[])
+    node2zone = params.node2zone
+    filtered = filter(:Time => t -> t in time_set, df)
+    isempty(filtered) && return DataFrame(zone = String[], Time = Int[], plant_type = String[], value = Float64[])
+    enriched = transform(filtered, index_col => ByRow(n -> get(node2zone, n, missing)) => :zone)
+    dropmissing!(enriched, :zone)
+    isempty(enriched) && return DataFrame(zone = String[], Time = Int[], plant_type = String[], value = Float64[])
+    enriched.plant_type .= plant_type
+    grouped = groupby(enriched, [:zone, :Time, :plant_type])
+    return combine(grouped, value_col => (x -> sign * scalefactor * sum(x)) => :value)
+end
+
+function _price_by_zone(results, time_set)
+    price_by_zone = Dict{String,DataFrame}()
+    for z in results.params.sets.Z
+        price_by_zone[z] = @chain results.ZonalMarketBalance begin
+            @rsubset :Time in time_set
+            @rsubset :Zone == z
+            @orderby :Time
+        end
+    end
+    return price_by_zone
+end
+
+function _load_by_zone(results, time_values)
+    return Dict(
+        z => DataFrame(Time = time_values, orig_load = [_load_at(results.params, z, t) for t in time_values])
+        for z in results.params.sets.Z
+    )
+end
+
+function _dispatch_by_zone(results, merged, time_values)
+    dispatch_by_zone = Dict{String,NamedTuple}()
+    grouped = isempty(merged) ? nothing : groupby(merged, :zone)
+    for z in results.params.sets.Z
+        zone_df = grouped === nothing || !haskey(grouped, (z,)) ? DataFrame() : grouped[(z,)]
+        dispatch_by_zone[z] = _dispatch_cache(zone_df, time_values)
+    end
+    return dispatch_by_zone
 end
 
 function prepare_disp_plot_data(results, scalefactor, time_horizon)
-    prices_by_zone = Dict()
-    load_by_zone = Dict()
-    dispatch_by_zone = Dict()
+    time_values = _time_values(time_horizon)
+    time_set = Set(time_values)
+    gen = _with_plant_metadata(results.GEN, results.params, time_set)
+    charge = _with_plant_metadata(results.CHARGE, results.params, time_set)
 
-    results.params.colors["exchange"] = "#9526b7"
-    results.params.colors["LL"] = "#ff0000"
-    results.params.colors["CU"] = "#ff7373"
+    parts = [
+        _aggregate_by_zone_type(gen, :GEN, scalefactor),
+        _aggregate_by_zone_type(charge, :CHARGE, scalefactor; sign = -1.0),
+        _aggregate_zonal_balance(results, scalefactor, time_set, :LL, "LL"),
+        _aggregate_by_zone_type(gen, :CU, scalefactor; sign = -1.0),
+        _aggregate_exchange(results, scalefactor, time_set),
+    ]
+    merged = reduce(vcat, parts, cols = :union)
 
-    for z in results.params.sets.Z
-
-        df_gen_plant_type = @chain results.GEN begin
-            @rsubset :Time in time_horizon
-            @rsubset! results.params.plant2zone[:index] == z
-            @rtransform! :plant_type = results.params.plant_type[:index]
-            @by [:Time, :plant_type] :value = scalefactor * sum(:GEN)
-            @orderby :Time
-        end
-
-        df_charge_plant_type = @chain results.CHARGE begin
-            @rsubset :Time in time_horizon
-            @rsubset! results.params.plant2zone[:index] == z
-            @rtransform! :plant_type = results.params.plant_type[:index]
-            @by [:Time, :plant_type] :value = -scalefactor * sum(:CHARGE)
-            @orderby :Time
-        end
-
-        df_ex = @chain results.EXCHANGE begin
-            @rsubset :Time in time_horizon
-            @rsubset! :index == z
-            @rtransform! begin
-                :plant_type = "exchange"
-                :value = scalefactor * sum(:EXCHANGE)
-            end
-            # @rtransform! :value_pos = min(0, :value)
-            # @rtransform! :value_neg = -max(0, :value)
-            @orderby :Time
-        end
-
-        df_LL = @chain results.ZonalMarketBalance begin
-            @rsubset :Time in time_horizon
-            @rsubset! :Zone == z
-            @rtransform! begin
-                :plant_type = "LL"
-                :value = scalefactor * sum(:LL)
-            end
-        end
-
-        df_CU = @chain results.GEN begin
-            @rsubset :Time in time_horizon
-            @rsubset! :index in results.params.plants_in_zone[z]
-            @rtransform! begin
-                :plant_type = "CU"
-            end
-            @by [:Time, :plant_type] :value = -scalefactor * sum(:CU)
-        end
-
-        df_merged = reduce(
-            vcat,
-            [df_gen_plant_type, df_charge_plant_type, df_LL, df_CU, df_ex],
-            cols = :intersect,
-        )#
-        orig_load = results.params.nodal_load
-        #prs_load = data.params.nodal_load_no_prs
-        df_load = DataFrame(
-            (
-                Time = t,
-                orig_load = sum(
-                    orig_load[n][t] / 1e3 for
-                    n in results.params.nodes_in_zone[z] if haskey(orig_load, n) &&
-                    length(results.params.nodes_in_zone[z]) > 0 &&
-                    length(orig_load[n][t]) > 0;
-                    init = 0,
-                ),  # Ensure init=0 for empty collections
-            ) for t in time_horizon
-        )
-        df_price = @chain results.ZonalMarketBalance begin
-            @rsubset :Time in time_horizon
-            @rsubset :Zone == z
-            @orderby :Time
-        end
-
-        df_dispatch = @chain df_merged begin
-            @rtransform :pos = :value >= 0 ? :value : 0
-            @rtransform :neg = :value < 0 ? :value : 0
-            select!(Not(:value))
-            stack([:pos, :neg])
-        end
-
-        merge!(prices_by_zone, Dict(z => df_price))
-        merge!(load_by_zone, Dict(z => df_load))
-        merge!(dispatch_by_zone, Dict(z => df_dispatch))
-        # pbz = Dict(zone => df_price)
-        # lbz = Dict(zone => df_load)
-    end
-    return prices_by_zone, load_by_zone, dispatch_by_zone
+    return _price_by_zone(results, time_set), _load_by_zone(results, time_values), _dispatch_by_zone(results, merged, time_values)
 end
 
 function prepare_redisp_plot_data(results, scalefactor, time_horizon)
-    prices_by_zone = Dict()
-    load_by_zone = Dict()
-    dispatch_by_zone = Dict()
+    time_values = _time_values(time_horizon)
+    time_set = Set(time_values)
+    redisp = _with_plant_metadata(results.REDISP, results.params, time_set)
 
-    results.params.colors["exchange"] = "#9526b7"
-    results.params.colors["LL"] = "#ff0000"
-    results.params.colors["CU"] = "#ff7373"
-    results.params.colors["Net injection"] = "#b2a1d5"
+    parts = [
+        _aggregate_by_zone_type(redisp, :GEN_REDISP, scalefactor),
+        _aggregate_by_zone_type(redisp, :CHARGE_REDISP, scalefactor; sign = -1.0),
+        _aggregate_node_table_by_zone(results.NETINPUT, results.params, time_set, :index, :NETINPUT, "Net injection", scalefactor),
+        _aggregate_node_table_by_zone(results.NodalMarketRedispBalance, results.params, time_set, :Node, :LL, "LL", scalefactor),
+        _aggregate_by_zone_type(redisp, :CU_REDISP, scalefactor; sign = -1.0),
+    ]
+    merged = reduce(vcat, parts, cols = :union)
 
-    for z in results.params.sets.Z
-
-        df_gen_plant_type = @chain results.REDISP begin
-            @rsubset :Time in time_horizon
-            @rsubset! results.params.plant2zone[:index] == z
-            @rtransform! :plant_type = results.params.plant_type[:index]
-            @by [:Time, :plant_type] :value = scalefactor * sum(:GEN_REDISP)
-            @orderby :Time
-        end
-
-        df_charge_plant_type = @chain results.REDISP begin
-            @rsubset :Time in time_horizon
-            @rsubset! results.params.plant2zone[:index] == z
-            @rtransform! :plant_type = results.params.plant_type[:index]
-            @by [:Time, :plant_type] :value = -scalefactor * sum(:CHARGE_REDISP)
-            @orderby :Time
-        end
-        #### Prosumer ###
-
-        # df_prs = @chain data.PRS begin
-        #     @rsubset :Time in dispatch_plot_selection.time
-        #     @rsubset! data.params.plant2zone[:index] in dispatch_plot_selection.zone
-        #     @rtransform! :plant_type = "prosumer"
-        #     @by [:Time, :plant_type] :value = scalefactor*sum(:PRS_NETINPUT)
-        #     @orderby :Time
-        # end
-
-        # df_ex = @chain results.EXCHANGE begin
-        #     @rsubset :Time in time_horizon
-        #     @rsubset! :index == z
-        #     @rtransform! begin
-        #         :plant_type = "exchange"
-        #         :value = scalefactor*sum(:EXCHANGE)
-        #     end
-        #     # @rtransform! :value_pos = min(0, :value)
-        #     # @rtransform! :value_neg = -max(0, :value)
-        #     @orderby :Time
-        # end
-
-        df_redisp = @chain results.NETINPUT begin
-            @rsubset :Time in time_horizon
-            @rsubset! :index in results.params.nodes_in_zone[z]
-            @rtransform! begin
-                :plant_type = "Net injection"
-            end
-            @by [:Time, :plant_type] :value = scalefactor * sum(:NETINPUT)
-        end
-
-        df_LL = @chain results.NodalMarketRedispBalance begin
-            @rsubset :Time in time_horizon
-            @rsubset! :Node in results.params.nodes_in_zone[z]
-            @rtransform! begin
-                :plant_type = "LL"
-            end
-            @by [:Time, :plant_type] :value = scalefactor * sum(:LL)
-        end
-
-        df_CU = @chain results.REDISP begin
-            @rsubset :Time in time_horizon
-            @rsubset! :index in results.params.plants_in_zone[z]
-            @rtransform! begin
-                :plant_type = "CU"
-            end
-            @by [:Time, :plant_type] :value = -scalefactor * sum(:CU_REDISP)
-        end
-
-
-        df_merged = reduce(
-            vcat,
-            [df_gen_plant_type, df_charge_plant_type, df_redisp, df_LL, df_CU],
-            cols = :intersect,
-        )#df_ex,
-        orig_load = results.params.nodal_load
-        #prs_load = data.params.nodal_load_no_prs
-        df_load = DataFrame(
-            (
-                Time = t,
-                orig_load = sum(
-                    orig_load[n][t] / 1e3 for
-                    n in results.params.nodes_in_zone[z] if haskey(orig_load, n) &&
-                    length(results.params.nodes_in_zone[z]) > 0 &&
-                    length(orig_load[n][t]) > 0;
-                    init = 0,
-                ),  # Ensure init=0 for empty collections
-            ) for t in time_horizon
-        )
-        df_price = @chain results.ZonalMarketBalance begin
-            @rsubset :Time in time_horizon
-            @rsubset :Zone == z
-            @orderby :Time
-        end
-
-        df_dispatch = @chain df_merged begin
-            @rtransform :pos = :value >= 0 ? :value : 0
-            @rtransform :neg = :value < 0 ? :value : 0
-            select!(Not(:value))
-            stack([:pos, :neg])
-        end
-
-        merge!(prices_by_zone, Dict(z => df_price))
-        merge!(load_by_zone, Dict(z => df_load))
-        merge!(dispatch_by_zone, Dict(z => df_dispatch))
-        # pbz = Dict(zone => df_price)
-        # lbz = Dict(zone => df_load)
-    end
-    return prices_by_zone, load_by_zone, dispatch_by_zone
+    return _price_by_zone(results, time_set), _load_by_zone(results, time_values), _dispatch_by_zone(results, merged, time_values)
 end
 
 # Function to update the plot based on the observables
-function update_plot!(fig, ax, ax2, disp, load, price, time_horizon, colors)
-    start = time_horizon[1]
-    nd = time_horizon[end]
-    pos_types, pos_mat = stack_vals(disp[], "pos")
-    neg_types, neg_mat = stack_vals(disp[], "neg")
-
+function update_plot!(fig, ax, ax2, disp, load, price, colors)
+    plot_time = disp.time
     empty!(ax)
     empty!(ax2)
 
@@ -246,28 +201,26 @@ function update_plot!(fig, ax, ax2, disp, load, price, time_horizon, colors)
     handles = []
     labels = []
 
-    for i = 1:size(pos_mat, 2)
-        prev = i == 1 ? 0 : pos_mat[:, i-1]
-        type = pos_types[i]
-        color = colors[type]
-        band = band!(ax, start:nd, prev, pos_mat[:, i], color = color, label = type)
+    for i = 1:size(disp.pos_mat, 2)
+        prev = i == 1 ? 0 : disp.pos_mat[:, i-1]
+        type = disp.pos_types[i]
+        color = _color_for(colors, type)
+        band = band!(ax, plot_time, prev, disp.pos_mat[:, i], color = color, label = type)
         push!(handles, band)
         push!(labels, type)
     end
 
-    for i = 1:size(neg_mat, 2)
-        prev = i == 1 ? 0 : neg_mat[:, i-1]
-        type = neg_types[i]
-        color = colors[type]
-        band = band!(ax, start:nd, prev, neg_mat[:, i], color = color)
-        # push!(handles, band)
-        #  push!(labels, type)
+    for i = 1:size(disp.neg_mat, 2)
+        prev = i == 1 ? 0 : disp.neg_mat[:, i-1]
+        type = disp.neg_types[i]
+        color = _color_for(colors, type)
+        band!(ax, plot_time, prev, disp.neg_mat[:, i], color = color)
     end
 
     load_line = lines!(
         ax,
-        start:nd,
-        load[].orig_load[start:end],
+        load.Time,
+        load.orig_load,
         color = :black,
         linestyle = :dash,
         label = "original load",
@@ -277,8 +230,8 @@ function update_plot!(fig, ax, ax2, disp, load, price, time_horizon, colors)
 
     price_line = lines!(
         ax2,
-        start:nd,
-        price[].MarketBalance[start:end],
+        price.Time,
+        _series_values(price, :MarketBalance),
         color = :black,
         linestyle = :dot,
         label = "price",
@@ -326,6 +279,7 @@ function POMATWO.plot_market_interactive(
     scalefactor=1/1000,
     kind=:DA  # or :Redispatch
 )
+    colors = _plot_colors(results)
     table = kind == :DA ? results.GEN : results.REDISP
     if time_horizon === nothing
         time_horizon = 1:maximum(table.Time)
@@ -340,35 +294,20 @@ function POMATWO.plot_market_interactive(
 
     fig[1, 2] = vgrid!(Label(fig, "Market Zone", fontsize = 30, width = 400), zone_menu)
 
-    # Observable for the selected zone
-    disp = Observable(dispatch_by_zone[results.params.sets.Z[1]])
-    price = Observable(prices_by_zone[results.params.sets.Z[1]])
-    load = Observable(load_by_zone[results.params.sets.Z[1]])
-
-    on(zone_menu.selection) do selected
-        disp[] = dispatch_by_zone[selected]
-        price[] = prices_by_zone[selected]
-        load[] = load_by_zone[selected]
-    end
-
     ax = Axis(fig[1:2, 1], xlabel = "Hour", ylabel = "GW", title = "Generation")
 
     ax2 = Axis(fig[1:2, 1], ylabel = "EUR/MWh", yaxisposition = :right)
 
     hidexdecorations!(ax2)
     linkxaxes!(ax, ax2)
-    # Initial plot
-    update_plot!(fig, ax, ax2, disp, load, price, time_horizon, results.params.colors)
 
-    # Update the plot when the observables change
-    on(disp) do _
-        update_plot!(fig, ax, ax2, disp, load, price, time_horizon, results.params.colors)
+    function redraw!(selected)
+        update_plot!(fig, ax, ax2, dispatch_by_zone[selected], load_by_zone[selected], prices_by_zone[selected], colors)
     end
-    on(load) do _
-        update_plot!(fig, ax, ax2, disp, load, price, time_horizon, results.params.colors)
-    end
-    on(price) do _
-        update_plot!(fig, ax, ax2, disp, load, price, time_horizon, results.params.colors)
+
+    redraw!(results.params.sets.Z[1])
+    on(zone_menu.selection) do selected
+        redraw!(selected)
     end
 
     return fig
@@ -386,17 +325,8 @@ function update_plot_comb!(
     disp_d,
     load_d,
     price_d,
-    time_horizon,
     colors,
 )
-    start = time_horizon[1]
-    nd = time_horizon[end]
-    pos_types, pos_mat = stack_vals(disp[], "pos")
-    neg_types, neg_mat = stack_vals(disp[], "neg")
-
-    pos_types_d, pos_mat_d = stack_vals(disp_d[], "pos")
-    neg_types_d, neg_mat_d = stack_vals(disp_d[], "neg")
-
     empty!(ax)
     empty!(ax2)
     empty!(ax3)
@@ -414,46 +344,42 @@ function update_plot_comb!(
     handles_d = []
     labels_d = []
 
-    for i = 1:size(pos_mat, 2)
-        prev = i == 1 ? 0 : pos_mat[:, i-1]
-        type = pos_types[i]
-        color = colors[type]
-        band = band!(ax, start:nd, prev, pos_mat[:, i], color = color, label = type)
+    for i = 1:size(disp.pos_mat, 2)
+        prev = i == 1 ? 0 : disp.pos_mat[:, i-1]
+        type = disp.pos_types[i]
+        color = _color_for(colors, type)
+        band = band!(ax, disp.time, prev, disp.pos_mat[:, i], color = color, label = type)
         push!(handles, band)
         push!(labels, type)
     end
 
-    for i = 1:size(neg_mat, 2)
-        prev = i == 1 ? 0 : neg_mat[:, i-1]
-        type = neg_types[i]
-        color = colors[type]
-        band = band!(ax, start:nd, prev, neg_mat[:, i], color = color)
-        # push!(handles, band)
-        #  push!(labels, type)
+    for i = 1:size(disp.neg_mat, 2)
+        prev = i == 1 ? 0 : disp.neg_mat[:, i-1]
+        type = disp.neg_types[i]
+        color = _color_for(colors, type)
+        band!(ax, disp.time, prev, disp.neg_mat[:, i], color = color)
     end
 
-    for i = 1:size(pos_mat_d, 2)
-        prev = i == 1 ? 0 : pos_mat_d[:, i-1]
-        type = pos_types_d[i]
-        color = colors[type]
-        band = band!(ax3, start:nd, prev, pos_mat_d[:, i], color = color, label = type)
+    for i = 1:size(disp_d.pos_mat, 2)
+        prev = i == 1 ? 0 : disp_d.pos_mat[:, i-1]
+        type = disp_d.pos_types[i]
+        color = _color_for(colors, type)
+        band = band!(ax3, disp_d.time, prev, disp_d.pos_mat[:, i], color = color, label = type)
         push!(handles_d, band)
         push!(labels_d, type)
     end
 
-    for i = 1:size(neg_mat_d, 2)
-        prev = i == 1 ? 0 : neg_mat_d[:, i-1]
-        type = neg_types_d[i]
-        color = colors[type]
-        band = band!(ax3, start:nd, prev, neg_mat_d[:, i], color = color)
-        # push!(handles, band)
-        #  push!(labels, type)
+    for i = 1:size(disp_d.neg_mat, 2)
+        prev = i == 1 ? 0 : disp_d.neg_mat[:, i-1]
+        type = disp_d.neg_types[i]
+        color = _color_for(colors, type)
+        band!(ax3, disp_d.time, prev, disp_d.neg_mat[:, i], color = color)
     end
 
     load_line = lines!(
         ax,
-        start:nd,
-        load[].orig_load,
+        load.Time,
+        load.orig_load,
         color = :black,
         linestyle = :dash,
         label = "original load",
@@ -463,8 +389,8 @@ function update_plot_comb!(
 
     load_line_d = lines!(
         ax3,
-        start:nd,
-        load_d[].orig_load,
+        load_d.Time,
+        load_d.orig_load,
         color = :black,
         linestyle = :dash,
         label = "original load",
@@ -474,8 +400,8 @@ function update_plot_comb!(
 
     price_line = lines!(
         ax2,
-        start:nd,
-        price[].MarketBalance,
+        price.Time,
+        _series_values(price, :MarketBalance),
         color = :black,
         linestyle = :dot,
         label = "Day-Ahead Price",
@@ -483,10 +409,10 @@ function update_plot_comb!(
     push!(handles_d, price_line)
     push!(labels_d, "Day-Ahead price")
 
-    price_line_d = lines!(
+    lines!(
         ax4,
-        start:nd,
-        price_d[].MarketBalance,
+        price_d.Time,
+        _series_values(price_d, :MarketBalance),
         color = :black,
         linestyle = :dot,
         label = "Day-Ahead Price",
@@ -532,6 +458,7 @@ fig = plot_DA_w_Redisp_interactive(results)
 ```
 """
 function POMATWO.plot_DA_w_Redisp_interactive(results; time_horizon = nothing, scalefactor = 1/1000)
+    colors = _plot_colors(results)
     if time_horizon === nothing
         time_horizon = 1:maximum(results.GEN.Time)
     end
@@ -548,26 +475,6 @@ function POMATWO.plot_DA_w_Redisp_interactive(results; time_horizon = nothing, s
 
     fig[1, 2] = vgrid!(Label(fig, "Market Zone", fontsize = 30, width = 400), zone_menu)
 
-
-    # Observable for the selected zone
-    disp = Observable(dispatch_by_zone[results.params.sets.Z[1]])
-    price = Observable(prices_by_zone[results.params.sets.Z[1]])
-    load = Observable(load_by_zone[results.params.sets.Z[1]])
-
-    # Observable for the selected zone
-    disp_d = Observable(dispatch_by_zone_d[results.params.sets.Z[1]])
-    price_d = Observable(prices_by_zone_d[results.params.sets.Z[1]])
-    load_d = Observable(load_by_zone_d[results.params.sets.Z[1]])
-
-    on(zone_menu.selection) do selected
-        disp[] = dispatch_by_zone[selected]
-        price[] = prices_by_zone[selected]
-        load[] = load_by_zone[selected]
-
-        disp_d[] = dispatch_by_zone_d[selected]
-        price_d[] = prices_by_zone_d[selected]
-        load_d[] = load_by_zone_d[selected]
-    end
 
     ax = Axis(
         fig[1:2, 1],
@@ -588,129 +495,27 @@ function POMATWO.plot_DA_w_Redisp_interactive(results; time_horizon = nothing, s
     linkxaxes!(ax, ax2)
     linkxaxes!(ax3, ax4)
 
-    # Initial plot
-    update_plot_comb!(
-        fig,
-        ax,
-        ax2,
-        ax3,
-        ax4,
-        disp,
-        load,
-        price,
-        disp_d,
-        load_d,
-        price_d,
-        time_horizon,
-        results.params.colors
-    )
-
-
-    # Update the plot when the observables change
-    on(disp) do _
+    function redraw!(selected)
         update_plot_comb!(
             fig,
             ax,
             ax2,
             ax3,
             ax4,
-            disp,
-            load,
-            price,
-            disp_d,
-            load_d,
-            price_d,
-            time_horizon,
-            results.params.colors
-        )
-    end
-    on(load) do _
-        update_plot_comb!(
-            fig,
-            ax,
-            ax2,
-            ax3,
-            ax4,
-            disp,
-            load,
-            price,
-            disp_d,
-            load_d,
-            price_d,
-            time_horizon,
-            results.params.colors
-        )
-    end
-    on(price) do _
-        update_plot_comb!(
-            fig,
-            ax,
-            ax2,
-            ax3,
-            ax4,
-            disp,
-            load,
-            price,
-            disp_d,
-            load_d,
-            price_d,
-            time_horizon,
-            results.params.colors
+            dispatch_by_zone[selected],
+            load_by_zone[selected],
+            prices_by_zone[selected],
+            dispatch_by_zone_d[selected],
+            load_by_zone_d[selected],
+            prices_by_zone_d[selected],
+            colors
         )
     end
 
-    on(disp_d) do _
-        update_plot_comb!(
-            fig,
-            ax,
-            ax2,
-            ax3,
-            ax4,
-            disp,
-            load,
-            price,
-            disp_d,
-            load_d,
-            price_d,
-            time_horizon,
-            results.params.colors
-        )
+    redraw!(results.params.sets.Z[1])
+    on(zone_menu.selection) do selected
+        redraw!(selected)
     end
-    on(load_d) do _
-        update_plot_comb!(
-            fig,
-            ax,
-            ax2,
-            ax3,
-            ax4,
-            disp,
-            load,
-            price,
-            disp_d,
-            load_d,
-            price_d,
-            time_horizon,
-            results.params.colors
-        )
-    end
-    on(price_d) do _
-        update_plot_comb!(
-            fig,
-            ax,
-            ax2,
-            ax3,
-            ax4,
-            disp,
-            load,
-            price,
-            disp_d,
-            load_d,
-            price_d,
-            time_horizon,
-            results.params.colors
-        )
-    end
-
 
     return fig
 end
@@ -719,36 +524,203 @@ end
 project(x, y) = MapTiles.project((x, y), MapTiles.wgs84, MapTiles.web_mercator)
 project_point2f(x, y) = project(x, y) |> Point2f
 
+function _redisp_node_summary(results)
+    if isempty(results.REDISP)
+        return DataFrame()
+    end
+
+    plant_nodes = results.params.plant2node
+    filtered = filter(:index => i -> haskey(plant_nodes, i), results.REDISP)
+    isempty(filtered) && return DataFrame()
+    df_redisp = transform(filtered, :index => ByRow(i -> plant_nodes[i]) => :node)
+    df_redisp = combine(
+        groupby(df_redisp, :node),
+        :GEN_UP => sum => :gen_up,
+        :GEN_DOWN => sum => :gen_down,
+        :CU_REDISP => sum => :cu,
+        :CHARGE_UP => sum => :charge_up,
+        :CHARGE_DOWN => sum => :charge_down,
+    )
+
+    if isempty(results.NodalMarketRedispBalance)
+        return df_redisp
+    end
+
+    CU_balance = combine(groupby(results.NodalMarketRedispBalance, :Node), :CU => sum => :cu_balance)
+    return leftjoin(df_redisp, CU_balance, on = :node => :Node)
+end
+
+function _line_utilization_table(results, exclude_dc_lines, threshold)
+    if isempty(results.LINEFLOW)
+        df_line_util = DataFrame(index = String[], avg = Float64[], max = Int[])
+    else
+        df_line_util = @chain results.LINEFLOW begin
+            @rtransform :util = :line_capacity == 0 ? 0.0 : abs(:LINEFLOW) / :line_capacity
+            @by :index begin
+                :avg = mean(:util)
+                :max = count(>=(threshold), :util)
+            end
+        end
+    end
+
+    if !exclude_dc_lines && !isempty(results.DCLINEFLOW)
+        df_line_util_dc = @chain results.DCLINEFLOW begin
+            @rtransform :util = :line_capacity == 0 ? 0.0 : abs(:DCLINEFLOW) / :line_capacity
+            @by :index begin
+                :avg = mean(:util)
+                :max = count(>=(threshold), :util)
+            end
+        end
+        append!(df_line_util, df_line_util_dc, cols = :union)
+    end
+
+    if isempty(df_line_util)
+        df_line_util[!, :avg_color] = []
+        df_line_util[!, :max_color] = []
+        return df_line_util
+    end
+
+    df_line_util[!, :avg_color] = get(ColorSchemes.lajolla, clamp.(df_line_util.avg, 0, 1))
+    df_line_util[!, :max_color] = get(ColorSchemes.lajolla, df_line_util.max, :extrema)
+    return df_line_util
+end
+
+function _line_endpoints_from_data(data, exclude_dc_lines)
+    nodes = CSV.read(data[:nodes], DataFrame)
+    missing_cols = setdiff(["index", "lon", "lat"], names(nodes))
+    if !isempty(missing_cols)
+        error("Node file is missing required column(s): $(join(missing_cols, ", ")). "
+            * "Found: $(join(names(nodes), ", "))")
+    end
+
+    node_coords = Dict(row.index => (row.lon, row.lat) for row in eachrow(nodes))
+    node_lonlat = Dict(n => project_point2f(c[1], c[2]) for (n, c) in node_coords)
+    ac_lines = select(CSV.read(data[:lines], DataFrame), [:index, :node_i, :node_j])
+    lines_input = ac_lines
+
+    if !exclude_dc_lines
+        dc_lines = select(CSV.read(data[:dclines], DataFrame), [:index, :node_i, :node_j])
+        lines_input = vcat(ac_lines, dc_lines, cols = :union)
+    end
+
+    line_from_to = Dict()
+    for row in eachrow(lines_input)
+        if haskey(node_coords, row.node_i) && haskey(node_coords, row.node_j)
+            from = project_point2f(node_coords[row.node_i][1], node_coords[row.node_i][2])
+            to = project_point2f(node_coords[row.node_j][1], node_coords[row.node_j][2])
+            line_from_to[row.index] = (from, to)
+        end
+    end
+
+    return line_from_to, node_lonlat
+end
+
+function _line_endpoints_from_results(results, exclude_dc_lines)
+    params = results.params
+    node_lonlat = Dict(
+        n => project_point2f(params.node_coords[n][1], params.node_coords[n][2])
+        for n in params.sets.N if haskey(params.node_coords, n)
+    )
+    line_from_to = Dict()
+
+    for l in params.sets.L
+        if haskey(params.line_start, l) && haskey(params.line_end, l)
+            start_node = params.line_start[l]
+            end_node = params.line_end[l]
+            if haskey(node_lonlat, start_node) && haskey(node_lonlat, end_node)
+                line_from_to[l] = (node_lonlat[start_node], node_lonlat[end_node])
+            end
+        end
+    end
+
+    if !exclude_dc_lines
+        for l in params.sets.DC
+            if haskey(params.dc_start, l) && haskey(params.dc_end, l)
+                start_node = params.dc_start[l]
+                end_node = params.dc_end[l]
+                if haskey(node_lonlat, start_node) && haskey(node_lonlat, end_node)
+                    line_from_to[l] = (node_lonlat[start_node], node_lonlat[end_node])
+                end
+            end
+        end
+    end
+
+    return line_from_to, node_lonlat
+end
+
+function _prepare_lineplot_common(results, data, exclude_dc_lines, threshold)
+    line_from_to, node_lonlat = data === nothing ?
+        _line_endpoints_from_results(results, exclude_dc_lines) :
+        _line_endpoints_from_data(data, exclude_dc_lines)
+    df_line_util = _line_utilization_table(results, exclude_dc_lines, threshold)
+    df_redisp_combined = _redisp_node_summary(results)
+    return results, df_line_util, line_from_to, node_lonlat, df_redisp_combined
+end
+
+function _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshold)
+    if !(type in ("max", "avg"))
+        throw(ArgumentError("Type not supported, please choose 'max' or 'avg'. You entered: $type"))
+    end
+
+    color_col = type == "max" ? :max_color : :avg_color
+    for row in eachrow(df_line_util)
+        if haskey(line_from_to, row.index)
+            from, to = line_from_to[row.index]
+            lines!(ax, [from, to], color = (row[color_col], 0.98), linewidth = 1.5)
+        end
+    end
+
+    if type == "max"
+        Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla, limits = (0, isempty(df_line_util) ? 1 : maximum(df_line_util.max)))
+        ax.xlabel = "Line color indicates count of timesteps with utilization >= $(threshold * 100)%"
+    else
+        Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla, limits = (0.0, 1.0))
+        ax.xlabel = "Line color based on average line utilization in selected timeframe"
+    end
+
+    for point in values(node_lonlat)
+        scatter!(ax, point, color = :black, markersize = 5)
+    end
+
+    return fig
+end
+
 
 
 function prepare_lineplot_data(results_path, data, exclude_dc_lines, threshhold)
     results = DataFiles(results_path)
+    nodes = CSV.read(data[:nodes], DataFrame)
+    missing_cols = setdiff(["index", "lon", "lat"], names(nodes))
+    if !isempty(missing_cols)
+        error("Node file is missing required column(s): $(join(missing_cols, ", ")). "
+            * "Found: $(join(names(nodes), ", "))")
+    end
+    node_coords = Dict(row.index => (row.lon, row.lat) for row in eachrow(nodes))
+    node_lonlat = Dict(n => project_point2f.(c[1], c[2]) for (n, c) in node_coords)
+
     if exclude_dc_lines
         lines_input = select!(
             CSV.read(data[:lines], DataFrame),
-            [:index, :node_i, :node_j, :lat_i, :lon_i, :lat_j, :lon_j],
+            [:index, :node_i, :node_j],
         )
     else
         ac_lines = select!(
             CSV.read(data[:lines], DataFrame),
-            [:index, :node_i, :node_j, :lat_i, :lon_i, :lat_j, :lon_j],
+            [:index, :node_i, :node_j],
         )
         dc_lines = select!(
             CSV.read(data[:dclines], DataFrame),
-            [:index, :node_i, :node_j, :lat_i, :lon_i, :lat_j, :lon_j],
+            [:index, :node_i, :node_j],
         )
         lines_input = vcat(ac_lines, dc_lines)
     end
 
     line_from_to = Dict(
         row.index => (
-            project_point2f.(row.lon_i, row.lat_i),
-            project_point2f.(row.lon_j, row.lat_j),
+            project_point2f.(node_coords[row.node_i][1], node_coords[row.node_i][2]),
+            project_point2f.(node_coords[row.node_j][1], node_coords[row.node_j][2]),
         ) for row in eachrow(lines_input)
     )
-    nodes = CSV.read(data[:nodes], DataFrame)
-    node_lonlat =
-        Dict(row.index => project_point2f.(row.lon, row.lat) for row in eachrow(nodes))
 
 
     df_redisp = @chain results.REDISP begin
@@ -919,74 +891,33 @@ function prepare_lineplot_data2(results_path, exclude_dc_lines, threshhold)
     return results, df_line_util, line_from_to, node_lonlat, df_redisp_combined
 end
 
-function create_lineplot_layout(figsize = (800, 1000))
+function create_lineplot_layout(figsize = (800, 1000); background_map = true)
     GLMakie.activate!(inline = false)
-    #figsize = (800, 1000)
-    cutout = (5.5, 15, 47, 55)
-    provider = CartoDB()
-
     fig = Figure(; size = figsize)
     ax = Axis(fig[1, 1])
-    extent = Extent(X = (cutout[1], cutout[2]), Y = (cutout[3], cutout[4]))
-    tm = Tyler.Map(extent; provider, figure = fig, axis = ax)
-    wait(tm)
-    return fig, ax
 
+    if background_map
+        cutout = (5.5, 15, 47, 55)
+        provider = CartoDB()
+        extent = Extent(X = (cutout[1], cutout[2]), Y = (cutout[3], cutout[4]))
+        tm = Tyler.Map(extent; provider, figure = fig, axis = ax)
+        wait(tm)
+    end
+
+    return fig, ax
 end
 
 function create_lineplot(
     results_path,
     type::String = "max",
     exclude_dc_lines::Bool = false,
-    threshhold::Float64 = 0.95,
+    threshhold::Float64 = 0.95;
+    background_map::Bool = true,
 )
-
-    if type != "max" && type != "avg"
-        throw("Type not supported, please choose 'max' or 'avg' you entered: $type")
-    end
-
-    results, df_line_util, line_from_to, node_lonlat, df_redisp_combined =
-        prepare_lineplot_data2(results_path, exclude_dc_lines, threshhold)
-
-    fig, ax = create_lineplot_layout()
-
-
-    if type == "max"
-
-        for row in eachrow(df_line_util)
-            from, to = line_from_to[row.index]
-            lw = 1.5
-            c = row.max_color
-            lines!(ax, [from, to], color = (c, 0.98), linewidth = lw)
-        end
-
-        Colorbar(
-            fig[1, 2],
-            colormap = ColorSchemes.lajolla,
-            limits = (0, maximum(Array(results.LINEFLOW.Time))),
-        )
-        ax.xlabel = "Line color indicates count of timesteps in which the line's utilization [%] exceeds a $threshhold % threshold"
-    elseif type == "avg"
-
-        for row in eachrow(df_line_util)
-            from, to = line_from_to[row.index]
-            lw = 1.5
-            c = row.avg_color
-            lines!(ax, [from, to], color = (c, 0.98), linewidth = lw)
-        end
-
-        Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla, limits = (0.0, 100))
-        ax.xlabel = "Line color based on average line utilization in selected timeframe"
-    end
-
-    for row in keys(node_lonlat)
-
-        point = node_lonlat[row]
-        c = :black
-        scatter!(ax, point, color = c, markersize = 5)
-    end
-
-    return fig
+    results, df_line_util, line_from_to, node_lonlat, _ =
+        _prepare_lineplot_common(DataFiles(results_path), nothing, exclude_dc_lines, threshhold)
+    fig, ax = create_lineplot_layout(; background_map = background_map)
+    return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshhold)
 end
 
 """
@@ -1038,55 +969,13 @@ function POMATWO.create_lineplot(
     data,
     type::String = "max",
     exclude_dc_lines::Bool = false,
-    threshhold::Float64 = 0.95,
+    threshhold::Float64 = 0.95;
+    background_map::Bool = true,
 )
-
-    if type != "max" && type != "avg"
-        throw("Type not supported, please choose 'max' or 'avg' you entered: $type")
-    end
-
-    results, df_line_util, line_from_to, node_lonlat, df_redisp_combined =
-        prepare_lineplot_data(results_path, data, exclude_dc_lines, threshhold)
-
-    fig, ax = create_lineplot_layout()
-
-
-    if type == "max"
-
-        for row in eachrow(df_line_util)
-            from, to = line_from_to[row.index]
-            lw = 1.5
-            c = row.max_color
-            lines!(ax, [from, to], color = (c, 0.98), linewidth = lw)
-        end
-
-        Colorbar(
-            fig[1, 2],
-            colormap = ColorSchemes.lajolla,
-            limits = (0, maximum(Array(results.LINEFLOW.Time))),
-        )
-        ax.xlabel = "Linecolor based on count, where line utls. >= $threshhold"
-    elseif type == "avg"
-
-        for row in eachrow(df_line_util)
-            from, to = line_from_to[row.index]
-            lw = 1.5
-            c = row.avg_color
-            lines!(ax, [from, to], color = (c, 0.98), linewidth = lw)
-        end
-
-        Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla, limits = (0.0, 100))
-        ax.xlabel = "Linecolor based on avarage line utls. in selected timeframe"
-    end
-
-    for row in keys(node_lonlat)
-
-        point = node_lonlat[row]
-        c = :black
-        scatter!(ax, point, color = c, markersize = 5)
-    end
-
-    return fig
+    results, df_line_util, line_from_to, node_lonlat, _ =
+        _prepare_lineplot_common(DataFiles(results_path), data, exclude_dc_lines, threshhold)
+    fig, ax = create_lineplot_layout(; background_map = background_map)
+    return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshhold)
 end
 
 """
@@ -1120,24 +1009,29 @@ fig = plot_network(datafiles)
 ```
 """
 function POMATWO.plot_network(data::Dict{Symbol,String})
-    ac_lines = select!(CSV.read(data[:lines], DataFrame), [:lat_i, :lon_i, :lat_j, :lon_j])
-    dc_lines =
-        select!(CSV.read(data[:dclines], DataFrame), [:lat_i, :lon_i, :lat_j, :lon_j])
     nodes = CSV.read(data[:nodes], DataFrame)
+    missing_cols = setdiff(["index", "lon", "lat"], names(nodes))
+    if !isempty(missing_cols)
+        error("Node file is missing required column(s): $(join(missing_cols, ", ")). "
+            * "Found: $(join(names(nodes), ", "))")
+    end
+    node_coords = Dict(row.index => (row.lon, row.lat) for row in eachrow(nodes))
+
+    ac_lines = select!(CSV.read(data[:lines], DataFrame), [:node_i, :node_j])
+    dc_lines = select!(CSV.read(data[:dclines], DataFrame), [:node_i, :node_j])
     fig, ax = create_lineplot_layout()
 
-
     for row in eachrow(ac_lines)
-        from = project_point2f.(row.lon_i, row.lat_i)
-        to = project_point2f.(row.lon_j, row.lat_j)
+        from = project_point2f.(node_coords[row.node_i][1], node_coords[row.node_i][2])
+        to = project_point2f.(node_coords[row.node_j][1], node_coords[row.node_j][2])
         lw = 1
         c = :black
         lines!(ax, [from, to], color = (c, 0.98), linewidth = lw)
     end
 
     for row in eachrow(dc_lines)
-        from = project_point2f.(row.lon_i, row.lat_i)
-        to = project_point2f.(row.lon_j, row.lat_j)
+        from = project_point2f.(node_coords[row.node_i][1], node_coords[row.node_i][2])
+        to = project_point2f.(node_coords[row.node_j][1], node_coords[row.node_j][2])
         lw = 1
         c = :black
         lines!(ax, [from, to], color = (c, 0.98), linewidth = lw, linestyle = :dash)
@@ -1159,7 +1053,7 @@ function plot_total_gen(results, kind, zone)
 
     categories = names(df)  # Extract column names as labels
     values = vec(Matrix(df)) ./ 1000  # Convert DataFrame row to a vector of values and scales form MWh to GWh
-    colors = [results.params.colors[c] for c in categories]
+    colors = [_color_for(_plot_colors(results), c) for c in categories]
     # Create the bar plot
     fig = Figure()
     ax = Axis(
@@ -1206,7 +1100,7 @@ function POMATWO.plot_total_gen_interactive(results::DataFiles)
         df = summarize_result(transform_results_by_type(results, kind, zone))
         categories = names(df)
         values = vec(Matrix(df)) ./ 1000
-        colors = [results.params.colors[c] for c in categories]
+        colors = [_color_for(_plot_colors(results), c) for c in categories]
         return categories, values, colors
     end
 
@@ -1327,6 +1221,9 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
 
     # Get statistics and time series
     stats_df = get_market_statistics(results, zone)
+    if isempty(stats_df)
+        throw(ArgumentError("No market statistics available for zone '$zone'."))
+    end
     
     # Extract time series data
     exchange_series = stats_df[stats_df.metric .== "timeseries" .&& stats_df.parameter .== "Exchange", :value][1]
@@ -1430,9 +1327,10 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
     # Z-score = (x - μ) / σ, where μ is mean and σ is standard deviation
     # This transforms data to have mean=0 and std=1, making different scales comparable
     # Interpretation: values show how many standard deviations away from the mean
-    exchange_norm = (timeseries_df.Exchange .- mean(timeseries_df.Exchange)) ./ std(timeseries_df.Exchange)
-    ll_norm = (timeseries_df.Lost_Load .- mean(timeseries_df.Lost_Load)) ./ std(timeseries_df.Lost_Load)
-    price_norm = (timeseries_df.Price .- mean(timeseries_df.Price)) ./ std(timeseries_df.Price)
+    zscore(values) = std(values) == 0 ? zeros(length(values)) : (values .- mean(values)) ./ std(values)
+    exchange_norm = zscore(timeseries_df.Exchange)
+    ll_norm = zscore(timeseries_df.Lost_Load)
+    price_norm = zscore(timeseries_df.Price)
     
     boxplot!(ax7, fill(1, length(exchange_norm)), exchange_norm, 
              color=(colors["Exchange"], 0.7), width=0.5)
@@ -1452,28 +1350,32 @@ function POMATWO.plot_market_statistics(results::DataFiles, zone::String="DE"; s
     exchange_stats = filter(row -> row.parameter == "Exchange", stats_df)
     ll_stats = filter(row -> row.parameter == "Lost_Load", stats_df)
     price_stats = filter(row -> row.parameter == "Price", stats_df)
-    
-    summary_text = """
-    Exchange:
-      Mean: $(round(exchange_stats[exchange_stats.metric .== "mean", :value][1], digits=2)) MW
-      Median: $(round(exchange_stats[exchange_stats.metric .== "median", :value][1], digits=2)) MW
-      Std: $(round(exchange_stats[exchange_stats.metric .== "std", :value][1], digits=2)) MW
-      Sum: $(round(exchange_stats[exchange_stats.metric .== "sum", :value][1]/1000, digits=2)) GWh
-    
-    Lost Load:
-      Mean: $(round(ll_stats[ll_stats.metric .== "mean", :value][1], digits=2)) MW
-      Max: $(round(ll_stats[ll_stats.metric .== "max", :value][1], digits=2)) MW
-      Sum: $(round(ll_stats[ll_stats.metric .== "sum", :value][1]/1000, digits=2)) GWh
-      Events: $(Int(ll_stats[ll_stats.metric .== "count_positive", :value][1]))
-    
-    Price:
-      Mean: $(round(price_stats[price_stats.metric .== "mean", :value][1], digits=2)) €/MWh
-      Median: $(round(price_stats[price_stats.metric .== "median", :value][1], digits=2)) €/MWh
-      Min: $(round(price_stats[price_stats.metric .== "min", :value][1], digits=2)) €/MWh
-      Max: $(round(price_stats[price_stats.metric .== "max", :value][1], digits=2)) €/MWh
+    stat_value(df, metric) = df[df.metric .== metric, :value][1]
+    exchange_text = """
+    Exchange
+    Mean: $(round(stat_value(exchange_stats, "mean"), digits=2)) MW
+    Median: $(round(stat_value(exchange_stats, "median"), digits=2)) MW
+    Std: $(round(stat_value(exchange_stats, "std"), digits=2)) MW
+    Sum: $(round(stat_value(exchange_stats, "sum") / 1000, digits=2)) GWh
     """
-    
-    text!(ax8, 0.1, 0.5, text=summary_text, align=(:left, :center), fontsize=12)
+    ll_text = """
+    Lost Load
+    Mean: $(round(stat_value(ll_stats, "mean"), digits=2)) MW
+    Max: $(round(stat_value(ll_stats, "max"), digits=2)) MW
+    Sum: $(round(stat_value(ll_stats, "sum") / 1000, digits=2)) GWh
+    Events: $(Int(stat_value(ll_stats, "count_positive")))
+    """
+    price_text = """
+    Price
+    Mean: $(round(stat_value(price_stats, "mean"), digits=2)) EUR/MWh
+    Median: $(round(stat_value(price_stats, "median"), digits=2)) EUR/MWh
+    Min: $(round(stat_value(price_stats, "min"), digits=2)) EUR/MWh
+    Max: $(round(stat_value(price_stats, "max"), digits=2)) EUR/MWh
+    """
+
+    text!(ax8, 0.02, 0.95, text=exchange_text, align=(:left, :top), fontsize=10, space=:relative)
+    text!(ax8, 0.36, 0.95, text=ll_text, align=(:left, :top), fontsize=10, space=:relative)
+    text!(ax8, 0.68, 0.95, text=price_text, align=(:left, :top), fontsize=10, space=:relative)
     
     # Add overall title
     Label(fig[0, :], "Market Statistics Overview - Zone: $(zone)", 

@@ -1,6 +1,7 @@
 # POMATWO.jl
 [![Main](https://img.shields.io/badge/docs-main-green)](https://ennowbrw.github.io/POMATWO/dev/)
 [![Build Status](https://github.com/EnnoWbrw/POMATWO/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/EnnoWbrw/POMATWO/actions?query=workflow%3ACI+branch%3Amain)
+[![Coverage Status](https://coveralls.io/repos/github/EnnoWbrw/POMATWO/badge.svg?branch=main)](https://coveralls.io/github/EnnoWbrw/POMATWO?branch=main)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 

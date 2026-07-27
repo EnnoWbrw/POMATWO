@@ -88,9 +88,13 @@ function add_plants!(params::Parameters, df_pp::AbstractDataFrame, report::DataR
         params.eta[row[:index]] = row[:eta]
     end
     
-    # Add summary note
+    if isempty(params.sets.P)
+    add_error!(report, "missing_data", "No plants defined", "basic validation")
+    else
     add_note!(report, "data_summary", 
               "Loaded $(length(params.sets.P)) plants", location)
+    end
+
 end
 
 
@@ -131,89 +135,78 @@ end
 #############################################
 
 # Load node data from file path into Parameters structure (Level 1)
+#
+# The `slack` column uses a reference-based format: every node's value is the index
+# of the slack bus that balances its area.  A node that is its own slack bus must
+# reference its own index.  Example for a 4-node network where n2/n3/n1 share a slack:
+#
+#   index | zone | slack
+#   n1    | Z1   | n3     ← n1 is balanced by n3
+#   n2    | Z2   | n3     ← n2 is balanced by n3
+#   n3    | Z2   | n3     ← n3 is the slack bus for {n1, n2, n3}
+#   n4    | Z3   | n4     ← n4 is its own slack
+#
+# Resulting params:
+#   params.slack      = ["n3", "n4"]
+#   params.slack_zone = Dict("n3"=>["n1","n2","n3"], "n4"=>["n4"])
+#
+# Legacy format (0/1): still accepted with a deprecation warning.  In that format
+# every node with slack=1 becomes a standalone slack bus (no zone grouping).
+
 function add_nodes!(params::Parameters, df_nodes::AbstractDataFrame, report::DataReport, location::String="nodes data")
-    # Validate required columns
+    # Validate required columns and structure
     required_columns = [:index, :zone, :slack]
     if !validate_required_columns(report, df_nodes, required_columns, location)
         return
     end
-    
-    # Validate slack column values (should be 0 or 1)
-    if hasproperty(df_nodes, :slack)
-        slack_data = skipmissing(df_nodes[!, :slack])
-        if !all(x -> x in [0, 1], slack_data)
-            invalid_count = count(x -> !(x in [0, 1]), slack_data)
-            add_error!(report, "range_validation", 
-                      "Column 'slack' has $invalid_count values not in {0, 1}", location)
+
+    if hasproperty(df_nodes, :index)
+        indices = df_nodes[!, :index]
+        if length(indices) != length(unique(indices))
+            add_error!(report, "duplicate_values",
+                      "Found $(length(indices) - length(unique(indices))) duplicate node indices", location)
         end
     end
-    
-    # Validate coordinate columns if present
+
     for coord_col in [:lat, :lon, :latitude, :longitude]
         if hasproperty(df_nodes, coord_col)
             validate_numeric_column(report, df_nodes, coord_col, location; required=false)
         end
     end
-    
-    # Check for duplicate node indices
-    if hasproperty(df_nodes, :index)
-        indices = df_nodes[!, :index]
-        unique_indices = unique(indices)
-        if length(indices) != length(unique_indices)
-            duplicate_count = length(indices) - length(unique_indices)
-            add_error!(report, "duplicate_values", 
-                      "Found $duplicate_count duplicate node indices", location)
-        end
+
+    # Detect format: legacy 0/1 if all non-missing slack values are in {0, 1}
+    non_missing_slack = collect(skipmissing(df_nodes[!, :slack]))
+    legacy_mode = !isempty(non_missing_slack) &&
+                  all(x -> x in [0, 1, 0.0, 1.0, "0", "1"], non_missing_slack)
+
+    if legacy_mode
+        _add_nodes_legacy!(params, df_nodes, report, location)
+    else
+        _add_nodes_reference!(params, df_nodes, report, location)
     end
-    
-    slack_count = 0
-    for row in eachrow(df_nodes)
-        # Skip rows with critical missing data
-        if ismissing(row[:index]) || ismissing(row[:zone]) || ismissing(row[:slack])
-            add_warning!(report, "incomplete_data", 
-                        "Skipping node row with missing critical data", location)
-            continue
-        end
-        
-        push!(params.sets.N, row[:index])
-        if row[:slack] == 1 
-            push!(params.slack, row[:index])
-            slack_count += 1
-        end
-        params.node2zone[row[:index]] = row[:zone]
-        
-        if "lat" in names(row) && "lon" in names(row)
-            if !ismissing(row[:lat]) && !ismissing(row[:lon])
-                params.node_coords[row[:index]] = [row[:lon], row[:lat]]
-            else
-                params.node_coords[row[:index]] = [0.0, 0.0]
-                add_note!(report, "missing_coordinates", 
-                         "Node $(row[:index]) missing coordinates, using [0.0, 0.0]", location)
-            end
-        elseif "latitude" in names(row) && "longitude" in names(row)
-            if !ismissing(row[:latitude]) && !ismissing(row[:longitude])
-                params.node_coords[row[:index]] = [row[:longitude], row[:latitude]]
-            else
-                params.node_coords[row[:index]] = [0.0, 0.0]
-                add_note!(report, "missing_coordinates", 
-                         "Node $(row[:index]) missing coordinates, using [0.0, 0.0]", location)
-            end
-        else
-            params.node_coords[row[:index]] = [0.0, 0.0]
-        end
-    end
-    
-    # Validate slack bus configuration
+
+    # Validate resulting slack configuration
+    slack_count = length(params.slack)
     if slack_count == 0
-        add_error!(report, "configuration_error", 
-                  "No slack bus defined (need at least one node with slack=1)", location)
+        add_error!(report, "missing_data",
+                  "No slack bus could be identified.", location)
     elseif slack_count > 1
-        add_warning!(report, "configuration_warning", 
-                    "Multiple slack buses defined ($slack_count), this may cause issues", location)
+        add_warning!(report, "configuration_warning",
+                    "Multiple slack buses defined ($slack_count). " *
+                    "Please ensure this is intended.", location)
     end
-    
-    add_note!(report, "data_summary", 
-              "Loaded $(length(params.sets.N)) nodes with $slack_count slack bus(es)", location)
+
+    if !isempty(params.slack)
+        @info "Slack buses loaded from CSV: $(join(sort(params.slack), ", "))"
+    end
+
+    if isempty(params.sets.N)
+        add_error!(report, "missing_data", "No nodes defined", location)
+    else
+        add_note!(report, "data_summary",
+                "Loaded $(length(params.sets.N)) nodes with $slack_count slack bus(es)", location)
+    end
+
 end
 
 # Wrapper function to load node data from file path into Parameters structure (Level 2) and pass it to Level 1 function
@@ -260,7 +253,9 @@ function add_zones!(params::Parameters, df_zones::AbstractDataFrame, report::Dat
                       "Found $duplicate_count duplicate zone indices", location)
         end
     end
-    
+
+    has_ccm = hasproperty(df_zones, :CCM)
+
     for row in eachrow(df_zones)
         if ismissing(row[:index])
             add_warning!(report, "incomplete_data", 
@@ -269,10 +264,35 @@ function add_zones!(params::Parameters, df_zones::AbstractDataFrame, report::Dat
         end
         
         push!(params.sets.Z, row[:index])
+
+        if has_ccm
+            ccm_val = ismissing(row[:CCM]) ? missing : string(row[:CCM])
+            if ccm_val == "fb"
+                push!(params.sets.FBCCR, row[:index])
+            elseif ccm_val == "ac_ntc"
+                push!(params.sets.NTCCCR, row[:index])
+            else
+                add_error!(report, "invalid_ccm_value",
+                          "Zone '$(row[:index])' has invalid CCM value '$(something(ccm_val, "missing"))'; must be 'fb' or 'ac_ntc'", location)
+            end
+        end
     end
-    
-    add_note!(report, "data_summary", 
+
+    # If CCM column was present, verify every zone was assigned to exactly one category
+    if has_ccm
+        unassigned = setdiff(params.sets.Z, union(params.sets.FBCCR, params.sets.NTCCCR))
+        for z in unassigned
+            add_error!(report, "missing_ccm_assignment",
+                      "Zone '$z' was not assigned to any CCM category ('fb' or 'ntc')", location)
+        end
+    end
+
+    if isempty(params.sets.Z)
+        add_error!(report, "missing_data", "No zones defined", location)
+    else 
+            add_note!(report, "data_summary", 
               "Loaded $(length(params.sets.Z)) zones", location)
+    end
 end
 
 # Wrapper function to load zone data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
@@ -460,28 +480,51 @@ function add_lines!(params::Parameters, df_lines::AbstractDataFrame, report::Dat
             params.circuits[row[:index]] = 1
         end
 
+        # Check what parameters are available
+        has_impedance_pu = haskey(row, :x_pu) && haskey(row, :r_pu)
+        has_impedance_abs = haskey(row, :x) && haskey(row, :r)
+        has_susceptance_pu = haskey(row, :b_pu)
+        has_susceptance_abs = haskey(row, :b)
+        has_voltage = haskey(row, :voltage)
+
+        # Check if any line parameters are provided
+        has_any_params = has_impedance_pu || has_impedance_abs || has_susceptance_pu || has_susceptance_abs
+        
+        if !has_any_params
+            add_error!(report, "missing_line_parameters",
+                      "Line $(row[:index]) has no power line parameters (x_pu & r_pu, or x & r, or b_pu, or b)", location)
+        end
+
+        # Check if voltage is required but missing
+        needs_voltage = (has_impedance_abs || has_susceptance_abs) && !has_voltage
+        if needs_voltage
+            add_error!(report, "missing_voltage",
+                      "Line $(row[:index]) has absolute parameters (x, r, or b) but voltage is missing", location)
+        end
+
         # Handle impedance parameters (resistance and reactance)
-        if haskey(row, :x_pu) && haskey(row, :r_pu)
-            params.resistance[row[:index]] = row[:r_pu]
-            params.reactance[row[:index]] = row[:x_pu]
-        elseif haskey(row, :x) && haskey(row, :r) && haskey(row, :voltage)
+        if has_impedance_pu
+            params.resistance[row[:index]] = row[:r_pu] / params.circuits[row[:index]]
+            params.reactance[row[:index]] = row[:x_pu] / params.circuits[row[:index]]
+        elseif has_impedance_abs && has_voltage
             params.resistance[row[:index]] =
                 row[:r] / zbase(row[:voltage]) / params.circuits[row[:index]]
             params.reactance[row[:index]] =
                 row[:x] / zbase(row[:voltage]) / params.circuits[row[:index]]
-        else
-            # Only error if neither per-unit nor absolute impedance values are available
-            if !haskey(row, :b)
-                add_warning!(report, "missing_line_parameters",
-                          "Line $(row[:index]) missing impedance parameters (x_pu & r_pu) or (x & r & voltage)", location)
-            end
         end
 
-        # Handle susceptance separately (can coexist with impedance)
-        if haskey(row, :b) && params.resistance[row[:index]] !== nothing && params.reactance[row[:index]] !== nothing
-            params.bvector[row[:index]] = row[:b]
+        # Handle susceptance parameters
+        if has_susceptance_pu
+            params.bvector[row[:index]] = row[:b_pu] * params.circuits[row[:index]]
+        elseif has_susceptance_abs && has_voltage
+            params.bvector[row[:index]] = row[:b] * zbase(row[:voltage]) * params.circuits[row[:index]]
+        end
+
+        # Warn if both impedance and susceptance are defined
+        if (has_impedance_pu || (has_impedance_abs && has_voltage)) && 
+           (has_susceptance_pu || (has_susceptance_abs && has_voltage))
             add_warning!(report, "line_parameters",
-                      "Line $(row[:index]) has susceptance 'b' defined along with impedance; ensure consistency. only susceptance 'b' will be used", location)
+                      "Line $(row[:index]) has both impedance (x, r) and susceptance (b) defined; ensure consistency. Only susceptance will be used", location)
         end
 
         if haskey(row, :voltage)
@@ -564,7 +607,6 @@ function add_dclines!(params::Parameters, path::AbstractString, report::DataRepo
         add_error!(report, "file_parsing", "Failed to parse DC lines file: $(string(e))", location)
     end
 end
-
 
 #############################################
 ##### Prs Demand Data #############################
@@ -748,6 +790,11 @@ function add_ntc!(params::Parameters, df_ntc::AbstractDataFrame, report::DataRep
     for row in eachrow(df_ntc)
         i, j = row[:zone_i], row[:zone_j]
         push!(params.sets.NTC, (i, j))
+        if "ntc" ∉ names(row) || ismissing(row[:ntc])
+            add_error!(report, "incomplete_data", 
+                        "Row has a missing ntc value", location)
+            continue
+        end
         params.ntc[i, j] = row[:ntc]
     end
 end
@@ -950,7 +997,7 @@ function load_data_with_report(data::Dict)
     if !isempty(missing_keys)
         add_error!(report, "missing_configuration", 
                   "Missing required data keys: $(join(missing_keys, ", "))", "data configuration")
-        return params, report
+        return nothing, report
     end
     
     # Load required data with validation
@@ -966,7 +1013,7 @@ function load_data_with_report(data::Dict)
         add_types!(params, data[:types], report, data[:types])
     catch e
         add_error!(report, "critical_error", "Failed to load required data: $(string(e))", "core data loading")
-        return params, report
+        return nothing, report
     end
     
     # Load optional data with validation
@@ -1077,7 +1124,7 @@ function load_data_with_report(data::Dict)
                 if report.has_errors
                     add_note!(report, "processing_incomplete", 
                              "Skipping PTDF calculation due to network topology errors", "post-processing")
-                    return params, report
+                    return nothing, report
                 end
             end
             
@@ -1179,50 +1226,6 @@ function load_data(data::Dict)
 end
 
 """
-    validate_params(params::Parameters)
-
-Validate a Parameters object for common issues, particularly network topology problems.
-Returns a DataReport with detailed diagnostics.
-
-# Example
-```julia
-params = load_data(data_files)
-report = validate_params(params)
-print_report(report)
-```
-"""
-function validate_params(params::Parameters)
-    report = DataReport()
-    
-    # Validate basic data presence
-    if isempty(params.sets.N)
-        add_error!(report, "missing_data", "No nodes defined", "basic validation")
-    end
-    
-    if isempty(params.sets.Z)
-        add_error!(report, "missing_data", "No zones defined", "basic validation")
-    end
-    
-    if isempty(params.sets.P)
-        add_error!(report, "missing_data", "No plants defined", "basic validation")
-    end
-    
-    # Validate network topology if lines are defined
-    if !isempty(params.sets.L)
-        validate_network_topology(report, params, "network topology")
-    else
-        add_note!(report, "validation_info", "No transmission lines defined - operating in copper plate mode", "network validation")
-    end
-    
-    # Validate slack bus presence
-    if isempty(params.slack)
-        add_error!(report, "missing_data", "No slack bus defined", "slack bus validation")
-    end
-    
-    return report
-end
-
-"""
     validate_params(params::Parameters, setup::ModelSetup)
 
 Extended validation that additionally checks time-series lengths against the configured TimeHorizon
@@ -1231,9 +1234,7 @@ and validates node consistency for nodal availability and nodal load.
 Returns a DataReport containing any errors, warnings, and notes.
 """
 function validate_params(params::Parameters, setup::ModelSetup)
-    # Start with the base validations
-    report = validate_params(params)
-
+    report = DataReport()
     # 1) Time horizon length checks (row count vs TimeHorizon.stop)
     stop_val = setup.TimeHorizon.stop
 
@@ -1301,6 +1302,28 @@ function validate_params(params::Parameters, setup::ModelSetup)
         end
     else
         add_note!(report, "nodal_demand_absent", "No nodal demand data present", "validate_params")
+    end
+
+    # 3) CCM zone set validations
+    # 3a) If NTCCCR is non-empty, every zone must have at least one NTC value defined (either direction)
+    if !isempty(params.sets.NTCCCR)
+        ntc_keys = keys(params.ntc)
+        for z in params.sets.NTCCCR
+            has_ntc = any(((i, j),) -> i == z || j == z, ntc_keys)
+            if !has_ntc
+                add_error!(report, "missing_ntc_for_zone",
+                          "Zone '$z' is in NTCCCR but has no NTC value defined (neither as exporter nor importer)", "validate_params")
+            end
+        end
+    end
+
+    # 3b) If the exchange formulation is FlowBased and FBCCR is still empty, populate it with all zones
+    if setup.MarketType isa ZonalMarket && setup.MarketType.exchange_formulation isa FlowBased
+        if isempty(params.sets.FBCCR)
+            append!(params.sets.FBCCR, params.sets.Z)
+            add_note!(report, "fbccr_auto_populated",
+                     "Exchange formulation is FlowBased but FBCCR was empty; all $(length(params.sets.Z)) zones have been added to FBCCR", "validate_params")
+        end
     end
 
     return report

@@ -12,7 +12,8 @@
             slack=["node1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         # Should have no errors
         @test !report.has_errors
@@ -30,7 +31,8 @@
             slack=["node1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         @test report.has_errors
         errors = POMATWO.get_errors(report)
@@ -55,7 +57,8 @@
             slack=["n1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         @test report.has_errors
         errors = POMATWO.get_errors(report)
@@ -83,7 +86,8 @@
             slack=["node1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         @test report.has_errors
         errors = POMATWO.get_errors(report)
@@ -106,7 +110,8 @@
             slack=["node1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         warnings = POMATWO.get_warnings(report)
         
@@ -127,7 +132,8 @@
             slack=["node1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         @test report.has_errors
         errors = POMATWO.get_errors(report)
@@ -150,7 +156,8 @@
             slack=["node1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         @test report.has_errors
         errors = POMATWO.get_errors(report)
@@ -174,7 +181,8 @@
             slack=["node1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
 
         notes = POMATWO.get_notes(report)
 
@@ -197,7 +205,8 @@
             slack=["node1"]  # Slack bus not connected!
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         @test report.has_errors
         errors = POMATWO.get_errors(report)
@@ -217,7 +226,8 @@
             slack=["node1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         # Should not have errors (copper plate is valid)
         @test !report.has_errors
@@ -240,7 +250,8 @@
             slack=String[]  # No slack bus!
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         @test report.has_errors
         errors = POMATWO.get_errors(report)
@@ -266,7 +277,8 @@
             slack=["n1"]
         )
         
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         
         @test report.has_errors
         errors = POMATWO.get_errors(report)
@@ -375,7 +387,8 @@
         
         # Time the validation
         t_start = time()
-        report = POMATWO.validate_params(params)
+        report = POMATWO.DataReport()
+        POMATWO.validate_network_topology(report, params, "test")
         t_elapsed = time() - t_start
         
         # Should complete in reasonable time (< 5 seconds for 100 nodes)

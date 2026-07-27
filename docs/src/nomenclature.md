@@ -35,7 +35,7 @@ This section defines all sets, parameters, and variables used in the market and 
 | $\mathbf{A^{dc}_{l\times n}}$          | Incidence matrix of DC lines                                       | -               |
 | $\mathbf{B^{line}_{acl \times n}}$     | Line susceptance matrix                                            | -               |
 | $\mathbf{B^{bus}_{n \times m}}$        | Bus susceptance matrix                                             | -               |
-| $\mathbf{\\eta_s}$                     | Efficiency of storage unit $s$                                     | -               |
+| $\mathbf{\eta_s}$                      | Efficiency of storage unit $s$                                     | -               |
 
 
 ## Variables
@@ -62,3 +62,21 @@ This section defines all sets, parameters, and variables used in the market and 
 | $\mathbf{S_{s,t}^{lvl,redisp}}$        | State of charge of storage unit $s$ after redispatch at time $t$   | MWh  |
 | $\mathbf{\theta_n}$                   | Voltage phase angle at node $n$                                    | -    |
 See [market_model.md](./market_model.md) for the utilization of the Sets, Parameters and Variables.
+
+## Flow-Based Market Coupling Symbols
+
+These symbols are used in the flow-based market coupling and reference-day basecase
+methodology.
+
+| Symbol                          | Description                                                                 | Unit |
+|---------------------------------|-----------------------------------------------------------------------------|------|
+| $\mathbf{PTDF_{n}}$             | Nodal power transfer distribution factors, $PTDF_n = B^{line}(B^{bus})^{-1}$ | -    |
+| $\mathbf{GSK}$                  | Generation Shift Key matrix (node $\times$ zone), columns sum to 1          | -    |
+| $\mathbf{PTDF_{z}}$             | Zonal PTDF, $PTDF_z = PTDF_n \cdot GSK$                                      | -    |
+| $\mathbf{PTDF_{zz}}$            | Zone-to-zone PTDF, $PTDF_z[\,\cdot\,,z_{im}] - PTDF_z[\,\cdot\,,z_{ex}]$     | -    |
+| $\mathbf{NP_{z}}$               | Zonal net position (import-positive), $-\sum_{n \in z} INJ_{ac,n}$          | MW   |
+| $\mathbf{F_{0,l}}$              | Reference flow on line $l$ with the commercial exchange removed             | MW   |
+| $\mathbf{RAM^{pos/neg}_{l}}$    | Remaining Available Margin on critical line $l$ per direction               | MW   |
+| $\mathbf{FRM}$                  | Flow Reliability Margin (fraction of line capacity)                         | -    |
+| $\mathbf{\lambda}$              | Minimum-RAM share (`minRAM`, the EU "70 % rule")                            | -    |
+| $\mathbf{\beta}$                | Reference-day shift apportionment shares ($RES$, $conv$, $load$, $NP$)      | -    |
