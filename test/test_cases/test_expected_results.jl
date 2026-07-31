@@ -402,6 +402,60 @@ function inv_network!(s::RefSys, NI, LF, inj_expected)
     end
 end
 
+"""
+Nodal reporting of a ZONAL day-ahead stage (`report_nodal_flows!`). These tables are
+computed, not optimized: the cleared dispatch implies a nodal net input and the PTDF turns
+it into line flows. Checked against the independently built PTDF of `build_refsys`.
+
+Deliberately NOT checked: the thermal limit. A zonal market ignores the grid, so these
+pre-redispatch flows may exceed `s.cap` — that is the reason they are reported.
+"""
+function inv_zonal_da_network!(s::RefSys, da, inj_da)
+    NI, LF = da.NETINPUT, da.LINEFLOW
+    isempty(NI) && return
+    loops = nullspace(transpose(s.A))
+    for t in sort(unique(NI.Time))
+        ni = [ref_val(NI, :index, n, t, :NETINPUT) for n in s.N]
+        ac = [ref_val(NI, :index, n, t, :ACINJECTION) for n in s.N]
+        for n in s.N
+            # no phase angles exist in a zonal clearing
+            @test ref_val(NI, :index, n, t, :DELTA) ≈ 0.0 atol = GOLDEN_TOL
+            # net input must match the dispatch the day-ahead cleared
+            @test ref_val(NI, :index, n, t, :NETINPUT) ≈
+                  s.load[n][t] - inj_da(n, t) atol = 1e-5
+        end
+
+        # the cross-check: PTDF flows of the reported AC injection. Result tables are
+        # import-positive, the PTDF wants export-positive (as in N1 of inv_network!).
+        pf = s.PTDF * (-ac)
+        f = [ref_val(LF, :index, l, t, :LINEFLOW) for l in s.L]
+        for li in eachindex(s.L)
+            @test f[li] ≈ pf[li] atol = 1e-5
+            @test ref_val(LF, :index, s.L[li], t, :line_capacity) ≈ s.cap[s.L[li]] atol = GOLDEN_TOL
+        end
+        # KVL around every independent loop — PTDF flows are physical flows
+        for k in axes(loops, 2)
+            @test dot(loops[:, k], f ./ s.b) ≈ 0.0 atol = 1e-5
+        end
+
+        # the nodal tables must restate the zonal clearing they came from: a zone's net
+        # input is its exchange, up to the (zonal, not nodal) balance slacks
+        zsum = 0.0
+        for z in s.Z
+            ex = ref_val(da.EXCHANGE, :index, z, t, :EXCHANGE)
+            cu = ref_val(da.ZonalMarketBalance, :Zone, z, t, :CU)
+            ll = ref_val(da.ZonalMarketBalance, :Zone, z, t, :LL)
+            (ex === nothing || cu === nothing) && continue
+            @test sum(ref_val(NI, :index, n, t, :NETINPUT) for n in s.nodes_in_zone[z]) ≈
+                  ex + ll - cu atol = 1e-5
+            zsum += ex + ll - cu
+        end
+        # DC incidence sums to zero over nodes, so the AC part carries the same total
+        @test sum(ac) ≈ zsum atol = 1e-5
+        @test sum(ni) ≈ zsum atol = 1e-5
+    end
+end
+
 """Generation bounds and the defining identities of the GEN table."""
 function inv_generation!(s::RefSys, G)
     isempty(G) && return
@@ -643,13 +697,26 @@ function check_invariants!(sc, s::RefSys, r, dir)
     end
 
     @testset "invariants: $(sc.name)" begin
-        # The composite view resolves the nodal tables to the last stage that wrote them.
-        inv_network!(s, r.NETINPUT, r.LINEFLOW, has_redisp ? inj_rd : inj_da)
+        # The composite view resolves the nodal tables to the last stage that wrote them:
+        # the redispatch stage where there is one, otherwise the day-ahead — which for a
+        # zonal market means the computed (not optimized) tables of report_nodal_flows!.
+        if has_redisp || mt isa NodalMarket
+            inv_network!(s, r.NETINPUT, r.LINEFLOW, has_redisp ? inj_rd : inj_da)
+        else
+            inv_zonal_da_network!(s, r, inj_da)
+        end
 
-        # Per-stage: a zonal day-ahead persists no nodal tables, so only check where they
-        # exist. This is the coverage F-5 was destroying.
+        # Per-stage: every day-ahead persists nodal tables now (a zonal one computes them
+        # from the cleared dispatch, see report_nodal_flows!). This is the coverage F-5 was
+        # destroying. `inv_network!` cannot run on a zonal DA — there are no phase angles
+        # and the flows are not capacity-limited.
         da = with_logger(NullLogger()) do; DataFiles(dir, DayAhead); end
-        isempty(da.NETINPUT) || inv_network!(s, da.NETINPUT, da.LINEFLOW, inj_da)
+        @test !isempty(da.NETINPUT)
+        if mt isa NodalMarket
+            inv_network!(s, da.NETINPUT, da.LINEFLOW, inj_da)
+        else
+            inv_zonal_da_network!(s, da, inj_da)
+        end
         if has_redisp
             rd = with_logger(NullLogger()) do; DataFiles(dir, Redispatch); end
             @test !isempty(rd.NETINPUT)

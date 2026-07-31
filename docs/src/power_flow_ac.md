@@ -139,6 +139,43 @@ F_l = \sum_n PTDF_{l\times n} \cdot INJ_n \qquad \forall l \in L \\
 \sum_n INJ_n = 0
 ```
 
+## Nodal results of a zonal day-ahead
+
+A zonal day-ahead market has no nodal network formulation: it clears per zone and exchanges
+between zones, so none of the variables above exist in that stage. The nodal picture is
+nevertheless well defined once the market has cleared — every plant is assigned to a node,
+so the cleared dispatch implies a nodal net injection, and the PTDF turns that injection
+into line flows. POMATWO computes both after the clearing and persists them in the same
+tables every other stage writes (`DayAhead_NETINPUT`, `DayAhead_LINEFLOW`,
+`DayAhead_DCLINEFLOW`):
+
+```math
+NETINPUT_{n,t} = load_{n,t} + \sum_{s \in n} CHARGE_{s,t} - \sum_{p \in n} GEN_{p,t}
+\qquad
+LINEFLOW_{l,t} = \sum_n PTDF_{l,n} \cdot ACINJECTION_{n,t}
+```
+
+These are the flows the market outcome would cause **before** redispatch. They are
+therefore deliberately **not** constrained to the line capacities and may exceed them —
+an overload here is the congestion the redispatch stage then resolves. The `line_capacity`
+column is reported alongside for comparison.
+
+Three properties follow from the fact that these values are computed, not optimized:
+
+- `DELTA` is `0`: a zonal clearing has no phase angles.
+- Under the `NTC` exchange formulation no DC-line flows are modelled, so DC lines are
+  assumed idle: `ACINJECTION` equals `NETINPUT` and no `DCLINEFLOW` rows are written. Under
+  `FlowBased`, DC flows are model variables, so `ACINJECTION` is the true AC part
+  (`NETINPUT` minus the DC injection) and `DCLINEFLOW` is exact.
+- The zonal balance's `CU`/`LL` infeasibility slacks are zonal, not nodal, and do not enter
+  the nodal net injection. Whenever they are active — which the penalty-cost hierarchy makes
+  a signal that the run is infeasible, see `check_infeasibility` — a zone's summed net
+  injection and its `EXCHANGE` differ by exactly those slacks.
+
+A last caveat concerns `fixed_exchange`: a zone exchanging with a zone outside the modelled
+system makes the modelled injections sum to something other than zero, and the PTDF then
+attributes that residual to the slack node. Where fixed exchanges matter, model the
+counterpart explicitly rather than reading the zonal day-ahead flows as physical.
 
 **References:**  
 - [Van den Bergh, Delarue (2014)](https://api.semanticscholar.org/CorpusID:111125894)

@@ -308,9 +308,9 @@ function test_read_output()
                 da = with_logger(logger) do; DataFiles(dir, DayAhead) end
                 rd = with_logger(logger) do; DataFiles(dir, Redispatch) end
 
-                # a zonal day-ahead persists no nodal tables, so here they belong to the
-                # redispatch stage alone
-                @test isempty(da.NETINPUT)
+                # both stages write nodal tables: the redispatch stage from its DCLF, the
+                # zonal day-ahead computed from the cleared dispatch (report_nodal_flows!)
+                @test !isempty(da.NETINPUT)
                 @test !isempty(da.GEN)
                 @test !isempty(rd.NETINPUT)
                 @test !isempty(rd.REDISP)

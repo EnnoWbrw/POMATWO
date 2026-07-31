@@ -602,8 +602,10 @@ function test_refday_trace_e2e()
             @test sort(unique(fc_out.RAM.Time)) == [1, 2, 3, 4]
             @test all(isfinite, fc_out.RAM.F0)
 
-            # ── DayAhead source: zonal DA persists no nodal tables → nodal ────
-            # injections computed from plant-level GEN/CHARGE + nodal_load.
+            # ── DayAhead source: the zonal DA persists its own nodal tables ───
+            # (report_nodal_flows!), so the baseline is read from them. The plant-level
+            # identity they must satisfy is re-derived below and asserted against the
+            # persisted ACINJECTION column, which is what the shift consumes.
             bc_da = ReferenceDayBasecase(
                 source = joinpath(tmpdir, "forecast"), source_type = "",
                 matching = MatchingConfig(cluster_size = 2, lookback = 1,
@@ -624,6 +626,14 @@ function test_refday_trace_e2e()
             end
             for r in eachrow(src_da.CHARGE)
                 imp[(params.plant2node[r.index], Int(r.Time))] += Float64(r.CHARGE)
+            end
+            # the persisted zonal-DA nodal table must be exactly that (no DC lines in this
+            # dataset, so ACINJECTION == NETINPUT) — this is the baseline the shift reads
+            @test !isempty(src_da.NETINPUT)
+            for r in eachrow(src_da.NETINPUT)
+                @test isapprox(Float64(r.ACINJECTION), imp[(String(r.index), Int(r.Time))];
+                               atol = 1e-6)
+                @test isapprox(Float64(r.NETINPUT), Float64(r.ACINJECTION); atol = 1e-6)
             end
             trace_da = base_da[:trace]
             reft_da = innerjoin(trace_da[:REFDAY_GROUPS], trace_da[:REFDAY_MATCH]; on = :group)

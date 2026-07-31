@@ -70,13 +70,26 @@ the names suggest. Consequences:
   is computed from the negated basecase flow. It is internally coherent end to end; do not
   "fix" one half. Verified: with `FRM = 0` the flow-based domain reproduces the exact nodal
   physical export limit.
-- A **zonal** DA stage writes no nodal tables at all, so `DataFiles(dir, DayAhead).NETINPUT`
-  is legitimately empty for zonal runs — the nodal tables of such a run come from the
-  redispatch or basecase stage. Never mix stages when checking a balance.
-  `ReferenceDayBasecase` takes matching data and injection baseline from ONE MarketState
-  selected by `source_type` (`""`/`"DA"`, `"2DA"`, `"REDISP"` → `RefdaySourceState`
-  dispatch in `refday_basecase.jl`; zonal DA sources get their nodal injections computed
-  from plant-level results).
+- Never mix stages when checking a balance. `ReferenceDayBasecase` takes matching data and
+  injection baseline from ONE MarketState selected by `source_type` (`""`/`"DA"`, `"2DA"`,
+  `"REDISP"` → `RefdaySourceState` dispatch in `refday_basecase.jl`), always reading the
+  `ACINJECTION` column of that state's `NETINPUT` table.
+
+**Every DA stage writes nodal tables, zonal ones included.** A zonal DA has no nodal
+variables (`add_network` routes to `add_exchange`), so `report_nodal_flows!`
+(`energy_balances.jl`, hooked into the `SubRun` constructor after `link_balance`) computes
+them from the cleared dispatch: `NETINPUT[n,t] = load − Σ injection(c, sr, NodalScope(), n, t)`
+over every component except `NetworkComp`, then `LINEFLOW = params.ptdf · ACINJECTION`.
+These are the flows BEFORE redispatch and are deliberately **not** capacity-limited — an
+overload is the congestion redispatch then resolves. Do not "fix" it by adding line limits.
+- It reuses the `injection` methods at `NodalScope`, but on a **fresh** component vector:
+  the instances on `sr.components` have their `members` caches filled with zone keys.
+- `DELTA` is 0 (no phase angles). Under `NTC` DC lines are assumed idle
+  (`ACINJECTION == NETINPUT`, no `DCLINEFLOW` rows); `FlowBased` has real DC variables and
+  is exact. Zonal `CU`/`LL` slacks are not nodally attributable, so with active slack a
+  zone's summed net input and its `EXCHANGE` differ by them.
+- Consequence for tests: the nodal invariant `inv_network!` cannot run on a zonal DA (no
+  `DELTA`, limits may be violated) — `inv_zonal_da_network!` covers it instead.
 
 ---
 

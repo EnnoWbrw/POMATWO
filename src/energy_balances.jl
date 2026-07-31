@@ -224,6 +224,137 @@ end
 # The prosumer optimization stage has no market balance of its own.
 link_balance(sr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS<:ProsumerSetup,RD<:RedispatchSetup,MS<:ProsumerOptimizationState} = nothing
 
+### Nodal reporting for zonal day-ahead stages
+#
+# A zonal day-ahead market has no nodal variables: `add_network` routes to
+# `add_exchange`, so `NETINPUT`/`ACINJECTION`/`LINEFLOW`/`DCLINEFLOW` — created only in
+# `add_dclf` — never exist. The nodal picture is nevertheless well defined after the
+# clearing: every plant has a node, so the cleared dispatch implies a nodal net input, and
+# the PTDF turns that into line flows. Those are the flows the market would cause BEFORE
+# redispatch, so they are deliberately NOT capacity-limited and may exceed
+# `acline_capacity`. Reported here, in the same tables every other stage writes.
+#
+# Caveats (see "Nodal results of a zonal day-ahead" in docs/src/power_flow_ac.md):
+# - `DELTA` is 0: there are no phase angles to report.
+# - Under `NTC` no DC-line flows are modelled, so DC lines are assumed idle
+#   (`ACINJECTION == NETINPUT`, no `DCLINEFLOW` rows). `FlowBased` does model them and its
+#   `ACINJECTION`/`DCLINEFLOW` are exact.
+# - The zonal balance's `CU`/`LL` slacks are zonal, not nodal, and do not enter the nodal
+#   net input; when they are active the nodal tables and the zonal clearing differ by them.
+
+"""
+    report_nodal_flows!(sr::SubRun)
+
+Persist nodal net injections and PTDF line flows for stages that have no nodal network
+formulation of their own. No-op by default — nodal markets, the `TwoDayAhead` basecase and
+every redispatch stage go through [`add_dclf`](@ref), which writes these tables itself.
+"""
+report_nodal_flows!(::SubRun) = nothing
+
+# DC-line flow expression container of a zonal day-ahead network node, or `nothing` when the
+# formulation does not model DC lines.
+_zonal_dc_flow(::SubRun, ::Type{NTC}) = nothing
+function _zonal_dc_flow(sr::SubRun, ::Type{FlowBased})
+    isempty(sr.modelrun.params.sets.DC) && return nothing
+    return sr.vars[:network][:F]
+end
+
+function report_nodal_flows!(
+    sr::SubRun{ZonalMarket{XF},PS,RD,MS},
+) where {XF<:ExchangeFormulation,PS<:ProsumerSetup,RD<:RedispatchSetup,MS<:DayAhead}
+    params = sr.modelrun.params
+    T = collect(sr.market_state.Time)
+    N, L, DC = params.sets.N, params.sets.L, params.sets.DC
+    @unpack acline_capacity, dcline_capacity, dc_start, dc_end, ptdf = params
+
+    # Fresh component instances: the ones on `sr.components` have their `members` caches
+    # filled with zone keys (the balance ran at ZonalScope), and node keys must not be
+    # mixed into the same dict. NetworkComp is skipped — its zonal EXCHANGE is not a
+    # nodal quantity.
+    comps = [c for c in components(sr.modelrun.setup, sr.market_state) if !(c isa NetworkComp)]
+    scope = NodalScope()
+
+    # Import-positive, like the nodal DCLF: load + charge - gen.
+    NETINPUT = Containers.DenseAxisArray(Matrix{AffExpr}(undef, length(N), length(T)), N, T)
+    for n in N, t in T
+        ex = AffExpr(_nodal_load_at(params, n, t))
+        for c in comps
+            inj = injection(c, sr, scope, n, t)
+            inj === nothing || add_to_expression!(ex, -1.0, inj)
+        end
+        NETINPUT[n, t] = ex
+    end
+
+    # ACINJECTION is the AC part of the net input: what the PTDF acts on.
+    F = _zonal_dc_flow(sr, XF)
+    ACINJECTION = NETINPUT
+    if !isnothing(F)
+        dcincidence = Containers.DenseAxisArray(zeros(Int, length(DC), length(N)), DC, N)
+        for dc in DC
+            dcincidence[dc, dc_start[dc]] = -1
+            dcincidence[dc, dc_end[dc]] = 1
+        end
+        ACINJECTION =
+            Containers.DenseAxisArray(Matrix{AffExpr}(undef, length(N), length(T)), N, T)
+        for n in N, t in T
+            ex = AffExpr()
+            add_to_expression!(ex, NETINPUT[n, t])
+            for dc in DC
+                iszero(dcincidence[dc, n]) && continue
+                add_to_expression!(ex, -dcincidence[dc, n], F[t, dc])
+            end
+            ACINJECTION[n, t] = ex
+        end
+    end
+
+    ### to dataframe
+    df_netinput(sr.results)
+    df_lineflow(sr.results)
+
+    append_results!(sr.results, :NETINPUT, DataFrame(
+        index = repeat(N, inner = length(T)),
+        Time = repeat(T, outer = length(N)),
+        NETINPUT = [NETINPUT[n, t] for n in N for t in T],
+        ACINJECTION = [ACINJECTION[n, t] for n in N for t in T],
+        DELTA = zeros(length(N) * length(T)),
+    ))
+
+    # `params.ptdf` is import-positive: it maps NETINPUT to LINEFLOW without a sign flip
+    # (see the sign-convention section of CLAUDE.md). Read from the dict directly — the
+    # axes of `dict_to_matrix` are lexicographically sorted, not in `sets.L`/`sets.N` order.
+    # No line-limit constraint: the point of these flows is that they can be overloaded.
+    if !isempty(L) && !isempty(ptdf)
+        LINEFLOW = Containers.DenseAxisArray(Matrix{AffExpr}(undef, length(L), length(T)), L, T)
+        for l in L, t in T
+            ex = AffExpr()
+            for n in N
+                coef = get(ptdf, (l, n), 0.0)
+                iszero(coef) && continue
+                add_to_expression!(ex, coef, ACINJECTION[n, t])
+            end
+            LINEFLOW[l, t] = ex
+        end
+
+        append_results!(sr.results, :LINEFLOW, DataFrame(
+            index = repeat(L, inner = length(T)),
+            Time = repeat(T, outer = length(L)),
+            LINEFLOW = [LINEFLOW[l, t] for l in L for t in T],
+            line_capacity = [acline_capacity[l] for l in L for t in T],
+        ))
+    end
+
+    if !isnothing(F)
+        append_results!(sr.results, :DCLINEFLOW, DataFrame(
+            index = repeat(DC, inner = length(T)),
+            Time = repeat(T, outer = length(DC)),
+            DCLINEFLOW = [F[t, dc] for dc in DC for t in T],
+            line_capacity = [dcline_capacity[dc] for dc in DC for t in T],
+        ))
+    end
+
+    return sr.results
+end
+
 function _push_balance_results!(sr::SubRun, key::Symbol, regioncol::Symbol, con, CU, LL, R, T)
     sr.results[key] = DataFrame(
         :Time => repeat(collect(T), outer = length(R)),

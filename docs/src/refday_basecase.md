@@ -36,10 +36,12 @@ The construction returns a dict with `:netinput_ac` (node × time nodal net inje
     `""`/`"DA"` day-ahead, `"2DA"` the TwoDayAhead basecase, `"REDISP"` redispatch.
     Risks:
 
-    - A *zonal* day-ahead source persists no nodal tables; nodal injections are then
-      reconstructed from plant-level `GEN`/`CHARGE` and nodal load. DC-line flows,
-      prosumer net input, and infeasibility slacks are not nodally attributable and are
-      **silently omitted** (exact only for AC-only networks whose DA stage used no slack).
+    - The injection baseline is always the `ACINJECTION` column of the source state's
+      `NETINPUT` table. A *zonal* day-ahead writes it too, but computed rather than
+      optimized (see [Nodal results of a zonal day-ahead](@ref)) — under `NTC` that means
+      DC lines are assumed idle, and the zonal `CU`/`LL` slacks are not nodally
+      attributable. A source run whose selected state has no `NETINPUT` table (result sets
+      written before zonal nodal reporting existed) is rejected with an error.
     - The "forecast" is another run of the same model — usually with the *same* input time
       series as the target run. That is (almost) perfect foresight in disguise, the only differences occur due to possibly different RAM.
 

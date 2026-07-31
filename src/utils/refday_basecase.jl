@@ -183,9 +183,8 @@ day's renewable infeed and zonal net positions.
   a preloaded [`DataFiles`](@ref).
 - `source_type::String = ""`: which MarketState of the source run provides
   BOTH the matching data and the injection baseline (never mixed):
-  `""`/`"DA"` = day-ahead results (for zonal DA markets the nodal injections
-  are computed from plant-level `GEN`/`CHARGE` and `nodal_load`, since zonal
-  stages persist no nodal tables); `"2DA"` = TwoDayAhead basecase tables;
+  `""`/`"DA"` = day-ahead results (zonal day-ahead stages report their nodal
+  injections too, see `report_nodal_flows!`); `"2DA"` = TwoDayAhead basecase tables;
   `"REDISP"` = redispatch results. See `_source_state`.
 - `matching::MatchingConfig`: reference-day matching options.
 - `shift::ShiftMethod`: how the reference day is shifted toward the target day.
@@ -253,9 +252,9 @@ Map the `source_type` config string to its dispatch type. The short strings are 
 legacy aliases of the market states (see `market_state_type`), kept because they are part
 of the public `ReferenceDayBasecase` API:
 `"2DA"` → `TwoDayAheadSource` (`TwoDayAhead_*` result tables),
-`""`/`"DA"` → `DayAheadSource` (plain day-ahead tables; nodal
-injections are computed from plant-level results when the DA market was
-zonal), `"REDISP"` → `RedispatchSource` (redispatch results).
+`""`/`"DA"` → `DayAheadSource` (plain day-ahead tables — nodal as well as
+plant-level, for zonal and nodal DA markets alike),
+`"REDISP"` → `RedispatchSource` (redispatch results).
 """
 _source_state(source_type::AbstractString) =
     isempty(source_type) ? DayAheadSource() :
@@ -303,25 +302,20 @@ end
 AC-only nodal net injection per (node, time), **export-positive** (feed-in
 convention: positive = the node injects into the AC grid, `gen − load − charge`).
 
-- `TwoDayAheadSource` / `RedispatchSource` (nodal DCLF stages): read from the
-  persisted `NETINPUT` table. Its `ACINJECTION` column follows the model's
-  *import-positive* convention (`= load + charge − gen`, see the nodal balance
-  in energy_balances.jl and the NP negation in `calc_ram`), so it is negated
-  here. Legacy result sets reconstruct it from `LINEFLOW` via the incidence
-  convention (line_start = +1, line_end = -1); errors when neither an
-  `ACINJECTION` column nor `LINEFLOW` data is available.
-- `DayAheadSource`: a *zonal* day-ahead stage persists no nodal tables, so the
-  injection is computed from plant-level results — every plant has a node:
-  `P[n,t] = Σ GEN(plants at n) − nodal_load[n][t] − Σ CHARGE(storages at n)`.
-  DC-line flows, prosumer net input, and the `CU`/`LL` infeasibility slacks of
-  the DA balance are not nodally attributable and are omitted (approximation;
-  exact for AC-only networks whose DA stage used no slack).
+Read from the persisted `NETINPUT` table of the selected source state — every
+stage writes it, including a *zonal* day-ahead (see `report_nodal_flows!` in
+energy_balances.jl). Its `ACINJECTION` column follows the model's
+*import-positive* convention (`= load + charge − gen`, see the nodal balance in
+energy_balances.jl and the NP negation in `calc_ram`), so it is negated here.
+Legacy result sets reconstruct it from `LINEFLOW` via the incidence convention
+(line_start = +1, line_end = -1); errors when neither an `ACINJECTION` column
+nor `LINEFLOW` data is available.
 
 The shift pipeline works entirely in this export-positive space;
 [`build_refday_basecase`](@ref) negates back to the model's import-positive
 convention when assembling `:netinput_ac`.
 """
-function _ac_injection_baseline(::Union{TwoDayAheadSource,RedispatchSource}, ref::DataFiles)
+function _ac_injection_baseline(::RefdaySourceState, ref::DataFiles)
     ni = ref.NETINPUT
     if "ACINJECTION" in names(ni)
         return Dict{Tuple{String,Int},Float64}(
@@ -339,31 +333,6 @@ function _ac_injection_baseline(::Union{TwoDayAheadSource,RedispatchSource}, ref
         ns = params.line_start[r.index]; ne = params.line_end[r.index]
         P[(ns, t)] = get(P, (ns, t), 0.0) + f
         P[(ne, t)] = get(P, (ne, t), 0.0) - f
-    end
-    return P
-end
-
-function _ac_injection_baseline(state::DayAheadSource, ref::DataFiles)
-    params = ref.params
-    gen    = _source_gen(state, ref)
-    charge = _source_charge(state, ref)
-    times  = sort(unique(Int.(gen.Time)))
-
-    P = Dict{Tuple{String,Int},Float64}()
-    for n in params.sets.N, t in times
-        P[(n, t)] = -_nodal_load_at(params, n, t)
-    end
-    for r in eachrow(gen)
-        n = get(params.plant2node, r.index, "")
-        n == "" && continue
-        key = (n, Int(r.Time))
-        P[key] = get(P, key, 0.0) + Float64(coalesce(r.GEN, 0.0))
-    end
-    for r in eachrow(charge)
-        n = get(params.plant2node, r.index, "")
-        n == "" && continue
-        key = (n, Int(r.Time))
-        P[key] = get(P, key, 0.0) - Float64(coalesce(r.CHARGE, 0.0))
     end
     return P
 end
@@ -1017,6 +986,10 @@ function _validate_refday_source(::DayAheadSource, ref::DataFiles, source_type)
     isempty(ref.GEN) && error(
         "ReferenceDayBasecase: source results contain no day-ahead GEN data " *
         "(source_type = \"$source_type\").")
+    isempty(ref.NETINPUT) && isempty(ref.LINEFLOW) && error(
+        "ReferenceDayBasecase: day-ahead source has no nodal NETINPUT/LINEFLOW data. " *
+        "Result sets written before nodal reporting was added to the zonal day-ahead " *
+        "must be re-run with the current package.")
     return nothing
 end
 
