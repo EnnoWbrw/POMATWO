@@ -178,6 +178,44 @@ grid in `golden_grid()` (`test/test_cases/test_expected_results.jl`), compared b
   restatement — see F-1 in the FINDINGS block at the top of `test_expected_results.jl`),
   so a change in that behaviour fails loudly instead of passing silently.
 
+## Plotting extension is not covered by CI
+
+`[extensions] Plotting = ["Tyler", "GLMakie", "ColorSchemes", "Colors"]`. None of those are
+in `[deps]`, `targets.test` or `docs/Project.toml`, so **neither `Pkg.test()` nor the docs
+build loads a single line of `ext/`**. GLMakie also needs an OpenGL context that GitHub
+runners lack without an xvfb workaround, so this is deliberate, not an oversight.
+
+Consequences:
+- The docstrings in `ext/` are never processed by Documenter. `docs/src/Visualizing_*.md`
+  duplicates them **by hand**; the two drift silently. Update both.
+- Verification is manual, in an environment with the four weakdeps added:
+  - `julia --project=examples examples/bench_plotting.jl [results_dir] [out_dir]` —
+    renders every entry point to PNG and reports ms / MiB / allocations per prep step.
+    Takes a results dir; the bundled test cases are 4 h and hide every scaling effect.
+  - `julia test/verify_plotting_equivalence.jl [refday_results_dir]` — opt-in oracle
+    (bootstraps its own temp env, never run by CI). Re-implements the pre-refactor data
+    pipeline verbatim and asserts the current helpers produce identical numbers, solving a
+    subset of `golden_grid()` for its own inputs. It also carries a sign-invariant section
+    (`verify_map_signs`) that is NOT old-vs-new: it pins the negation in
+    `_net_injection_matrix` and `ACINJECTION == Σ_l incidence[l,n]·LINEFLOW[l,t]`, which is
+    what makes a positive `LINEFLOW` mean `line_start → line_end` and therefore which way
+    the map's flow arrows point. The reference-day checks need a `ReferenceDayBasecase`
+    result directory, which the golden grid has none of, so they are skipped unless one is
+    passed.
+
+**When a plotting behaviour change is deliberate**, edit the frozen "old" side of
+`verify_plotting_equivalence.jl` to match and mark it `# deliberate change: ...`. A bare
+failure there must always mean "something moved that nobody decided to move".
+
+Two traps that oracle exists to catch — both produced entirely plausible-looking figures:
+- `_dispatch_data` aggregates **per contribution, then routes that contribution's total by
+  sign**. Routing each row breaks `Net injection` (a zone's importing and exporting nodes
+  must cancel); summing across contributions first breaks `GEN` vs `CU` (same plant type,
+  opposite sides of the stack).
+- `CU` is stacked **upward** as a pale cap pinned last (`_TOP_SERIES`), not as a downward
+  bar. `GEN` is already post-curtailment (`FEEDIN = avail*gmax − CU`), so the cap is the
+  gap to full potential and is in no energy balance.
+
 ## Test data
 
 Registered in `test/test_cases/cases.jl`, files under `test/test_cases/data/`.

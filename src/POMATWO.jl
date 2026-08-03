@@ -23,10 +23,14 @@ JuMP.variable_ref_type(::Type{Plasmo.OptiNode}) = JuMP.VariableRef
 
 function plot_DA_w_Redisp_interactive end
 function plot_market_interactive end
-function plot_network end 
+function plot_network end
+function plot_capacity_network end
 function plot_total_gen_interactive end
 function create_lineplot end
 function plot_market_statistics end
+function plot_line_utils_interactive end
+function plot_shift_map_interactive end
+function plot_refday_dispatch_interactive end
 
 include("utils/GSK_strategies.jl")
 include("market_definitions.jl")
@@ -76,9 +80,13 @@ export load_data,
     transform_results_by_type,
     plot_DA_w_Redisp_interactive, 
     plot_market_interactive, 
-    plot_network, 
+    plot_network,
+    plot_capacity_network,
     plot_total_gen_interactive,
     create_lineplot,
+    plot_line_utils_interactive,
+    plot_shift_map_interactive,
+    plot_refday_dispatch_interactive,
     DataReport,
     DataReportLevel,
     DataReportItem,

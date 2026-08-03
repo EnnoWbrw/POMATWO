@@ -574,10 +574,23 @@ function add_dclf(sr::SubRun, ::Type{PhaseAngle})
 
     @constraint(m, LineLimitNeg[l = L, t = T], -acline_capacity[l] <= LINEFLOW[l, t])
 
-    if !isempty(slack_zone)
+    # `sum(ACINJECTION[n, t] for n in slack_zone[zs])` telescopes: a line with both ends
+    # inside the group contributes +LINEFLOW at one end and -LINEFLOW at the other, so
+    # only lines crossing the group's boundary survive. A slack zone that covers a whole
+    # synchronous island has no such line and the constraint is identically `0 == 0` —
+    # but JuMP still emits the row, where the terms cancel only to floating-point
+    # precision and leave coefficients of order `1e-13 * b`. Gurobi's presolve reads that
+    # noise as an infeasibility (HiGHS does not), so build the constraint only for the
+    # groups it actually constrains.
+    balancing_zones = filter(collect(keys(slack_zone))) do zs
+        members = Set(slack_zone[zs])
+        any(l -> (line_start[l] in members) != (line_end[l] in members), L)
+    end
+
+    if !isempty(balancing_zones)
         @constraint(
             m,
-            SlackZoneBalance[zs = keys(slack_zone), t = T],
+            SlackZoneBalance[zs = balancing_zones, t = T],
             sum(ACINJECTION[n, t] for n in slack_zone[zs]) == 0
         )
     end

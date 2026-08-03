@@ -18,6 +18,16 @@ Creates an interactive plot for visualizing market results by zone, including ge
     - *Day-ahead price curve*
 - Dual y-axes for power (GW) and price (EUR/MWh).
 
+**Reading the stack**
+
+Upward and downward bands are not the same kind of quantity, and the difference matters:
+
+- *Upward, below the thin black rule*: the energy balance — dispatch per technology, lost load `LL`, and the zonal `exchange` when the zone imports.
+- *Downward*: the remaining balance terms — storage charging and `exchange` when the zone exports. Summing these and subtracting from the upward stack gives the zonal load.
+- *The pale `CU` cap above the rule*: curtailment. This is **not** a balance term. `GEN` in the results is already the post-curtailment feed-in (`FEEDIN = avail * gmax − CU`), so per non-dispatchable plant `GEN + CU` recovers `avail * gmax`, the full renewable potential. The cap is therefore the gap between what the technology could have delivered and what it did.
+
+Because the cap sits outside the balance, the total stack height is balance + curtailment; reading it as delivered energy would overstate it. Curtailment is aggregated into a single `CU` series rather than split per technology, so the cap does not identify *which* technology was curtailed — use `results.GEN` for that.
+
 **Returns**
 - `fig`: An interactive plot figure (`Makie.Figure`) for display or saving.
 
@@ -43,6 +53,8 @@ Creates an interactive, comparative visualization of Day-Ahead (DA) and Redispat
     - *Bottom subplot:* Generation, load, and prices **in the Day-Ahead market** (as originally scheduled).
 - Dual y-axes for both power (GW) and price (EUR/MWh).
 - Plots update interactively when the selected zone changes.
+
+Both subplots stack the same way as `plot_market_interactive` — see *Reading the stack* above. In the redispatch subplot the `Net injection` band replaces `exchange`, and the `CU` cap is `CU_REDISP`, for which the same identity holds (`GEN_REDISP + CU_REDISP = avail * gmax`).
 
 **Returns**
 - `fig`: The interactive plot (`Makie.Figure`) ready for display or saving.
@@ -72,6 +84,154 @@ fig = plot_total_gen_interactive(results)
 ```
 
 
+### `plot_line_utils_interactive(results_path; kwargs...)`
+Interactive geographical map of transmission line utilization — the interactive counterpart of `create_lineplot`. Line color is `|flow| / line_capacity` aggregated over a selectable time window and line width is `line_capacity` itself — colour is a ratio, so on its own it draws a saturated distribution line and a saturated interconnector identically. DC lines are drawn dashed. Each line also carries a chevron showing the flow direction in that window, and the nodes carry one of two keys: on a redispatch state the nodal injection *change* the redispatch measures cause, on every other state the nodal *net injection* itself.
+
+**Arguments**
+- `results_path`: Path to the directory containing simulation results, or an `AbstractDict` mapping menu labels to already-loaded `DataFiles` objects.
+
+**Keyword arguments**
+- `data`: (default `nothing`) A dictionary of input file paths (see section [Input Data Load](@ref)). If given, node coordinates and line endpoints are read from the CSVs instead of from `params`.
+- `exclude_dc_lines`: (default `false`) If `true`, only AC lines are visualized.
+- `threshold`: (default `0.95`) Initial threshold (0-1 scale) of the counting mode.
+- `mode`: (default `:avg`) Initial aggregation mode, `:avg`, `:hours` or `:flowsum`.
+- `scale`: (default `:window`) Initial colour-scale reference of the average mode, `:window` or `:horizon`. Pass `:horizon` to make two figures of the same market state directly comparable.
+- `state`: (default `nothing`) Initially selected market state; `nothing` selects the last stage of the pipeline.
+- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles behind the network.
+- `extent`: (default `nothing`) Map window; `nothing` fits it to the node coordinates.
+- `show_redisp`: (default `true`) Enable the redispatch node markers.
+- `redisp_ref`: (default `nothing`) Pin the marker reference magnitude in MWh instead of using the largest value in the selected window — use it to make two figures comparable.
+- `show_injection`: (default `true`) Enable the net-injection arrows on market states without a `REDISP` table.
+- `injection_ref`: (default `nothing`) Pin the arrow reference magnitude in MW — the `redisp_ref` of the arrows.
+- `show_flow_direction`: (default `true`) Draw the per-line flow-direction arrowheads.
+- `arrow_scale`: (default `1.0`) Multiplier on the arrow lengths, which are otherwise a fixed fraction of the node bounding box.
+- `linewidth_by_capacity`: (default `true`) Scale line width with `line_capacity`. Set `false` to draw every line at `linewidth`, as before.
+- `linewidth_range`: (default `(0.6, 4.5)`) Width of a zero-capacity and of the largest line. Capacity maps onto it proportionally, floored at the low end so a line whose capacity is zero or unknown stays hairline rather than vanishing.
+- `figsize`, `linewidth` (only when `linewidth_by_capacity = false`), `max_markersize`, `min_markersize`, `zero_tol`.
+
+**Interactivity**
+- *Market state menu*: one entry per pipeline stage that wrote a `LINEFLOW` table under `results_path` (`TwoDayAhead`, `DayAhead`, `ProsumerOptimizationState`, `Redispatch`, whichever are present). Every stage writes one, including a zonal day-ahead, whose nodal flows are reported from the cleared dispatch. Result directories written before per-stage result prefixes existed offer a single composite entry. States are loaded lazily and cached on first selection.
+- *Time window slider*: an `IntervalSlider` over the model horizon; drag the two handles together for a single timestep. It starts on the full horizon, so the initial view reproduces `create_lineplot`.
+- *Aggregation menu*:
+    - `"average utilization"`: mean utilization over the window.
+    - `"hours ≥ threshold"`: count of timesteps in the window at or above the threshold, colorbar 0 to the window length. This is the mode `create_lineplot` calls `type = "max"`.
+    - `"absolute power flow sum"`: total Σ|flow| per line over the window, in MWh, independent of line capacity. Colour scale is always adaptive to the current window — the colour-scale menu below has no effect on this mode, same as the counting mode.
+- *Colour scale menu* (average mode only): what the top of the colorbar means. Utilization above 1 is real rather than an artefact — a zonal day-ahead has no nodal variables, so its flows are reported from the cleared dispatch **without** applying line limits, and the overload is exactly what redispatch then resolves. Both settings floor the maximum at 1, so an uncongested state is not stretched to look loaded, and the active range is printed in the axis label.
+    - `"adaptive (this window)"` (default): 0 to max(1, peak of the current window). Best contrast within a single view, but the scale moves while the slider is dragged, so two windows cannot be compared by colour.
+    - `"fixed (whole horizon)"`: 0 to max(1, the largest single-timestep utilization in the state) — the only reference that can never clip, whatever window is selected. The cost is contrast, because a wide window averages peaks away: on a 168 h day-ahead run the worst single hour reaches 4.9 while the worst full-horizon average is 1.6, so the default view uses only the lower part of the colormap under this setting.
+
+    The counting mode always scales to the window length, which is its natural ceiling; a horizon-wide count scale would render a short window as a single dark step.
+- *Threshold slider*: the threshold of the counting mode, in 1 % steps.
+
+**Node markers**
+
+The nodes carry one of two mutually exclusive keys, depending on the selected market state. Below the legend, the size scale gives the reference magnitudes for the current window — MWh for the circles, MW for the arrows.
+
+*Redispatch circles.* On a market state that carries a `REDISP` table, each node is drawn as a circle colored by the nodal net-injection change caused by the redispatch measures over the selected window — green for an increase (net upward redispatch), red for a decrease, gray for ≈ 0 — with marker **area** proportional to the magnitude in MWh.
+
+The change is `Δinjection = (GEN_UP − GEN_DOWN) − (CHARGE_UP − CHARGE_DOWN)` summed over the plants at each node, in the export-positive (feed-in) convention: charging is a withdrawal, so additional storage charging *lowers* a node's injection. Note that the persisted `NETINPUT`/`ACINJECTION` result columns use the opposite, import-positive convention.
+
+*Net-injection arrows.* On every other market state, each node carries a vertical arrow for its own net injection, `gen − load − charge`, averaged over the selected window in **MW** — green pointing up where the node generates more than it consumes, red pointing down where it consumes more, a gray dot at ≈ 0. Arrow **length** is proportional to the magnitude, linearly rather than by area as the circles are, because length is a linearly perceived channel where marker area is not. Lengths are in map coordinates, so the arrows stay anchored to the map under zoom, while the arrowheads are in pixels and keep a constant screen size.
+
+The values are the negated `NETINPUT` column, which every stage writes — a zonal day-ahead has no nodal variables, but its net input is reported from the cleared dispatch.
+
+**Flow direction**
+
+Each line carries an open `>` chevron at its midpoint pointing the way power flows in the selected window, taken from the **signed** flow sum. It is an unfilled stroke rather than a solid arrowhead on purpose: there is one per line against only a handful of node arrows, so filled heads would bury the line colours. A line whose flow reverses inside the window can cancel to ≈ 0; that is a real statement about the window (no net transfer), so the chevron is dropped rather than forced one way. In the model's sign convention a positive `LINEFLOW` runs from the line's `line_start` node to its `line_end` node.
+
+**Returns**
+- `fig`: An interactive plot figure (`Makie.Figure`) for display or saving.
+
+**Example**
+```julia
+using GLMakie, Tyler, ColorSchemes, Colors
+
+results_path = joinpath("results", scen_name)
+fig = plot_line_utils_interactive(results_path)
+
+# start on the congestion view, AC lines only
+fig = plot_line_utils_interactive(results_path;
+                                  mode = :hours, threshold = 0.9, exclude_dc_lines = true)
+
+# compare two explicitly loaded stages
+fig = plot_line_utils_interactive(Dict(
+    "day-ahead"  => DataFiles(results_path, DayAhead),
+    "redispatch" => DataFiles(results_path, Redispatch)))
+```
+
+
+## Reference-Day Plots
+
+These two figures visualize a [`ReferenceDayBasecase`](@ref) run and require a run whose reference-day trace was collected (`REFDAY_SHIFT`, `REFDAY_MATCH` and `REFDAY_GROUPS` in the result tables).
+
+### `plot_shift_map_interactive(results; kwargs...)`
+Geographical map of the ShareShift impact for one reference-day scenario. The network topology is drawn with AC lines solid and DC lines dashed, plus one circle per node: green for a net injection increase, red for a decrease, gray for ≈ 0, with marker area proportional to `|Σ delta|` in the selected time window.
+
+Deltas follow the injection convention of `REFDAY_SHIFT`: for the `load` component a positive delta means a load *decrease*. The `"total"` entry sums the real nodal components (`RES_prestep`, `RES`, `conv`, `load`, `sto`, `balance`); the per-zone `np_relax` residual is not a nodal delta and is reported in the info label only.
+
+If **no** node in the run carries coordinates, the nodes are laid out on a circle instead and the basemap is suppressed (noted in the axis label). Topology, line styling and the node markers all still read correctly; only the geography is gone. While *some* node has coordinates the behaviour is unchanged: a node without them cannot be placed and its deltas are dropped, with a warning naming the total dropped MW.
+
+**Arguments**
+- `results`: A `DataFiles` object of a reference-day run.
+
+**Keyword arguments**
+- `figsize`: (default `(1000, 1100)`)
+- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles.
+- `exclude_dc_lines`: (default `false`)
+- `extent_pad`: (default `0.5`) Padding of the auto-fitted map window, in degrees.
+- `max_markersize`, `min_markersize`, `zero_tol`.
+
+**Interactivity**
+- *Component menu*: `total` or an individual shift component.
+- *`IntervalSlider`*: a single timestep (handles together) or the sum over a window.
+
+**Returns**
+- `fig`: An interactive plot figure (`Makie.Figure`).
+
+**Example**
+```julia
+using GLMakie, Tyler, ColorSchemes, Colors
+
+variant = DataFiles(joinpath("results", "refday_gsk"))
+fig = plot_shift_map_interactive(variant)
+```
+
+### `plot_refday_dispatch_interactive(variant, source; kwargs...)`
+Per-zone comparison of generation, load and net position across the four stages of the reference-day pipeline:
+
+1. **Reference day** — the source (basecase) run's dispatch by plant type at the matched reference times.
+2. **Target day** — the source run's dispatch at the forecast/target times the matching algorithm shifted towards.
+3. **Shifted basecase** — the reference-day stack plus one black-stroked segment per ShareShift component (`ΔRES_prestep`, `ΔRES`, `Δconv`, `Δload`, `Δsto`, `Δbalance`). The shift is a nodal injection change and cannot be attributed to plant types, which is what the separate stroked segments express.
+4. **DA result** — the variant run's actual flow-based day-ahead dispatch at the target times.
+
+Horizontal black markers show the zonal load per group. Blue diamonds show the zonal net position (+ = export) per stage, computed as `Σgen − load − charge`; the shifted-basecase net position uses the identity `NP(reference) + Σ shift deltas`. The shift guarantees `NP(shifted) + unabsorbed ≈ NP(target)`, which can be read off the info label.
+
+**Arguments**
+- `variant`: A `DataFiles` object of the reference-day run.
+- `source`: A `DataFiles` object of the source (forecast) run, loaded with the **same market state** the `ReferenceDayBasecase` used — e.g. `DataFiles(dir, TwoDayAhead)` for `source_type = "2DA"`. Loading a different stage silently compares against the wrong baseline.
+
+**Keyword arguments**
+- `scalefactor`: (default `1/1000`) Factor to scale power values (MW to GW).
+- `agg`: (default `:mean`) Initial aggregation, `:mean` (GW average over the window) or `:sum` (GWh).
+- `figsize`: (default `(1300, 850)`)
+
+**Interactivity**
+- Dropdown menu to select the market zone.
+- Dropdown menu to select the aggregation (`mean` or `sum`).
+- *`IntervalSlider`* for a single timestep or a period.
+
+**Returns**
+- `fig`: An interactive plot figure (`Makie.Figure`).
+
+**Example**
+```julia
+using GLMakie, Tyler, ColorSchemes, Colors
+
+variant = DataFiles(joinpath("results", "refday_gsk"))
+source  = DataFiles(joinpath("results", "forecast"), TwoDayAhead)
+fig = plot_refday_dispatch_interactive(variant, source)
+```
+
 
 ## Static Plots
 
@@ -82,10 +242,14 @@ Creates a geographical network map showing transmission line utilization with co
 - `results_path`: Path to the directory containing simulation results.
 - `data`: A dictionary containing file paths for required network data tables (see section [Input Data Load](@ref)).
 - `type`: (optional, default: `"max"`) Visualization mode:
-    - `"max"`: Color lines by the count of timesteps where utilization >= `threshhold`.
+    - `"max"`: Color lines by the count of timesteps where utilization >= `threshhold`. Despite the name this is a count of congested hours, not a maximum — `plot_line_utils_interactive` calls the same mode `"hours ≥ threshold"`.
     - `"avg"`: Color lines by the average utilization across all timesteps.
 - `exclude_dc_lines`: (optional, default: `false`) If `true`, only AC lines are visualized.
 - `threshhold`: (optional, default: `0.95`) Utilization threshold (0-1 scale) for `"max"` mode counting.
+
+**Keyword arguments**
+- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles behind the network.
+- `extent`: (default `nothing`) Map window as a `Tyler.Extents.Extent`. `nothing` fits it to the node coordinates; result sets whose nodes carry no coordinates fall back to a Germany cutout.
 
 **Plot Details**
 - Lines are colored using the `ColorSchemes.lajolla` colormap.
@@ -93,6 +257,7 @@ Creates a geographical network map showing transmission line utilization with co
 - **Avg mode**: Colorbar shows average utilization percentage (0-100%).
 - Network nodes are displayed as black points.
 - Uses geographical coordinates with Web Mercator projection.
+- Aggregates over the entire result horizon and reads the composite result view (the latest stage that wrote each table). Use `plot_line_utils_interactive` to select a time window and a specific market state.
 
 **Returns**
 - `fig`: A Makie figure object with the network map, color-coded lines, and colorbar.
@@ -117,6 +282,60 @@ fig = create_lineplot(results_path, datafiles, "max", false, 0.95)
 
 # Visualize lines by average utilization
 fig = create_lineplot(results_path, datafiles, "avg")
+```
+
+### `plot_capacity_network(data::Dict{Symbol,String}; kwargs...)`
+
+Static map of the transmission network and the installed generation capacity at each node,
+built **purely from the input CSVs** — no simulation results are read, so a dataset can be
+checked before it is solved.
+
+Line width carries line capacity, DC lines are dashed, and each node carries a stacked bar
+of its installed capacity per plant type with the node index labelled underneath.
+
+**Arguments**
+- `data`: dictionary of input file paths (see section [Input Data Load](@ref)). `:nodes`, `:plants` and `:types` are required; `:lines` and `:dclines` are optional and each is skipped when the key is absent, the file does not exist, or it holds only a header.
+
+**Keyword arguments**
+- `background_map`: (default `true`) draw Tyler/CartoDB raster tiles behind the network. Ignored when the node file carries no coordinates — the circular fallback layout is not geographic and gets no basemap.
+- `extent`: (default `nothing`) map window as a `Tyler.Extents.Extent`. `nothing` fits it to the node coordinates.
+- `figsize`: (default `(1000, 1100)`) figure size in pixels.
+- `exclude_dc_lines`: (default `false`) if `true`, DC lines are not drawn.
+- `linewidth_range`: (default `(0.6, 4.5)`) width in points of the smallest and the largest line capacity.
+- `bar_height_frac`: (default `0.12`) height of the tallest node bar as a fraction of the node bounding box.
+- `bar_width_frac`: (default `0.02`) bar width as a fraction of the node bounding box.
+- `show_node_labels`: (default `true`) print the node index below each node.
+- `show_line_labels`: (default `true`) print the line index at each line's midpoint.
+- `label_fontsize`: (default `10`) font size of both label sets, in points.
+
+**Plot Details**
+- Line width is proportional to the `capacity` column with a floor, so a line of unknown or zero capacity is hairline rather than invisible. AC and DC share one scale: equal capacities are drawn equally thick regardless of line type.
+- Bar height uses one scale across all nodes, so bars are comparable between nodes. Only `g_max` is counted — a storage plant carrying its power in `storage_power` alone contributes nothing.
+- Plant types are stacked in alphabetical order, identically at every node. Colors come from the `color` column of the plant-type file; types without one fall back to a distinguishable palette color.
+- A node with no plants keeps its dot and its label and grows no bar.
+- When the node file has no `lon`/`lat` columns (or every node sits on the `0, 0` sentinel), nodes are laid out on a circle instead and the basemap is suppressed. Topology, line widths, bars and labels all still read correctly; only the geography is gone.
+- The axis title states the absolute magnitude of the tallest bar and the widest line, without which neither encoding is readable in absolute terms.
+
+**Returns**
+- `fig`: A Makie `Figure`.
+
+**Example**
+```julia
+using POMATWO, GLMakie, Tyler, ColorSchemes, Colors
+
+datafiles = Dict{Symbol,String}(
+    :nodes => joinpath(datapath, "nodes.csv"),
+    :lines => joinpath(datapath, "lines.csv"),
+    :dclines => joinpath(datapath, "dclines.csv"),
+    :plants => joinpath(datapath, "plants.csv"),
+    :types => joinpath(datapath, "planttypes.csv"),
+)
+
+fig = plot_capacity_network(datafiles)
+
+# no basemap, taller bars, AC only
+fig = plot_capacity_network(datafiles;
+    background_map = false, bar_height_frac = 0.2, exclude_dc_lines = true)
 ```
 
 ### `plot_market_statistics(results::DataFiles, zone::String="DE"; save_path=nothing)`
