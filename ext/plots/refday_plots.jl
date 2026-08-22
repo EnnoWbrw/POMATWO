@@ -368,21 +368,36 @@ component a positive delta is a load *decrease*. "total" sums the real nodal
 components (RES_prestep, RES, conv, load, sto, balance); the per-zone
 `np_relax` residual is reported in the info label only.
 
+On a geographic run the axis is a map axis: degree ticks (`10°E`, `52°N`),
+`Longitude` / `Latitude` labels, a kilometre scale bar and a north arrow, all of
+which follow zoom and pan. Geometry stays in Web Mercator — state the CRS,
+`WGS 84 / Pseudo-Mercator (EPSG:3857)`, in the figure caption, and note that
+mercator scale is latitude-dependent, so the scale bar is exact only at the
+latitude it is drawn at.
+
 If NO node in the run carries coordinates, the nodes are laid out on a circle
-instead and the basemap is suppressed (noted in the axis label). Topology, line
-styling and the node markers all still read correctly; only the geography is
-gone. While SOME node has coordinates the behaviour is unchanged: a node without
-them cannot be placed and its deltas are dropped, with a warning naming the
-total dropped MW.
+instead, the basemap is suppressed and none of the map decorations are drawn
+(noted in the axis subtitle). Topology, line styling and the node markers all
+still read correctly; only the geography is gone. While SOME node has
+coordinates the behaviour is unchanged: a node without them cannot be placed and
+its deltas are dropped, with a warning naming the total dropped MW.
 
 # Interactivity
 - Component menu: total / individual shift components.
 - IntervalSlider: single timestep (handles together) or Σ over a window.
 
 # Keyword arguments
-`figsize=(1000,1100)`, `background_map=true` (Tyler/CartoDB tiles),
-`exclude_dc_lines=false`, `extent_pad=0.5` (degrees), `max_markersize=40`,
+`figsize=(1000,1100)`, `background_map=true` (Tyler/CartoDB tiles; the axis stays
+a map axis without them), `exclude_dc_lines=false`, `extent_pad=0.5` (degrees), `max_markersize=40`,
 `min_markersize=2.5`, `zero_tol=1e-6` (MW).
+
+`map_axis=true` controls the map-axis styling: `true` for degree ticks,
+`Longitude`/`Latitude` labels, a scale bar and a north arrow, `false` for a bare
+axis in raw Web Mercator metres, or a `NamedTuple` overriding individual settings
+(`map_axis = (scalebar = false,)`, `(projection_note = true,)`,
+`(north_arrow_position = :lt,)`; fields `scalebar`, `north_arrow`,
+`projection_note`, `scalebar_position`, `north_arrow_position`). On a run without
+node coordinates it is ignored — the circular fallback has no geography to label.
 """
 function POMATWO.plot_shift_map_interactive(
     results;
@@ -393,6 +408,7 @@ function POMATWO.plot_shift_map_interactive(
     max_markersize   = 40.0,
     min_markersize   = 2.5,
     zero_tol         = 1e-6,
+    map_axis         = true,
 )
     params = results.params
     sa = _shift_arrays(results)
@@ -404,9 +420,11 @@ function POMATWO.plot_shift_map_interactive(
 
     fig, ax = geographic ?
         create_lineplot_layout(figsize; background_map = background_map,
-                               extent = _auto_map_extent(node_coords; pad = extent_pad)) :
-        create_lineplot_layout(figsize; background_map = false)
-    geographic || (ax.xlabel = _NO_COORDS_NOTE)
+                               extent = _auto_map_extent(node_coords; pad = extent_pad),
+                               geographic = true, map_axis = map_axis) :
+        create_lineplot_layout(figsize; background_map = false, geographic = false,
+                               map_axis = map_axis)
+    geographic || (ax.subtitle = _NO_COORDS_NOTE)
 
     # One draw call per line style instead of one `lines!` per line.
     ac_pts = Point2f[]

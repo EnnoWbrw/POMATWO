@@ -25,6 +25,12 @@ function create_gsk_test_params(nodes::Vector{String}, zones::Vector{String}, no
     )
 end
 
+# A strategy that claims the time-dependent trait but never defines the per-hour weight.
+# Stands in for a half-finished user strategy: both call sites must refuse it rather than
+# fall back to some default key.
+struct DummyTimedepGSK <: POMATWO.GSKStrategy end
+POMATWO.is_time_dependent(::DummyTimedepGSK) = true
+
 function test_zonal_ptdf()
     @testset "GSK Strategy: FlatGSK (equal distribution)" begin
         nodes = ["N1", "N2", "N3", "N4"]
@@ -685,6 +691,31 @@ function test_zonal_ptdf()
         # Cross-zone entries stay 0
         @test G["N1", "Z2", 1] == 0.0
         @test G["N3", "Z1", 2] == 0.0
+    end
+
+    @testset "timedep_node_weight: the time-dependent GSK extension point" begin
+        params = create_gsk_test_params(["N1"], ["Z1"], Dict("N1" => "Z1"))
+        netinput_ac = JuMP.Containers.DenseAxisArray(reshape([20.0], 1, 1), ["N1"], [1])
+
+        # GenLoadGSK's weight is |gen| + |load|, which is what makes it sign-blind: the two
+        # call sites hand it opposite injection conventions (import-positive basecase in
+        # build_gsk_timeseries, export-positive reference-day baseline in GSKRedist).
+        for (g, l) in ((10.0, 30.0), (-5.0, 10.0), (70.0, 60.0), (0.0, 0.0))
+            @test POMATWO.timedep_node_weight(POMATWO.GenLoadGSK(), params, "N1";
+                                              gen = g, load = l) == abs(g) + abs(l)
+        end
+
+        # a static strategy has no per-timestep meaning: rejected, not silently answered
+        # with |T| copies of the same matrix
+        @test_throws ErrorException POMATWO.build_gsk_timeseries(
+            params, POMATWO.FlatGSK(), netinput_ac, 1:1)
+
+        # a strategy that claims the trait but defines no weight is caught at the weight
+        @test POMATWO.is_time_dependent(DummyTimedepGSK())
+        @test_throws ErrorException POMATWO.timedep_node_weight(
+            DummyTimedepGSK(), params, "N1"; gen = 1.0, load = 1.0)
+        @test_throws ErrorException POMATWO.build_gsk_timeseries(
+            params, DummyTimedepGSK(), netinput_ac, 1:1)
     end
 
     @testset "zonal_ptdf: time-dependent GSK (n×z×t) → PTDFz (l×z×t)" begin

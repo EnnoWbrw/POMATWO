@@ -55,6 +55,7 @@ The constructor can be called by providing the directory that contains the resul
 - `REFDAY_MATCH::DataFrame`: Reference-day basecase trace — per (group, target_time) the matched reference time, cluster metadata (may be `missing` where a join found no counterpart) and whether the global fallback match was used. Empty for runs without a [`ReferenceDayBasecase`](@ref).
 - `REFDAY_GROUPS::DataFrame`: Reference-day basecase trace — group → node membership of the matching scope (join with `REFDAY_MATCH` on `:group` for per-node reference times, see [`refday_reference_times`](@ref)). Loaded from the scenario root, not the subrun folders.
 - `REFDAY_SHIFT::DataFrame`: Reference-day basecase trace — sparse per (Time, node, component) net-injection deltas applied by the shift (physical levers `RES_prestep`, `RES`, `conv`, `load`, `sto`, plus `balance` from the global balance pass; for `load` the actual load change is `-delta`). Also carries per (Time, zone) `np_relax` rows (zone label in the `node` column) recording how far each zone's net position was left relaxed toward the reference.
+- `REFDAY_DIAG::DataFrame`: Reference-day basecase trace — per (Time, zone, component) apportionment diagnostics of the gap cascade: `want` (amount handed to the lever, `β·gap` plus the remainder carried from the previous lever), `applied` (what it absorbed), `reallocated` (how much of the key-proportional split was clipped and re-spread over other nodes), `beta_configured` and `beta_realised` (`Σ_n |applied_n| / |gap|` — above the configured share when the lever absorbs a remainder carried over from an earlier saturated lever, below it when the lever itself saturates). Under `resolution = :nodal` the `zone` column carries node ids. Empty for runs without a [`ReferenceDayBasecase`](@ref).
 
 # Constructors
 ```julia
@@ -113,6 +114,7 @@ struct DataFiles
     REFDAY_MATCH::DataFrame
     REFDAY_GROUPS::DataFrame
     REFDAY_SHIFT::DataFrame
+    REFDAY_DIAG::DataFrame
 
     function DataFiles(dir; type = nothing)
         folders = filter(isdir, readdir(dir, join = true))
@@ -213,7 +215,7 @@ _is_legacy_layout(subrun_folders) = !any(
 const COMPOSITE_STATES = (Redispatch, ProsumerOptimizationState, DayAhead)
 
 # Tables that belong to the run rather than to a market state, and so are never prefixed.
-const UNPREFIXED_TABLES = (:REFDAY_MATCH, :REFDAY_SHIFT)
+const UNPREFIXED_TABLES = (:REFDAY_MATCH, :REFDAY_SHIFT, :REFDAY_DIAG)
 
 const _Candidate = Tuple{Union{DataType,Nothing},Symbol}
 

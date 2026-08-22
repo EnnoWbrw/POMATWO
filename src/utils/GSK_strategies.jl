@@ -4,6 +4,15 @@
 # 1. Define a new struct subtype of GSKStrategy
 # 2. Implement compute_nodal_weights for the new strategy
 # 3. Add the new strategy to the export list in POMATWO.jl
+#
+# A TIME-DEPENDENT strategy (one GSK per hour instead of one static matrix) needs
+# two more methods:
+# 4. is_time_dependent(::NewStrategy) = true
+# 5. timedep_node_weight(::NewStrategy, params, node; gen, load) — the per-node,
+#    per-hour weight, used by build_gsk_timeseries and by the GSKRedist
+#    redistribution key alike.
+# compute_nodal_weights stays required either way: it is what a plain build_gsk
+# call (no basecase, no timestep) falls back to.
 # =============================================================
 
 """
@@ -93,10 +102,41 @@ struct GenLoadGSK <: GSKStrategy end
 
 Whether the strategy builds one GSK per timestep from the FBMC basecase
 ([`build_gsk_timeseries`](@ref)) instead of a single static matrix
-([`build_gsk`](@ref)). Defaults to `false`.
+([`build_gsk`](@ref)). Defaults to `false`; setting it `true` obliges the strategy to
+define a [`timedep_node_weight`](@ref) method.
 """
 is_time_dependent(::GSKStrategy) = false
 is_time_dependent(::GenLoadGSK) = true
+
+"""
+    timedep_node_weight(strategy::GSKStrategy, params, node; gen, load) -> Float64
+
+Per-node weight of a *time-dependent* strategy at one hour, before the per-zone
+normalization — only the ratios within a zone matter.
+
+`gen` and `load` are the node's active generation and load at the hour the CALLER
+evaluates, already converted to the caller's sign convention. The two call sites differ
+in both:
+
+- [`build_gsk_timeseries`](@ref) reads the FBMC basecase at the TARGET hour `t`, where
+  `netinput_ac` is import-positive, so `gen = load - netinput_ac[node, t]`;
+- the [`GSKRedist`](@ref) redistribution key reads the forecast run's nodal data at the
+  node's REFERENCE hour, where the injection baseline `nd.P` is export-positive, so
+  `gen = P + load`.
+
+A method must therefore derive its weight from the passed `gen`/`load` plus STATIC node
+attributes obtained from `params` (installed capacities, plant sets, zone membership).
+Neither call site passes a timestep, so a time-indexed `params` lookup would silently
+evaluate the wrong hour in at least one of them.
+
+No default weight exists: a strategy with `is_time_dependent(strategy) == true` must
+define a method, otherwise both call sites error.
+"""
+timedep_node_weight(strategy::GSKStrategy, params, node; gen, load) = error(
+    "$(typeof(strategy)) is time-dependent but defines no timedep_node_weight method " *
+    "(required by build_gsk_timeseries and the GSKRedist redistribution key).")
+
+timedep_node_weight(::GenLoadGSK, params, node; gen, load) = abs(gen) + abs(load)
 
 # ==================== Weight Computation Dispatch ====================
 
@@ -312,30 +352,38 @@ function _normalize_per_zone(weights::Vector{Float64}, node_to_zone::Vector{Int}
 end
 
 """
-    build_gsk_timeseries(params, strategy::GenLoadGSK, netinput_ac, T;
+    build_gsk_timeseries(params, strategy::GSKStrategy, netinput_ac, T;
                          node_order=nothing, zone_order=nothing, normalize_empty=:zero)
 
 Build one GSK matrix per timestep from the FBMC basecase, returned as a
-`DenseAxisArray` of size n×z×|T| indexed by (node, zone, t).
+`DenseAxisArray` of size n×z×|T| indexed by (node, zone, t). `strategy` must be
+time-dependent (`is_time_dependent`); a static strategy has no per-timestep meaning and
+is rejected instead of silently returning |T| identical matrices — use
+[`build_gsk`](@ref) for those.
 
-Per node `i` and timestep `t` the weight is `|gen| + |load|` with
+Per node `i` and timestep `t` the weight is
+[`timedep_node_weight`](@ref)`(strategy, params, i; gen, load)` with
 `load = nodal_load[i][t]` (0 if the node has no load profile) and
 `gen = load - netinput_ac[i, t]` (active generation recovered from the basecase
 nodal net injection; `netinput_ac` is **import-positive**, i.e.
-`netinput = load + charge - gen`, so storage charge is absorbed into `gen` —
-harmless under the absolute value). Weights are normalized per zone and timestep, so every
-zone column sums to 1 for each `t` (empty zones follow `normalize_empty`, see
-[`build_gsk`](@ref)).
+`netinput = load + charge - gen`, so storage charge is absorbed into `gen`).
+[`GenLoadGSK`](@ref) — the only time-dependent strategy shipped — turns that into
+`|gen| + |load|`, which is where the absorbed charge becomes harmless. Weights are
+normalized per zone and timestep, so every zone column sums to 1 for each `t` (empty
+zones follow `normalize_empty`, see [`build_gsk`](@ref)).
 
 # Arguments
 - `netinput_ac`: DenseAxisArray (node × time) of AC nodal net injections from the
   basecase (`TwoDayAhead` optimization or [`build_refday_basecase`](@ref)).
 - `T`: timesteps to build GSKs for (must be covered by `netinput_ac`).
 """
-function build_gsk_timeseries(params, strategy::GenLoadGSK, netinput_ac, T;
+function build_gsk_timeseries(params, strategy::GSKStrategy, netinput_ac, T;
                               node_order::Union{Nothing,AbstractVector}=nothing,
                               zone_order::Union{Nothing,AbstractVector}=nothing,
                               normalize_empty::Symbol=:zero)
+    is_time_dependent(strategy) || error(
+        "build_gsk_timeseries: $(typeof(strategy)) is not time-dependent, a per-timestep " *
+        "GSK has no meaning for it. Use build_gsk(params, strategy) instead.")
     nodes, zones, node_to_zone = _gsk_orderings(params, node_order, zone_order)
     n, z = length(nodes), length(zones)
     times = collect(T)
@@ -350,9 +398,11 @@ function build_gsk_timeseries(params, strategy::GenLoadGSK, netinput_ac, T;
             # positive: netinput = load + charge - gen, see the nodal balance in
             # energy_balances.jl and the NP negation in calc_ram), so generation
             # is recovered as load - netinput (storage charge is absorbed into
-            # gen; the abs() below makes that harmless for the weight).
+            # gen). GSKRedist passes the same pair from an export-positive
+            # baseline — the strategy only ever sees gen/load, never the sign
+            # convention they came from.
             gen = load - netinput_ac[nlabel, t]
-            weights[i] = abs(gen) + abs(load)
+            weights[i] = timedep_node_weight(strategy, params, nlabel; gen = gen, load = load)
         end
         G_data[:, :, k] = _normalize_per_zone(weights, node_to_zone, z, normalize_empty)
     end

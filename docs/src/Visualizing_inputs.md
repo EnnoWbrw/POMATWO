@@ -9,10 +9,15 @@ Plots a simple network map of an energy system using line and node geographical 
  **Arguments**
 - `data`: A dictionary containing file paths for required network data tables (see section [Input Data Load](@ref))
 
+ **Keyword arguments**
+- `map_axis`: (default `true`) map-axis styling — `true`, `false` for a bare axis, or a `NamedTuple` such as `(scalebar = false,)`. See [Map axes](@ref).
+
  **Plot Details**
 - *AC lines* are drawn as solid black lines.
 - *DC lines* are drawn as dashed black lines.
 - *Nodes* are plotted as black points.
+- The axis is a map axis: degree ticks, `Longitude`/`Latitude` labels, a kilometre scale bar and a north arrow — see [Map axes](@ref) for the CRS statement the figure caption needs.
+- If every node in the file sits on `lon = lat = 0`, the nodes collapse onto the mercator origin and none of the map decorations are drawn.
 
 **Returns**
 - `fig`: The Makie figure object containing the network plot.

@@ -651,10 +651,36 @@ end
 #############################################
 
 
+# Load availability data from DataFrame into Parameters structure (Level 1)
+#
+# Wide format: one column per plant `index`, one row per time step. An optional leading
+# time column ("Hour" / "index" / "Time") is skipped. Column names that do not match a
+# plant in `params.sets.P` are reported as errors and are NOT written to `params.avail`.
 function add_avail!(params::Parameters, df_avail::AbstractDataFrame, report::DataReport, location::String="availability data")
-    for col in pairs(eachcol(df_avail))
-        params.avail[string(col[1])] = HourlyProfile(col[2])
+    if ncol(df_avail) == 0
+        add_warning!(report, "empty_availability_data", "Availability data contains no plant columns", location)
+        return
     end
+
+    s = names(df_avail)[1] in ["Hour", "index", "Time"] ? 2 : 1
+
+    if s > ncol(df_avail)
+        add_warning!(report, "empty_availability_data", "Availability data contains no plant columns", location)
+        return
+    end
+
+    loaded_plants = 0
+    for col in pairs(eachcol(df_avail[!, s:end]))
+        p = string(col[1])
+        if !(p in params.sets.P)
+            add_error!(report, "unknown_plant_in_availability", "Plant '" * p * "' appears in availability data but is not defined in plants set", location)
+            continue
+        end
+        params.avail[p] = HourlyProfile(Vector(col[2]))
+        loaded_plants += 1
+    end
+
+    add_note!(report, "data_summary", "Loaded availability data for $loaded_plants plants", location)
 end
 
 # Wrapper function to load availability data from file path into DataFrames structure (Level 2) and pass it to Level 1 function
@@ -672,7 +698,6 @@ function add_avail!(params::Parameters, path::AbstractString, report::DataReport
             # Call level 1 function (handles directory)
             add_avail!(params, readdir(path, join = true), report, location)
         end
-        add_note!(report, "data_summary", "Loaded availability data", location)
     catch e
         add_error!(report, "file_parsing", "Failed to parse availability data: $(string(e))", location)
     end
@@ -683,7 +708,7 @@ function add_avail!(params::Parameters, files::Vector{<:AbstractString}, report:
     for file in files
         df = read_csv(file)
         # Call level 1 function
-        add_avail!(params, df, report, location)
+        add_avail!(params, df, report, file)
     end
 end
 
@@ -1258,6 +1283,13 @@ function validate_params(params::Parameters, setup::ModelSetup)
             add_error!(report, "timeseries_length_mismatch", "Availability for plant '" * p * "' has length $(len) but TimeHorizon.stop=$(stop_val)", "validate_params")
         elseif prof isa HourlyProfile && len > stop_val
             add_warning!(report, "timeseries_length_excess", "Availability for plant '" * p * "' has length $(len) exceeding TimeHorizon.stop=$(stop_val); excess data will be ignored", "validate_params")
+        end
+    end
+
+    # Availability keys must reference existing plants
+    for p in keys(params.avail)
+        if !(p in params.sets.P)
+            add_error!(report, "unknown_plant_in_availability", "Plant '" * p * "' appears in availability data but is not defined in plants set", "validate_params")
         end
     end
 

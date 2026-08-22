@@ -467,6 +467,19 @@ inside the window can cancel to ≈ 0; that is a real statement about the window
 convention: a positive `LINEFLOW` runs from the line's `line_start` node to its
 `line_end` node (see [`_line_util_matrix`](@ref)).
 
+# Map axis
+Ticks are labelled in degrees (`10°E`, `52°N`) and the axes `Longitude` /
+`Latitude`; both follow the view as you zoom and pan, as do the kilometre scale
+bar and the north arrow. Geometry stays in Web Mercator throughout — state the
+CRS, `WGS 84 / Pseudo-Mercator (EPSG:3857)`, in the figure caption, and note that
+mercator scale is latitude-dependent, so the scale bar is exact only at the
+latitude it is drawn at. The axis **subtitle** carries the live colour and width
+key for the current selection.
+
+A run whose nodes carry no coordinates at all draws every node on the mercator
+origin; none of the map decorations are added there, since labelling a degenerate
+map in degrees is worse than leaving it bare.
+
 # Arguments
 - `results_path`: directory containing the results of a model run, or an
   `AbstractDict` mapping menu labels to already-loaded [`DataFiles`](@ref).
@@ -482,9 +495,20 @@ convention: a positive `LINEFLOW` runs from the line's `line_start` node to its
   Pass `:horizon` to make two figures of the same state directly comparable.
 - `state`: (default `nothing`) initially selected menu entry; `nothing` picks the
   last stage of the pipeline.
-- `background_map`: (default `true`) draw the raster tiles.
+- `background_map`: (default `true`) draw the raster tiles. The axis stays a map
+  axis either way — degree ticks, `Longitude` / `Latitude` labels, scale bar and
+  north arrow do not depend on the tiles.
 - `extent`: (default `nothing`) map window; `nothing` fits it to the node
   coordinates.
+- `map_axis`: (default `true`) map-axis styling. `true` for degree ticks,
+  `Longitude` / `Latitude` labels, a scale bar and a north arrow; `false` for a
+  bare axis in raw Web Mercator metres; or a `NamedTuple` overriding individual
+  settings, e.g. `map_axis = (scalebar = false,)` or
+  `(north_arrow_position = :lt,)`. Accepted fields: `scalebar`, `north_arrow`,
+  `projection_note`, `scalebar_position`, `north_arrow_position`. Ignored on a run
+  whose nodes carry no coordinates. Note that `projection_note = true` puts the
+  CRS in the subtitle, which this plot then overwrites with its live colour key on
+  the next slider move.
 - `show_redisp`: (default `true`) enable the redispatch node markers.
 - `redisp_ref`: (default `nothing`) pin the marker reference magnitude in MWh
   instead of taking the largest value in the window — use it to make two figures
@@ -584,6 +608,7 @@ function _plot_line_utils_interactive(
     max_markersize = 40.0,
     min_markersize = 2.5,
     zero_tol = 1e-6,
+    map_axis = true,
 )
     isempty(state_names) && error("No market state with a LINEFLOW table found.")
     mode in (:avg, :hours, :flowsum) ||
@@ -602,6 +627,13 @@ function _plot_line_utils_interactive(
     isempty(line_from_to) && error(
         "No line has usable node coordinates — nothing to draw. Check the lon/lat " *
         "columns of the node input file.")
+
+    # That guard is NOT a geographic test. `_line_endpoints_from_*` place every node that
+    # HAS a coordinate entry, sentinel `[0.0, 0.0]` included, so an all-sentinel run yields
+    # a fully populated `line_from_to` of zero-length segments at the mercator origin and
+    # never trips it. Degree ticks, a scale bar and a north arrow over that would be a
+    # confident mislabelling of a degenerate map, so they are gated on a real check.
+    geographic = any(n -> _has_coords(node_coords, n), keys(node_coords))
 
     # Fixed drawing order: the segment geometry is built once and never rebuilt,
     # only the per-segment colour values change.
@@ -695,7 +727,9 @@ function _plot_line_utils_interactive(
 
     # --- layout --------------------------------------------------------------
     extent === nothing && (extent = _auto_map_extent(node_coords))
-    fig, ax = create_lineplot_layout(figsize; background_map = background_map, extent = extent)
+    fig, ax = create_lineplot_layout(figsize; background_map = background_map,
+                                     extent = extent, geographic = geographic,
+                                     map_axis = map_axis)
 
     crange = Observable((0.0f0, 1.0f0))
     ac_vals = Observable(zeros(Float32, 2 * length(ac_idx)))
@@ -998,7 +1032,10 @@ function _plot_line_utils_interactive(
             (0.0f0, Float32(cmax))
         end
 
-        ax.xlabel = (if ishours
+        # Subtitle, not `ax.xlabel`: this is a map axis and its x label now carries
+        # "Longitude". The subtitle is the one axis slot that is both free here and wide
+        # enough for the two-line key.
+        ax.subtitle = (if ishours
             "Line colour: timesteps with utilization ≥ $(round(Int, 100 * thr)) % in the selected window"
         elseif isflowsum
             "Line colour: total |flow| in the selected window (MWh), scale 0–$(round(peak, digits = 2))"

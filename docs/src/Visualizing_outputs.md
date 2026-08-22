@@ -1,5 +1,48 @@
 # Visualizing Output Data
 POMATWO supports different visualizations to analyze the model results. 
+
+## Map axes
+Every network map in the plotting extension — `create_lineplot`, `plot_network`, `plot_capacity_network`, `plot_line_utils_interactive` and `plot_shift_map_interactive` — is drawn in Web Mercator, the projection Tyler's raster tiles exist in, and shares one axis style:
+
+- Ticks are labelled in **degrees** (`10°E`, `5.5°W`, `52°N`), not in projected metres, and the axes are labelled `Longitude` and `Latitude`.
+- Each map carries a **kilometre scale bar** and a **north arrow**. On the interactive maps both follow zoom and pan, as do the degree ticks.
+- The projection is **not** written on the figure by default, so that the axis subtitle stays free for scenario text. State the CRS in the figure caption instead: **`WGS 84 / Pseudo-Mercator (EPSG:3857)`** — or pass `map_axis = (projection_note = true,)` to put it in the subtitle.
+- Mercator scale is **latitude-dependent**. The scale bar is computed for the centre latitude of the current view, so it is exact only at that latitude; across a north–south extent of several hundred kilometres read it as an approximation. (North is up everywhere in Mercator, so the north arrow needs no such caveat.)
+- Turning the basemap off (`background_map = false`) removes only the raster tiles — the axis stays geographic and keeps all of the above.
+- A network whose nodes carry **no coordinates at all** gets none of the decorations — degrees, a scale bar and a north arrow would each be a fabrication there. `plot_capacity_network` and `plot_shift_map_interactive` additionally lay the nodes out on a circle and note the fallback in the axis subtitle; `create_lineplot`, `plot_network` and `plot_line_utils_interactive` have no such fallback and draw every node on the mercator origin, so for them the suppressed decorations are the only signal.
+
+### Controlling the styling: the `map_axis` keyword
+Every entry point that produces a map (`create_lineplot`, `plot_network`, `plot_capacity_network`, `plot_line_utils_interactive`, `plot_shift_map_interactive`) takes an optional `map_axis` keyword and forwards it unchanged:
+
+```julia
+map_axis = true                          # default — full styling
+map_axis = false                         # bare axis: raw Web Mercator metre ticks, no labels,
+                                         # no scale bar, no north arrow
+map_axis = (scalebar = false,)           # styling minus the bar
+map_axis = (projection_note = true,)     # add the CRS as the axis subtitle
+map_axis = (north_arrow_position = :lt,) # relocate the arrow
+```
+
+A `NamedTuple` is splatted into the internal styling function, so its five fields are all reachable without every signature growing five keywords:
+
+| field | default | meaning |
+|---|---|---|
+| `scalebar` | `true` | draw the kilometre scale bar |
+| `north_arrow` | `true` | draw the north arrow |
+| `projection_note` | `false` | put `WGS 84 / Pseudo-Mercator (EPSG:3857)` in the axis subtitle |
+| `scalebar_position` | `:rb` | corner of the bar: `:rb`, `:lb`, `:rt`, `:lt` |
+| `north_arrow_position` | `:rt` | corner of the arrow: `:rt`, `:lt`, `:rb`, `:lb` |
+
+Anything that is neither a `Bool` nor a `NamedTuple`, and any unknown `NamedTuple` field, raises an `ArgumentError` naming the accepted values — before a window opens or a tile is fetched.
+
+!!! note "`map_axis` is a request, not an override"
+    Whether the axis is geographic at all is decided by the data, not by this keyword. On a dataset whose nodes carry no coordinates, degrees, a scale bar and a north arrow would every one of them be a fabrication, so **`map_axis = true` still draws nothing there**. The keyword can only ever subtract from, or reconfigure, styling that the data has already earned.
+
+Two interactions worth knowing:
+
+- `projection_note = true` writes the axis subtitle. In `plot_line_utils_interactive` the subtitle is also the live colour/width key, which is rewritten on every slider move — so the CRS note is overwritten there almost immediately. Put the CRS in the caption for that plot.
+- `plot_capacity_network` and `plot_shift_map_interactive` use the subtitle for their no-coordinates note, but only on the fallback layout, which is never styled anyway.
+
 ## Interactive Plots
 
 ### `plot_market_interactive(results; time_horizon=nothing, scalefactor=1/1000, kind=:DA)`
@@ -97,8 +140,9 @@ Interactive geographical map of transmission line utilization — the interactiv
 - `mode`: (default `:avg`) Initial aggregation mode, `:avg`, `:hours` or `:flowsum`.
 - `scale`: (default `:window`) Initial colour-scale reference of the average mode, `:window` or `:horizon`. Pass `:horizon` to make two figures of the same market state directly comparable.
 - `state`: (default `nothing`) Initially selected market state; `nothing` selects the last stage of the pipeline.
-- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles behind the network.
+- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles behind the network. The axis stays a map axis either way: degree ticks, `Longitude`/`Latitude` labels, scale bar and north arrow do not depend on the tiles.
 - `extent`: (default `nothing`) Map window; `nothing` fits it to the node coordinates.
+- `map_axis`: (default `true`) map-axis styling — `true`, `false` for a bare axis, or a `NamedTuple` such as `(scalebar = false,)`. See [Map axes](@ref).
 - `show_redisp`: (default `true`) Enable the redispatch node markers.
 - `redisp_ref`: (default `nothing`) Pin the marker reference magnitude in MWh instead of using the largest value in the selected window — use it to make two figures comparable.
 - `show_injection`: (default `true`) Enable the net-injection arrows on market states without a `REDISP` table.
@@ -116,7 +160,7 @@ Interactive geographical map of transmission line utilization — the interactiv
     - `"average utilization"`: mean utilization over the window.
     - `"hours ≥ threshold"`: count of timesteps in the window at or above the threshold, colorbar 0 to the window length. This is the mode `create_lineplot` calls `type = "max"`.
     - `"absolute power flow sum"`: total Σ|flow| per line over the window, in MWh, independent of line capacity. Colour scale is always adaptive to the current window — the colour-scale menu below has no effect on this mode, same as the counting mode.
-- *Colour scale menu* (average mode only): what the top of the colorbar means. Utilization above 1 is real rather than an artefact — a zonal day-ahead has no nodal variables, so its flows are reported from the cleared dispatch **without** applying line limits, and the overload is exactly what redispatch then resolves. Both settings floor the maximum at 1, so an uncongested state is not stretched to look loaded, and the active range is printed in the axis label.
+- *Colour scale menu* (average mode only): what the top of the colorbar means. Utilization above 1 is real rather than an artefact — a zonal day-ahead has no nodal variables, so its flows are reported from the cleared dispatch **without** applying line limits, and the overload is exactly what redispatch then resolves. Both settings floor the maximum at 1, so an uncongested state is not stretched to look loaded, and the active range is printed in the axis subtitle, which carries the live colour and width key.
     - `"adaptive (this window)"` (default): 0 to max(1, peak of the current window). Best contrast within a single view, but the scale moves while the slider is dragged, so two windows cannot be compared by colour.
     - `"fixed (whole horizon)"`: 0 to max(1, the largest single-timestep utilization in the state) — the only reference that can never clip, whatever window is selected. The cost is contrast, because a wide window averages peaks away: on a 168 h day-ahead run the worst single hour reaches 4.9 while the worst full-horizon average is 1.6, so the default view uses only the lower part of the colormap under this setting.
 
@@ -169,16 +213,17 @@ Geographical map of the ShareShift impact for one reference-day scenario. The ne
 
 Deltas follow the injection convention of `REFDAY_SHIFT`: for the `load` component a positive delta means a load *decrease*. The `"total"` entry sums the real nodal components (`RES_prestep`, `RES`, `conv`, `load`, `sto`, `balance`); the per-zone `np_relax` residual is not a nodal delta and is reported in the info label only.
 
-If **no** node in the run carries coordinates, the nodes are laid out on a circle instead and the basemap is suppressed (noted in the axis label). Topology, line styling and the node markers all still read correctly; only the geography is gone. While *some* node has coordinates the behaviour is unchanged: a node without them cannot be placed and its deltas are dropped, with a warning naming the total dropped MW.
+If **no** node in the run carries coordinates, the nodes are laid out on a circle instead, the basemap is suppressed and none of the map decorations are drawn (noted in the axis subtitle). Topology, line styling and the node markers all still read correctly; only the geography is gone. While *some* node has coordinates the behaviour is unchanged: a node without them cannot be placed and its deltas are dropped, with a warning naming the total dropped MW.
 
 **Arguments**
 - `results`: A `DataFiles` object of a reference-day run.
 
 **Keyword arguments**
 - `figsize`: (default `(1000, 1100)`)
-- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles.
+- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles. The axis stays a map axis without them.
 - `exclude_dc_lines`: (default `false`)
 - `extent_pad`: (default `0.5`) Padding of the auto-fitted map window, in degrees.
+- `map_axis`: (default `true`) map-axis styling — `true`, `false` for a bare axis, or a `NamedTuple` such as `(scalebar = false,)`. See [Map axes](@ref).
 - `max_markersize`, `min_markersize`, `zero_tol`.
 
 **Interactivity**
@@ -238,6 +283,8 @@ fig = plot_refday_dispatch_interactive(variant, source)
 ### `create_lineplot(results_path, data, type="max", exclude_dc_lines=false, threshhold=0.95)`
 Creates a geographical network map showing transmission line utilization with color-coded lines based on either maximum utilization frequency or average utilization.
 
+`create_lineplot` has two methods. Drop the `data` argument — `create_lineplot(results_path, "avg")` — to read the line geometry from `results.params` instead of from the input CSVs; everything described here applies to both. The `data` argument is untyped, so pass it as a `Dict{Symbol,String}`: a `String` in that position is taken for the `type` of the results-only method.
+
 **Arguments**
 - `results_path`: Path to the directory containing simulation results.
 - `data`: A dictionary containing file paths for required network data tables (see section [Input Data Load](@ref)).
@@ -248,15 +295,16 @@ Creates a geographical network map showing transmission line utilization with co
 - `threshhold`: (optional, default: `0.95`) Utilization threshold (0-1 scale) for `"max"` mode counting.
 
 **Keyword arguments**
-- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles behind the network.
+- `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles behind the network. Turning them off changes nothing about the axis: it stays geographic and keeps its degree ticks, scale bar and north arrow.
 - `extent`: (default `nothing`) Map window as a `Tyler.Extents.Extent`. `nothing` fits it to the node coordinates; result sets whose nodes carry no coordinates fall back to a Germany cutout.
+- `map_axis`: (default `true`) map-axis styling — `true`, `false` for a bare axis, or a `NamedTuple` such as `(scalebar = false,)`. See [Map axes](@ref).
 
 **Plot Details**
 - Lines are colored using the `ColorSchemes.lajolla` colormap.
-- **Max mode**: Colorbar shows the count of hours where line utilization exceeds the threshold.
+- **Max mode**: Colorbar shows the count of hours where line utilization exceeds the threshold. The colorbar carries its own label stating what the colour means.
 - **Avg mode**: Colorbar shows average utilization percentage (0-100%).
 - Network nodes are displayed as black points.
-- Uses geographical coordinates with Web Mercator projection.
+- The axis is a map axis: degree ticks (`10°E`, `52°N`), `Longitude`/`Latitude` labels, a kilometre scale bar and a north arrow — see [Map axes](@ref) for the CRS statement the caption needs.
 - Aggregates over the entire result horizon and reads the composite result view (the latest stage that wrote each table). Use `plot_line_utils_interactive` to select a time window and a specific market state.
 
 **Returns**
@@ -282,6 +330,9 @@ fig = create_lineplot(results_path, datafiles, "max", false, 0.95)
 
 # Visualize lines by average utilization
 fig = create_lineplot(results_path, datafiles, "avg")
+
+# Same plot without the input CSVs: geometry from the results' own parameters
+fig = create_lineplot(results_path, "avg")
 ```
 
 ### `plot_capacity_network(data::Dict{Symbol,String}; kwargs...)`
@@ -291,13 +342,14 @@ built **purely from the input CSVs** — no simulation results are read, so a da
 checked before it is solved.
 
 Line width carries line capacity, DC lines are dashed, and each node carries a stacked bar
-of its installed capacity per plant type with the node index labelled underneath.
+of its installed capacity per plant type, its total labelled above and the node index
+labelled underneath.
 
 **Arguments**
 - `data`: dictionary of input file paths (see section [Input Data Load](@ref)). `:nodes`, `:plants` and `:types` are required; `:lines` and `:dclines` are optional and each is skipped when the key is absent, the file does not exist, or it holds only a header.
 
 **Keyword arguments**
-- `background_map`: (default `true`) draw Tyler/CartoDB raster tiles behind the network. Ignored when the node file carries no coordinates — the circular fallback layout is not geographic and gets no basemap.
+- `background_map`: (default `true`) draw Tyler/CartoDB raster tiles behind the network. Ignored when the node file carries no coordinates — the circular fallback layout is not geographic and gets no basemap. Turning the tiles off on a geographic dataset keeps the map axis: degree ticks, `Longitude`/`Latitude` labels, scale bar and north arrow stay.
 - `extent`: (default `nothing`) map window as a `Tyler.Extents.Extent`. `nothing` fits it to the node coordinates.
 - `figsize`: (default `(1000, 1100)`) figure size in pixels.
 - `exclude_dc_lines`: (default `false`) if `true`, DC lines are not drawn.
@@ -305,15 +357,19 @@ of its installed capacity per plant type with the node index labelled underneath
 - `bar_height_frac`: (default `0.12`) height of the tallest node bar as a fraction of the node bounding box.
 - `bar_width_frac`: (default `0.02`) bar width as a fraction of the node bounding box.
 - `show_node_labels`: (default `true`) print the node index below each node.
+- `show_capacity_labels`: (default `true`) print the total installed capacity above each node's bar. Nodes without capacity get no label.
 - `show_line_labels`: (default `true`) print the line index at each line's midpoint.
-- `label_fontsize`: (default `10`) font size of both label sets, in points.
+- `label_fontsize`: (default `10`) font size of every label set, in points.
+- `map_axis`: (default `true`) map-axis styling — `true`, `false` for a bare axis, or a `NamedTuple` such as `(scalebar = false,)`. See [Map axes](@ref).
 
 **Plot Details**
 - Line width is proportional to the `capacity` column with a floor, so a line of unknown or zero capacity is hairline rather than invisible. AC and DC share one scale: equal capacities are drawn equally thick regardless of line type.
 - Bar height uses one scale across all nodes, so bars are comparable between nodes. Only `g_max` is counted — a storage plant carrying its power in `storage_power` alone contributes nothing.
 - Plant types are stacked in alphabetical order, identically at every node. Colors come from the `color` column of the plant-type file; types without one fall back to a distinguishable palette color.
 - A node with no plants keeps its dot and its label and grows no bar.
-- When the node file has no `lon`/`lat` columns (or every node sits on the `0, 0` sentinel), nodes are laid out on a circle instead and the basemap is suppressed. Topology, line widths, bars and labels all still read correctly; only the geography is gone.
+- The number above a bar is the sum of that bar's segments — the same `g_max` total the bar height encodes. It carries no unit: the axis title already states MW, and repeating it at every node only adds clutter.
+- On a geographic dataset the axis is a map axis: degree ticks, `Longitude`/`Latitude` labels, a kilometre scale bar and a north arrow — see [Map axes](@ref).
+- When the node file has no `lon`/`lat` columns (or every node sits on the `0, 0` sentinel), nodes are laid out on a circle instead, the basemap is suppressed and none of the map decorations are drawn — a subtitle says so. Topology, line widths, bars and labels all still read correctly; only the geography is gone.
 - The axis title states the absolute magnitude of the tallest bar and the widest line, without which neither encoding is readable in absolute terms.
 
 **Returns**

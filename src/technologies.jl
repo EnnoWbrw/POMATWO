@@ -81,7 +81,7 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
     # macro, `sum` over an empty collection throws.
     obj = AffExpr()
     for p in NDISP, t in T
-        add_to_expression!(obj, 50.0, CU[p, t])
+        add_to_expression!(obj, 1.0, CU[p, t])
     end
 
     if !isempty(historical_generation)
@@ -703,7 +703,7 @@ end
 function add_exchange(sr::SubRun, ::Type{FlowBased})
     T = sr.market_state.Time
     @unpack Z, L , DC, N, NTCCCR, FBCCR = sr.modelrun.params.sets
-    @unpack ntc,
+    @unpack ntc, fixed_exchange, 
     dcline_capacity, 
     dc_start, 
     dc_end,

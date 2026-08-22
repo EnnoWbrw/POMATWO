@@ -111,8 +111,9 @@ pretty(match_by_scope(match_frame, cfg_multi.scope, ref.params; kw_multi...))
 
 # -----------------------------------------------------------------------------
 # 6. Shift + basecase assembly — contrast: :zonal vs :nodal resolution
-#    Both close the target zonal net position; :nodal reproduces the target nodal
-#    injection exactly, :zonal keeps the reference-day texture reshaped to the NP.
+#    Both aim at the target zonal net position — up to whatever the bounded physical
+#    levers cannot absorb (traced as np_relax); :nodal aims at the target NODAL
+#    injection, :zonal keeps the reference-day texture reshaped to the NP.
 # -----------------------------------------------------------------------------
 shifts = Dict(
     :zonal => ShareShift(β_conv = 0.5, β_load = 0.5, β_RES = 0.0,

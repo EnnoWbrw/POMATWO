@@ -18,6 +18,9 @@ const _CAP_LINE_LABEL_PAD = 6.0f0
 # Overlap between consecutive segments of a node's stack, as a fraction of the tallest bar.
 const _CAP_STACK_OVERLAP = 0.004
 
+# Pixel distance a node's total-capacity label sits above the top of its stack.
+const _CAP_TOTAL_LABEL_PAD = 4.0f0
+
 "Capacity for the legend key: whole MW without a trailing `.0`, anything else via `_fmt_val`."
 _cap_fmt(x) = isinteger(x) ? string(Int(x)) : _fmt_val(x)
 
@@ -165,7 +168,8 @@ built **purely from the input CSVs** — no simulation results are read, so a da
 checked before it is solved.
 
 Line width carries line capacity, DC lines are dashed, and each node carries a stacked bar
-of its installed capacity per plant type with the node index labelled underneath.
+of its installed capacity per plant type, its total labelled above and the node index
+labelled underneath.
 
 # Arguments
 - `data`: dictionary of input file paths (see section [Input Data Load](@ref)). `:nodes`,
@@ -175,7 +179,8 @@ of its installed capacity per plant type with the node index labelled underneath
 # Keyword arguments
 - `background_map`: (default `true`) draw Tyler/CartoDB raster tiles behind the network.
   Ignored when the node file carries no coordinates — the circular fallback layout is not
-  geographic and gets no basemap.
+  geographic and gets no basemap. Turning the tiles off on a geographic dataset keeps the
+  map axis: degree ticks, `Longitude` / `Latitude` labels, scale bar and north arrow stay.
 - `extent`: (default `nothing`) map window as a `Tyler.Extents.Extent`. `nothing` fits it to
   the node coordinates.
 - `figsize`: (default `(1000, 1100)`) figure size in pixels.
@@ -186,8 +191,17 @@ of its installed capacity per plant type with the node index labelled underneath
   node bounding box.
 - `bar_width_frac`: (default `0.02`) bar width as a fraction of the node bounding box.
 - `show_node_labels`: (default `true`) print the node index below each node.
+- `show_capacity_labels`: (default `true`) print the total installed capacity above each
+  node's bar. Nodes without capacity get no label.
 - `show_line_labels`: (default `true`) print the line index at each line's midpoint.
-- `label_fontsize`: (default `10`) font size of both label sets, in points.
+- `label_fontsize`: (default `10`) font size of every label set, in points.
+- `map_axis`: (default `true`) map-axis styling. `true` for degree ticks, `Longitude` /
+  `Latitude` labels, a scale bar and a north arrow; `false` for a bare axis in raw Web
+  Mercator metres; or a `NamedTuple` to override individual settings, e.g.
+  `map_axis = (scalebar = false,)`, `(projection_note = true,)` (adds the CRS as the
+  subtitle), `(north_arrow_position = :lt,)`. Accepted fields: `scalebar`, `north_arrow`,
+  `projection_note`, `scalebar_position`, `north_arrow_position`. Ignored on a dataset
+  without node coordinates, where none of the decorations mean anything.
 
 # Plot Details
 - Line width is proportional to the `capacity` column with a floor, so a line of unknown or
@@ -200,9 +214,18 @@ of its installed capacity per plant type with the node index labelled underneath
   from the `color` column of the plant-type file; types without one fall back to a
   distinguishable palette colour.
 - A node with no plants keeps its dot and its label and grows no bar.
+- The number above a bar is the sum of that bar's segments — the same `g_max` total the bar
+  height encodes. It carries no unit: the axis title already states MW, and repeating it at
+  every node only adds clutter.
+- On a geographic dataset the axis is a map axis: degree ticks (`10°E`, `52°N`),
+  `Longitude` / `Latitude` labels, a kilometre scale bar and a north arrow. Geometry stays
+  in Web Mercator — state the CRS, `WGS 84 / Pseudo-Mercator (EPSG:3857)`, in the figure
+  caption, and note that mercator scale is latitude-dependent, so the scale bar is exact
+  only at its own latitude.
 - When the node file has no `lon`/`lat` columns (or every node sits on the `0, 0` sentinel),
-  nodes are laid out on a circle instead and the basemap is suppressed. Topology, line
-  widths, bars and labels all still read correctly; only the geography is gone.
+  nodes are laid out on a circle instead, the basemap is suppressed and none of the map
+  decorations are drawn — a subtitle says so. Topology, line widths, bars and labels all
+  still read correctly; only the geography is gone.
 - The axis title states the absolute magnitude of the tallest bar and the widest line,
   without which neither encoding is readable in absolute terms.
 
@@ -238,8 +261,10 @@ function POMATWO.plot_capacity_network(
     bar_height_frac = 0.12,
     bar_width_frac = 0.02,
     show_node_labels::Bool = true,
+    show_capacity_labels::Bool = true,
     show_line_labels::Bool = true,
     label_fontsize = 10,
+    map_axis = true,
 )
     for key in (:nodes, :plants, :types)
         haskey(data, key) || error("`data` is missing the required key :$(key).")
@@ -281,8 +306,10 @@ function POMATWO.plot_capacity_network(
         extent = _auto_map_extent(node_coords)
     end
     fig, ax = use_basemap ?
-        create_lineplot_layout(figsize; background_map = true, extent = extent) :
-        create_lineplot_layout(figsize; background_map = false)
+        create_lineplot_layout(figsize; background_map = true, extent = extent,
+                               geographic = true, map_axis = map_axis) :
+        create_lineplot_layout(figsize; background_map = false, geographic = geographic,
+                               map_axis = map_axis)
 
     # --- lines -------------------------------------------------------------------
     label_pos = Point2f[]
@@ -364,6 +391,24 @@ function POMATWO.plot_capacity_network(
         end
     end
 
+    # Total above the stack. `node_total[n] * hscale` is exactly the top of node `n`'s bar:
+    # the seam overlap only extends segments downward, so every top stays proportional to
+    # capacity. Pixel `offset`, so the gap stays constant at every zoom level.
+    if show_capacity_labels && hscale > 0
+        total_pos = Point2f[]
+        total_txt = String[]
+        for n in nodes
+            tot = get(node_total, n, 0.0)
+            tot > 0 || continue
+            p = node_xy[n]
+            push!(total_pos, Point2f(p[1], p[2] + Float32(tot * hscale)))
+            push!(total_txt, _cap_fmt(tot))
+        end
+        isempty(total_pos) || text!(ax, total_pos; text = total_txt,
+            align = (:center, :bottom), offset = (0, _CAP_TOTAL_LABEL_PAD),
+            fontsize = label_fontsize, color = _CAP_LABEL_COLOR)
+    end
+
     scatter!(ax, node_points; color = :black, markersize = 5)
 
     if show_node_labels
@@ -385,21 +430,20 @@ function POMATWO.plot_capacity_network(
     group_labels = Vector{String}[]
     titles = String[]
     isempty(bar_handles) || (push!(groups, bar_handles);
-        push!(group_labels, bar_labels); push!(titles, "installed capacity"))
+        push!(group_labels, bar_labels); push!(titles, "installed capacity [MW]"))
     isempty(line_handles) || (push!(groups, line_handles);
         push!(group_labels, line_labels); push!(titles, "network"))
     isempty(groups) || Legend(fig[1, 2], groups, group_labels, titles)
 
-    # Bar height and line width are both relative encodings; without their absolute
-    # reference neither is readable. This sits in the axis title rather than next to the
-    # legend because a `Label` in the legend's grid cell gets pushed to the bottom of the
-    # figure by the row sizing, far away from the thing it explains.
-    key = String[]
-    maxcap > 0 && push!(key, "tallest bar = $(_cap_fmt(maxcap)) MW")
-    capmax > 0 && push!(key, "widest line = $(_cap_fmt(capmax)) MW")
-    isempty(key) || (ax.title = join(key, "   ·   "))
+    if !show_capacity_labels
+        # key = String[]
+        # maxcap > 0 && push!(key, "tallest bar = $(_cap_fmt(maxcap)) MW")
+        # capmax > 0 && push!(key, "widest line = $(_cap_fmt(capmax)) MW")
+        # isempty(key) || (ax.title = join(key, "   ·   "))
+    else 
+    end
 
-    geographic || (ax.xlabel = _NO_COORDS_NOTE)
+    geographic || (ax.subtitle = _NO_COORDS_NOTE)
 
     return fig
 end

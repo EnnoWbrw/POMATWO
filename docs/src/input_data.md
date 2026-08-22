@@ -282,6 +282,8 @@ A path to a **directory** is also accepted; all CSV files in the directory are l
 
 !!! note "Index Linking"
     Column names must match plant indices from [File Structure `:plants`](@ref).
+    A column naming a plant that is not defined in the plants data is not loaded and
+    is reported as an error, which aborts `load_data`.
 
 ---
 

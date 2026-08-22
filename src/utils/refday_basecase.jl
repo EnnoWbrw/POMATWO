@@ -12,10 +12,10 @@
 # shares β; each component's zonal amount is spread to nodes by a redistribution
 # key, clipped to physical headroom. There is no phantom exchange slack: a gap
 # no physical lever can absorb is left relaxed toward the reference (recorded as
-# `np_relax`). A final pass then forces the whole basecase to be globally
-# BALANCED (Σ_n injection = 0, production = consumption) by adjusting conventional
-# generation (load as a last resort), so the net-injection basecase is physically
-# consistent for the PTDF/FBMC flow computation.
+# `np_relax`). OPTIONALLY (`enforce_balance`, off by default) a final pass then
+# forces the whole basecase to be globally BALANCED (Σ_n injection = 0,
+# production = consumption) by adjusting conventional generation (load as a last
+# resort); without it the assembled basecase need not satisfy Σ_n injection = 0.
 #
 # SIGN CONVENTION: the whole shift pipeline (baseline P, shares, bounds,
 # REFDAY_SHIFT trace deltas) works EXPORT-positive (feed-in: positive =
@@ -51,24 +51,55 @@ zone's nodes. Concrete: [`GSKRedist`](@ref), [`RefPropRedist`](@ref),
 """
 abstract type RedistKey end
 
-"Spread a zonal correction to nodes using an existing [`GSKStrategy`](@ref)."
+"""
+Spread a zonal correction to nodes using an existing [`GSKStrategy`](@ref).
+
+Static strategies are time-independent — the plain GSK column. A *time-dependent*
+strategy is a reference-day-texture key: the weight comes from its own
+`timedep_node_weight` method and is evaluated per node at that node's REFERENCE hour,
+not at the target hour. [`GenLoadGSK`](@ref), for example, returns `|gen| + |load|`
+there.
+"""
 struct GSKRedist <: RedistKey
     strategy::GSKStrategy
 end
 GSKRedist() = GSKRedist(FlatGSK())
 
-"Spread proportional to each node's net-injection magnitude (preserves the spatial pattern)."
+"""
+Spread each lever proportional to the reference day's own texture of THAT component,
+evaluated at the node's REFERENCE hour (the pattern being preserved is the reference
+day's, which is the whole point of the key). Unlike the other keys this one is
+lever-dependent — the gap cascade rebuilds it per component:
+
+| lever | weight of node `n` at its reference hour `r` |
+|---|---|
+| `:RES` | reference-day renewable generation `RES(n, r)` |
+| `:conv` | reference-day conventional generation `CONV(n, r)` |
+| `:load` | reference-day load `LOAD(n, r)` |
+| `:sto` | *installed* storage power `gmax_sto_dis(n) + gmax_sto_chg(n)` |
+
+Storage is the exception because the reference day's storage dispatch is frequently zero
+at every node of a zone, which would degenerate to the flat fallback exactly when the
+`:sto` lever is reached; installed power is the only always-present measure of which
+node can actually move storage. A zone whose weights sum to zero (no load anywhere at
+the reference hour, no renewables at night) still falls back to a flat split.
+"""
 struct RefPropRedist <: RedistKey end
 
-"Spread proportional to nodal load share."
+"""
+Spread proportional to nodal load share.
+
+Evaluated at the TARGET hour: nodal load is a target-day forecast quantity, known
+for the delivery day, so this key deliberately does not read the reference day.
+"""
 struct LoadPropRedist <: RedistKey end
 
 """
 Spread by random positive weights, reproducible for a fixed `seed`.
 
-Weights are drawn per (zone, time) from an RNG seeded by `seed` combined with
-the zone's nodes and the timestep, so a run is deterministic and independent of
-node iteration order.
+Weights are drawn per (zone, target time) from an RNG seeded by `seed` combined
+with the zone's nodes and the TARGET timestep, so a run is deterministic and
+independent of node iteration order.
 """
 struct RandomRedist <: RedistKey
     seed::UInt64
@@ -89,16 +120,25 @@ Apportion the net-position gap among components by user shares.
 - `resolution`: `:zonal` (gap per zone, spread by `redist`) or `:nodal` (gap per
   node; the output nodal net injection then equals the target's nodal injection
   where physically reachable).
-- `res_prestep`: if `true`, hard-set RES to the target first (nodal direct, or
-  zonal-scaled preserving reference intra-zone shares), then apportion the rest.
+- `res_prestep`: if `true`, hard-set every node's RES to the target hour's nodal
+  RES first, then apportion the rest. At BOTH resolutions this is the per-node
+  hard-set: after the pre-step the intra-zone RES distribution *is* the target
+  day's (with the target day's zonal total), mirroring the D2CF step of inserting
+  the delivery-day RES forecast into the reference snapshot.
 - `redist`: nodal redistribution key for zonal corrections.
 - `fallback_order`: cascade order for remainders when a component saturates
   (physical levers only). A zone's gap that no physical lever can absorb is left
   relaxed toward reference and recorded as `"np_relax"`.
-- `enforce_balance`: if `true` (default), a final pass forces the whole basecase to
-  be globally balanced (`Σ_n injection = 0`, i.e. production = consumption) by
-  adjusting conventional generation (load as a last resort). See
-  `_enforce_global_balance!`.
+- `enforce_balance`: **opt-in** (default `false`). When `true`, a final pass forces
+  the whole basecase to be globally balanced (`Σ_n injection = 0`, i.e.
+  production = consumption) by adjusting conventional generation (load as a last
+  resort). Left off, the assembled basecase carries whatever imbalance the
+  reference day and the relaxed gaps leave behind. See `_enforce_global_balance!`.
+- `load_shift_share::Float64 = 0.2`: γ, the cap on the load lever. The load
+  deviation of a node accumulated over the whole construction (cascade *and*
+  balance pass) stays within `[-γ·load_max, min(γ·load_min, load_ref)]`, with
+  `load_max`/`load_min` the node's extreme loads over the forecast horizon —
+  load can neither grow without limit nor be cut to zero. See `_load_bounds`.
 """
 Base.@kwdef struct ShareShift <: ShiftMethod
     β_RES::Float64  = 0.0
@@ -108,15 +148,18 @@ Base.@kwdef struct ShareShift <: ShiftMethod
     res_prestep::Bool  = false
     redist::RedistKey  = GSKRedist()
     fallback_order::Vector{Symbol} = [:conv, :sto, :load]
-    enforce_balance::Bool = true
+    enforce_balance::Bool = false
+    load_shift_share::Float64 = 0.2
 end
 
-"Error on invalid share sum or resolution; warn on double-moved RES."
+"Error on invalid share sum, resolution or load-lever share; warn on double-moved RES."
 function validate_shares(m::ShareShift)
     s = m.β_RES + m.β_conv + m.β_load
     s <= 1.0 + 1e-6 || error("Shift shares sum to $s, must be ≤ 1.0 (leftover fraction is np_relax)")
     (m.res_prestep && m.β_RES > 0) && @warn "res_prestep=true with β_RES>0: RES moved twice (hard-set, then balancer)"
     m.resolution in (:zonal, :nodal) || error("resolution must be :zonal or :nodal, got :$(m.resolution)")
+    m.load_shift_share >= 0.0 ||
+        error("load_shift_share must be ≥ 0 (got $(m.load_shift_share))")
     return nothing
 end
 
@@ -341,16 +384,26 @@ end
     precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayAheadSource();
                      res_tags) -> NamedTuple
 
-Precompute the per-(node, time) lookups used by the shift: RES and conventional
-generation, nodal load, AC net-injection baseline (`P`, **export-positive** —
-see `_ac_injection_baseline`), per-(node, time) availability-weighted conv/RES
-generation caps (`gmax_conv`/`gmax_res`, via `calc_gmax`), per-node storage
-discharge/charge power caps (`gmax_sto_dis`/`gmax_sto_chg`), and zone maps. All
-state-dependent data (generation and injection baseline) come from the SAME
-source MarketState selected by `state`. Storage dispatch is also folded into the
-net-injection baseline; the storage power caps additionally make storage a
-bidirectional shift lever (installed power assumed available every timestep — a
-rough approximation ignoring state-of-charge).
+Precompute the per-(node, time) lookups used by the shift. All state-dependent
+data come from the SAME source MarketState selected by `state`:
+
+- `RES`, `CONV`, `STO` — nodal generation by class from the state's generation
+  table (`_source_gen`: `GEN` for the day-ahead / TwoDayAhead states,
+  `GEN_REDISP` for redispatch); `STO` is the reference day's **net storage
+  injection** (discharge − charge), the charging half read from the state's
+  charging table (`_source_charge`: `CHARGE`, resp. `CHARGE_REDISP`).
+- `LOAD` — nodal load of the source results' `Parameters` (`_nodal_load_at`), plus
+  its per-node extremes `load_max` / `load_min` over that forecast horizon (the
+  load lever's cap, see `_load_bounds`).
+- `P` — AC net-injection baseline, **export-positive** (see
+  `_ac_injection_baseline`), read from the state's `NETINPUT` table. Reference-day
+  storage dispatch is part of it, which is why the storage LEVER is incremental to
+  `STO` (see `_comp_bounds`).
+- `gmax_conv` / `gmax_res` — per-(node, time) availability-weighted generation
+  caps (via `calc_gmax`); `gmax_sto_dis` / `gmax_sto_chg` — per-node installed
+  storage power, assumed available at every timestep (a rough approximation
+  ignoring state-of-charge), which makes storage a bidirectional shift lever.
+- `nodes`, `times`, `nodes_in_zone` — index sets and the zone map.
 """
 function precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayAheadSource();
                           res_tags = ["solar", "wind"])
@@ -365,12 +418,28 @@ function precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayA
 
     RES  = Dict{Tuple{String,Int},Float64}()
     CONV = Dict{Tuple{String,Int},Float64}()
+    STO  = Dict{Tuple{String,Int},Float64}()
     for row in eachrow(gen)
-        key = (row.node, row.Time)
+        key = (row.node, Int(row.Time))
         if row.cls == :res
             RES[key]  = get(RES,  key, 0.0) + Float64(row.GEN)
         elseif row.cls == :conv
             CONV[key] = get(CONV, key, 0.0) + Float64(row.GEN)
+        elseif row.cls == :sto
+            STO[key]  = get(STO,  key, 0.0) + Float64(row.GEN)      # discharge
+        end
+    end
+
+    # Charging half of the reference day's net storage injection. The table is
+    # storage-only (only `add_storage` writes CHARGE / CHARGE_REDISP), so every row
+    # with a known node belongs in STO.
+    chg = _source_charge(state, results)
+    if !isempty(chg)
+        for row in eachrow(chg)
+            n = get(params.plant2node, row.index, "")
+            isempty(n) && continue
+            key = (n, Int(row.Time))
+            STO[key] = get(STO, key, 0.0) - Float64(coalesce(row.CHARGE, 0.0))
         end
     end
 
@@ -405,10 +474,14 @@ function precompute_nodal(results::DataFiles, state::RefdaySourceState = TwoDayA
     for n in nodes, t in times
         LOAD[(n, t)] = _nodal_load_at(params, n, t)
     end
+    # per-node load envelope over the whole horizon — the load lever's cap (F4)
+    load_max = Dict(n => isempty(times) ? 0.0 : maximum(LOAD[(n, t)] for t in times) for n in nodes)
+    load_min = Dict(n => isempty(times) ? 0.0 : minimum(LOAD[(n, t)] for t in times) for n in nodes)
 
     nodes_in_zone = Dict(z => sort(collect(v)) for (z, v) in params.nodes_in_zone)
 
-    return (; nodes, times, RES, CONV, gmax_conv, gmax_res, gmax_sto_dis, gmax_sto_chg, P, LOAD, nodes_in_zone)
+    return (; nodes, times, RES, CONV, STO, gmax_conv, gmax_res, gmax_sto_dis, gmax_sto_chg,
+              P, LOAD, load_max, load_min, nodes_in_zone)
 end
 
 # ---------------------------------------------------------------------------
@@ -417,56 +490,102 @@ end
 
 # Per-key nodal weight rule (dispatched on RedistKey). Add a new key by
 # defining another `_key_weights` method — no edit to `_redist_weights` needed.
-_key_weights(::LoadPropRedist, nd, params, znodes, t; gsk = nothing) =
-    Dict(n => get(nd.LOAD, (n, t), 0.0) for n in znodes)
+#
+# Every method receives BOTH the target hour `t_tgt` and `ref_of_node`, the
+# per-node reference hour of this target hour, and must read the one the key's
+# meaning calls for: a key that describes the REFERENCE day's texture (RefProp,
+# time-dependent GSK) evaluates at `ref_of_node[n]`, a key that describes the
+# TARGET day (LoadProp — the delivery day's nodal load forecast) at `t_tgt`.
+#
+# `comp` is the physical lever the weights are about to spread (`:RES`, `:conv`,
+# `:load`, `:sto`), or `nothing` outside the gap cascade. Only RefProp uses it —
+# every other key is lever-blind and must accept and ignore it, since
+# `shift_single` passes it unconditionally.
+"Reference hour of node `n`, falling back to the target hour when unmapped."
+@inline _ref_hour(ref_of_node, n, t_tgt) = get(ref_of_node, n, t_tgt)
 
-_key_weights(::RefPropRedist, nd, params, znodes, t; gsk = nothing) =
-    Dict(n => abs(get(nd.P, (n, t), 0.0)) for n in znodes)
+_key_weights(::LoadPropRedist, nd, params, znodes, t_tgt, ref_of_node;
+             gsk = nothing, comp = nothing) =
+    Dict(n => get(nd.LOAD, (n, t_tgt), 0.0) for n in znodes)   # target-day key
 
-function _key_weights(key::GSKRedist, nd, params, znodes, t; gsk = nothing)
+function _key_weights(::RefPropRedist, nd, params, znodes, t_tgt, ref_of_node;
+                      gsk = nothing, comp = nothing)
+    # Per-lever reference-day texture, read at each node's own REFERENCE hour.
+    # :sto is the exception — reference-day storage dispatch is zero across whole
+    # zones often enough that a ref-day quantity would collapse into the flat
+    # fallback precisely when the :sto lever is reached, so installed power
+    # (time-independent) says which node can move storage at all.
+    comp === :sto && return Dict(n => nd.gmax_sto_dis[n] + nd.gmax_sto_chg[n] for n in znodes)
+    src = comp === :RES  ? nd.RES  :
+          comp === :conv ? nd.CONV :
+          comp === :load ? nd.LOAD :
+          error("RefPropRedist has no weight for shift component :$comp — it is a " *
+                "per-component key and needs one of :RES, :conv, :load, :sto " *
+                "(comp === nothing means it was called outside the gap cascade).")
+    return Dict(n => get(src, (n, _ref_hour(ref_of_node, n, t_tgt)), 0.0) for n in znodes)
+end
+
+function _key_weights(key::GSKRedist, nd, params, znodes, t_tgt, ref_of_node;
+                      gsk = nothing, comp = nothing)
     if is_time_dependent(key.strategy)
-        # Time-dependent strategies (e.g. GenLoadGSK): build the GLSK weight
-        # |gen| + |load| at t from the forecast run's nodal data. nd.P is the
-        # EXPORT-positive net-injection baseline (see _ac_injection_baseline),
-        # so gen = P + load (storage charge absorbed into gen, harmless under
-        # abs) — the same weight as build_gsk_timeseries, which recovers
+        # Time-dependent strategies (e.g. GenLoadGSK): let the strategy build its
+        # own weight from the forecast run's nodal data at the node's REFERENCE
+        # hour (this is reference-day texture, like RefPropRedist). nd.P is the
+        # EXPORT-positive net-injection baseline (see _ac_injection_baseline), so
+        # gen = P + load — build_gsk_timeseries feeds the same primitive
         # gen = load − netinput_ac from the import-positive persisted table.
         return Dict(n => begin
-            load = get(nd.LOAD, (n, t), 0.0)
-            gen = get(nd.P, (n, t), 0.0) + load
-            abs(gen) + abs(load)
+            r = _ref_hour(ref_of_node, n, t_tgt)
+            load = get(nd.LOAD, (n, r), 0.0)
+            gen = get(nd.P, (n, r), 0.0) + load
+            timedep_node_weight(key.strategy, params, n; gen = gen, load = load)
         end for n in znodes)
     end
     G = gsk === nothing ? build_gsk(params, key.strategy; normalize_empty = :flat) : gsk
     z = params.node2zone[first(znodes)]
-    return Dict(n => G[n, z] for n in znodes)
+    return Dict(n => G[n, z] for n in znodes)   # static strategy: time-independent
 end
 
-function _key_weights(key::RandomRedist, nd, params, znodes, t; gsk = nothing)
-    # per-(zone, time) seed so weights are reproducible and order-independent
-    rng = Random.Xoshiro(hash((key.seed, sort(znodes), t)))
+function _key_weights(key::RandomRedist, nd, params, znodes, t_tgt, ref_of_node;
+                      gsk = nothing, comp = nothing)
+    # per-(zone, target time) seed so weights are reproducible and order-independent
+    # across levers as well
+    rng = Random.Xoshiro(hash((key.seed, sort(znodes), t_tgt)))
     return Dict(n => rand(rng) for n in sort(znodes))
 end
 
-"Nodal redistribution weights within a zone for the chosen key (flat fallback)."
-function _redist_weights(key::RedistKey, nd, params, znodes, t; gsk = nothing)
-    w = _key_weights(key, nd, params, znodes, t; gsk = gsk)
+"""
+Nodal redistribution weights within a zone for the chosen key (flat fallback when
+they sum to zero).
+
+`comp` names the physical lever being spread (`:RES`, `:conv`, `:load`, `:sto`); pass it
+whenever one is known, as [`RefPropRedist`](@ref) has no lever-blind weight and errors
+without it. The other keys ignore it.
+"""
+function _redist_weights(key::RedistKey, nd, params, znodes, t_tgt, ref_of_node;
+                         gsk = nothing, comp = nothing)
+    w = _key_weights(key, nd, params, znodes, t_tgt, ref_of_node; gsk = gsk, comp = comp)
     sum(values(w)) <= 0 && (w = Dict(n => 1.0 for n in znodes))
     return w
 end
 
 """
-    _waterfill(A, znodes, w, lo, hi) -> (applied::Dict, remainder)
+    _waterfill(A, znodes, w, lo, hi) -> (applied::Dict, remainder, reallocated)
 
 Distribute amount `A` over `znodes` proportional to weights `w`, clipped to
 per-node bounds `[lo, hi]` (bounds may be ±Inf). Redistributes the clipped
-remainder among nodes that still have room. Returns the applied per-node deltas
-and any unabsorbable remainder.
+remainder among nodes that still have room. Returns the applied per-node deltas,
+any unabsorbable remainder, and `reallocated` — how much of the FIRST pass's
+unclipped, purely key-proportional allocation `A·w[n]/Σw` had to be re-spread
+because it hit a bound (`Σ_n max(0, |want_n| − |applied_n|)`). A positive
+`reallocated` means the realized spatial split departs from the redistribution
+key; it is reported per zone and lever in the `REFDAY_DIAG` trace table.
 """
 function _waterfill(A, znodes, w, lo, hi; iters = 50)
     applied = Dict(n => 0.0 for n in znodes)
     remaining = A
-    for _ in 1:iters
+    reallocated = 0.0
+    for it in 1:iters
         abs(remaining) < 1e-9 && break
         act = [n for n in znodes if (remaining > 0 ? hi[n] - applied[n] > 1e-12
                                                    : applied[n] - lo[n] > 1e-12)]
@@ -481,24 +600,92 @@ function _waterfill(A, znodes, w, lo, hi; iters = 50)
             else
                 δ = max(want, lo[n] - applied[n])
             end
+            it == 1 && (reallocated += max(0.0, abs(want) - abs(δ)))
             applied[n] += δ
             moved += δ
         end
         remaining -= moved
     end
-    return applied, remaining
+    return applied, remaining, reallocated
 end
 
-"Per-node signed bounds (Δ injection) available from `comp` at node `n`, time `t`."
-function _comp_bounds(comp, n, t, nd, res_w, conv_w, load_w)
+"""
+    ShiftLevers(nd, ref_of_node, load_shift_share)
+
+Working state of the physical levers at one target hour: what each node's RES
+generation, conventional generation, load and NET storage injection currently
+are in the basecase under construction, seeded from that node's reference hour.
+`shift_single` mutates it as deltas are applied, so every lever's remaining room
+(`_comp_bounds`) is always relative to the state reached so far.
+
+`load0` keeps the seed load immutably, which is what lets the load lever's cap
+apply to the CUMULATIVE deviation — the gap cascade and the global balance pass
+share one budget (`_load_bounds`).
+"""
+struct ShiftLevers
+    res::Dict{String,Float64}
+    conv::Dict{String,Float64}
+    load::Dict{String,Float64}
+    sto::Dict{String,Float64}
+    load0::Dict{String,Float64}
+    load_shift_share::Float64
+end
+
+function ShiftLevers(nd, ref_of_node::AbstractDict, load_shift_share::Real)
+    at(d, n) = get(d, (n, ref_of_node[n]), 0.0)
+    load = Dict(n => at(nd.LOAD, n) for n in nd.nodes)
+    return ShiftLevers(
+        Dict(n => at(nd.RES,  n) for n in nd.nodes),
+        Dict(n => at(nd.CONV, n) for n in nd.nodes),
+        load,
+        Dict(n => at(nd.STO,  n) for n in nd.nodes),
+        copy(load),
+        Float64(load_shift_share),
+    )
+end
+
+"""
+    _load_bounds(lev, nd, n) -> (lo, hi)
+
+Room left in the load lever at node `n`. The TOTAL load deviation `δ` of a node
+(export-positive: `δ > 0` = load cut) accumulated over the gap cascade AND the
+global balance pass is confined to
+
+    δ ∈ [ −γ·load_max[n] ,  min(γ·load_min[n], load0[n]) ]
+
+with γ = `ShareShift.load_shift_share`, `load_max`/`load_min` the node's extreme
+loads over the forecast horizon and `load0[n]` its reference-hour load (so load
+can never be driven negative). The part already spent is `load0[n] - load[n]`,
+which is why this returns the *remaining* room rather than the total bound.
+"""
+function _load_bounds(lev::ShiftLevers, nd, n)
+    γ = lev.load_shift_share
+    spent = lev.load0[n] - lev.load[n]
+    return (-γ * nd.load_max[n] - spent,
+            min(γ * nd.load_min[n], lev.load0[n]) - spent)
+end
+
+"""
+    _comp_bounds(comp, n, t, nd, lev) -> (lo, hi)
+
+Per-node signed bounds (Δ injection, export-positive) still available from lever
+`comp` at node `n` and target time `t`, given the levers' current state `lev`.
+
+`:conv` / `:RES` are capped by the availability-weighted generation cap at `t`
+minus what the node already produces. `:sto` is **incremental** to the reference
+day's net storage injection `nd.STO` — that dispatch is already inside the
+injection baseline `P`, so a node discharging at full power in the reference hour
+has no headroom up left. `:load` is capped by γ, see `_load_bounds`.
+"""
+function _comp_bounds(comp, n, t, nd, lev::ShiftLevers)
     if comp == :conv
-        return (-conv_w[n], get(nd.gmax_conv, (n, t), 0.0) - conv_w[n])
-    elseif comp == :load          # cut load → raise injection (≤ current load); add load unbounded
-        return (-Inf, load_w[n])
+        return (-lev.conv[n], get(nd.gmax_conv, (n, t), 0.0) - lev.conv[n])
+    elseif comp == :load          # cut load → raise injection; add load → lower it
+        return _load_bounds(lev, nd, n)
     elseif comp == :RES
-        return (-res_w[n], get(nd.gmax_res, (n, t), 0.0) - res_w[n])
+        return (-lev.res[n], get(nd.gmax_res, (n, t), 0.0) - lev.res[n])
     elseif comp == :sto           # storage: discharge up, charge down; installed power, every t
-        return (-nd.gmax_sto_chg[n], nd.gmax_sto_dis[n])
+        return (-nd.gmax_sto_chg[n] - lev.sto[n], nd.gmax_sto_dis[n] - lev.sto[n])
     else
         error("_comp_bounds: unknown shift component :$comp (physical levers only: :RES, :conv, :load, :sto)")
     end
@@ -508,49 +695,58 @@ end
 const BALANCE_TOL = 1e-6
 
 """
-    _enforce_global_balance!(p_new, nd, t, conv_w, load_w, trace)
+    _enforce_global_balance!(p_new, nd, t, lev, trace)
 
 Force the basecase to represent a globally **balanced** system: drive the total
 net injection `R = Σ_n p_new` (export-positive) to zero so that
 `Σ gen = Σ load + Σ charge` (production = consumption). The correction `-R` is
 applied as physical **conventional generation** adjustments, bounded per node by
-the availability-weighted headroom `[-conv_w[n], gmax_conv[(n,t)] - conv_w[n]]`
-and spread by remaining room. If conventional generation saturates, **load**
-absorbs the residual (add load to shed a surplus, cut load to cover a deficit) —
-which guarantees balance — with a warning. All applied deltas are traced as
-`"balance"`. Because only physical quantities move, every `p_new[n]` remains
-`gen − load − charge`, so each zone's net position stays physically backed.
+the availability-weighted headroom `[-conv[n], gmax_conv[(n,t)] - conv[n]]` and
+spread by remaining room. If conventional generation saturates, **load** absorbs
+the residual (add load to shed a surplus, cut load to cover a deficit), also with
+a warning. All applied deltas are traced as `"balance"`. Because only physical
+quantities move, every `p_new[n]` remains `gen − load − charge`, so each zone's
+net position stays physically backed.
+
+Balance is *not* guaranteed: the load lever shares one cumulative budget with the
+gap cascade and is capped by `ShareShift.load_shift_share` (see `_load_bounds`),
+so with a small γ and exhausted conventional headroom a residual can survive —
+that case warns a second time and leaves `Σ_n p_new ≠ 0`.
 """
-function _enforce_global_balance!(p_new, nd, t, conv_w, load_w, trace)
+function _enforce_global_balance!(p_new, nd, t, lev::ShiftLevers, trace)
     nodes = nd.nodes
     R = sum(values(p_new))              # export-positive global net injection; want 0
     abs(R) <= BALANCE_TOL && return p_new
     A = -R                              # injection change to apply so Σ becomes 0
 
     # --- primary lever: conventional generation ---
-    lo = Dict(n => -conv_w[n] for n in nodes)
-    hi = Dict(n => get(nd.gmax_conv, (n, t), 0.0) - conv_w[n] for n in nodes)
+    lo = Dict{String,Float64}(); hi = Dict{String,Float64}()
+    for n in nodes
+        lo[n], hi[n] = _comp_bounds(:conv, n, t, nd, lev)
+    end
     w  = A > 0 ? Dict(n => max(hi[n], 0.0) for n in nodes) :
                  Dict(n => max(-lo[n], 0.0) for n in nodes)
-    applied, rem = _waterfill(A, nodes, w, lo, hi)
+    applied, rem, _ = _waterfill(A, nodes, w, lo, hi)
     for n in nodes
         _record!(trace, t, n, "balance", applied[n])
-        p_new[n]  += applied[n]
-        conv_w[n] += applied[n]
+        p_new[n]    += applied[n]
+        lev.conv[n] += applied[n]
     end
 
-    # --- last resort: load (guarantees balance when conv headroom is exhausted) ---
+    # --- last resort: load, within what the cascade left of its γ budget ---
     if abs(rem) > BALANCE_TOL
         @warn "refday balance at t=$t: conventional headroom insufficient (residual $(round(rem; digits=3)) MW); adjusting load."
-        loL = Dict(n => -Inf for n in nodes)        # add load ⇒ injection down (unbounded)
-        hiL = Dict(n => load_w[n] for n in nodes)   # cut load ⇒ injection up (≤ current load)
+        loL = Dict{String,Float64}(); hiL = Dict{String,Float64}()
+        for n in nodes
+            loL[n], hiL[n] = _comp_bounds(:load, n, t, nd, lev)
+        end
         wL  = rem > 0 ? Dict(n => max(hiL[n], 0.0) for n in nodes) :
-                        Dict(n => 1.0 for n in nodes)
-        appliedL, rem2 = _waterfill(rem, nodes, wL, loL, hiL)
+                        Dict(n => max(-loL[n], 0.0) for n in nodes)
+        appliedL, rem2, _ = _waterfill(rem, nodes, wL, loL, hiL)
         for n in nodes
             _record!(trace, t, n, "balance", appliedL[n])
-            p_new[n]  += appliedL[n]
-            load_w[n] -= appliedL[n]                # +injection ⇒ load down
+            p_new[n]    += appliedL[n]
+            lev.load[n] -= appliedL[n]              # +injection ⇒ load down
         end
         abs(rem2) > BALANCE_TOL &&
             @warn "refday balance at t=$t: could not fully balance (residual $(round(rem2; digits=3)) MW remains)."
@@ -603,64 +799,108 @@ end
 shift_trace_df(tr::ShiftTraceCollector) =
     DataFrame(Time = tr.Time, node = tr.node, component = tr.component, delta = tr.delta)
 
+"""
+    ShiftDiagCollector()
+
+Collects the apportionment diagnostics of `shift_single`'s gap cascade — one row
+per (target hour, zone, lever), independent of the per-node `REFDAY_SHIFT` trace
+(different schema, different granularity). Convert with `shift_diag_df`;
+persisted as the `REFDAY_DIAG` trace table. Under `resolution = :nodal` each
+"zone" is a single node and the `zone` column carries the node id (the same
+convention as the `np_relax` rows of `REFDAY_SHIFT`).
+
+Per row:
+- `want` — the amount handed to the waterfill, `β_comp · D` plus the remainder
+  carried over from the previous lever of the cascade;
+- `applied` — what the lever actually absorbed, `Σ_n` applied deltas;
+- `reallocated` — how much of the first waterfill pass's key-proportional
+  allocation was clipped and re-spread over other nodes (see `_waterfill`);
+  positive means the realized spatial split departs from the redistribution key;
+- `beta_configured` — the configured share of this lever, `0.0` for levers that
+  only ever receive cascaded remainders (e.g. `:sto`);
+- `beta_realised` — `Σ_n |applied_n| / |D|`, i.e. the share of the zone's gap this
+  lever really moved; `0.0` when the gap `D` vanishes. It differs from
+  `beta_configured` whenever the cascade interferes: it *exceeds* the configured
+  share when the lever absorbs a remainder carried over from an earlier saturated
+  lever, and *falls short* when the lever itself saturates.
+"""
+struct ShiftDiagCollector
+    Time::Vector{Int}
+    zone::Vector{String}
+    component::Vector{String}
+    want::Vector{Float64}
+    applied::Vector{Float64}
+    reallocated::Vector{Float64}
+    beta_configured::Vector{Float64}
+    beta_realised::Vector{Float64}
+end
+ShiftDiagCollector() = ShiftDiagCollector(Int[], String[], String[], Float64[], Float64[],
+                                          Float64[], Float64[], Float64[])
+
+@inline _record_diag!(::Nothing, args...) = nothing
+@inline function _record_diag!(d::ShiftDiagCollector, t, z, comp, want, applied,
+                               reallocated, beta_configured, beta_realised)
+    push!(d.Time, t); push!(d.zone, z); push!(d.component, comp)
+    push!(d.want, want); push!(d.applied, applied); push!(d.reallocated, reallocated)
+    push!(d.beta_configured, beta_configured); push!(d.beta_realised, beta_realised)
+    return nothing
+end
+
+"Collector contents as a `DataFrame` (see [`ShiftDiagCollector`](@ref) for the columns)."
+shift_diag_df(d::ShiftDiagCollector) = DataFrame(
+    Time = d.Time, zone = d.zone, component = d.component,
+    want = d.want, applied = d.applied, reallocated = d.reallocated,
+    beta_configured = d.beta_configured, beta_realised = d.beta_realised)
+
 # ---------------------------------------------------------------------------
 # The shift
 # ---------------------------------------------------------------------------
 
 """
-    shift_single(nd, params, t_tgt, t_ref, method; trace = nothing) -> Dict(node => net_injection)
+    shift_single(nd, params, t_tgt, t_ref, method; trace = nothing, diag = nothing)
+        -> Dict(node => net_injection)
 
 Build the target-day nodal net injection from reference day `t_ref` and target
 day `t_tgt` under `method`. `t_ref` is either a single time step (global
 reference day) or a per-node map `node => reference_time` (scoped / per-TSO
-matching, where each group borrows its own reference day).
+matching, where each group borrows its own reference day). The reference map is
+also what the reference-day-texture redistribution keys are evaluated at, see
+`_key_weights`.
 
 The gap is closed by physical levers only (RES/conv/load/storage); a zone's
 unreachable remainder is left relaxed toward reference (traced `"np_relax"`).
-When `method.enforce_balance` (default), a final pass forces the whole result to
-be globally balanced (`Σ_n net_injection = 0`) via conventional generation
-(traced `"balance"`); see `_enforce_global_balance!`.
+With `method.enforce_balance = true` (opt-in, off by default) a final pass forces
+the whole result to be globally balanced (`Σ_n net_injection = 0`) via
+conventional generation (traced `"balance"`); see `_enforce_global_balance!`.
 
 Pass a `ShiftTraceCollector` as `trace` to record every applied per-node
 injection delta (components `"RES_prestep"`, `"RES"`, `"conv"`, `"load"`,
-`"sto"`, `"balance"`, plus the per-zone `"np_relax"`).
+`"sto"`, `"balance"`, plus the per-zone `"np_relax"`), and a
+[`ShiftDiagCollector`](@ref) as `diag` for the per-zone apportionment
+diagnostics (how much of each lever's share was really absorbed, and how much of
+its key-proportional split was clipped away).
 """
-shift_single(nd, params, t_tgt, t_ref::Integer, method::ShareShift; gsk = nothing, trace = nothing) =
-    shift_single(nd, params, t_tgt, Dict(n => Int(t_ref) for n in nd.nodes), method; gsk = gsk, trace = trace)
+shift_single(nd, params, t_tgt, t_ref::Integer, method::ShareShift;
+             gsk = nothing, trace = nothing, diag = nothing) =
+    shift_single(nd, params, t_tgt, Dict(n => Int(t_ref) for n in nd.nodes), method;
+                 gsk = gsk, trace = trace, diag = diag)
 
 function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::ShareShift;
-                      gsk = nothing, trace = nothing)
-    nodes  = nd.nodes
-    p_new  = Dict(n => get(nd.P,    (n, ref_of_node[n]), 0.0) for n in nodes)
-    res_w  = Dict(n => get(nd.RES,  (n, ref_of_node[n]), 0.0) for n in nodes)
-    conv_w = Dict(n => get(nd.CONV, (n, ref_of_node[n]), 0.0) for n in nodes)
-    load_w = Dict(n => get(nd.LOAD, (n, ref_of_node[n]), 0.0) for n in nodes)
+                      gsk = nothing, trace = nothing, diag = nothing)
+    nodes = nd.nodes
+    p_new = Dict(n => get(nd.P, (n, ref_of_node[n]), 0.0) for n in nodes)
+    lev   = ShiftLevers(nd, ref_of_node, method.load_shift_share)
 
-    # ---- optional hard RES pre-step: align RES to target ----
+    # ---- optional hard RES pre-step: pin every node's RES to the target hour ----
+    # Per node at BOTH resolutions: the point of the pre-step is that the basecase
+    # carries the delivery day's RES forecast, so afterwards the intra-zone RES
+    # distribution is the target day's, not the reference day's.
     if method.res_prestep
-        if method.resolution == :nodal
-            for n in nodes
-                tgt = get(nd.RES, (n, t_tgt), 0.0)
-                _record!(trace, t_tgt, n, "RES_prestep", tgt - res_w[n])
-                p_new[n] += tgt - res_w[n]
-                res_w[n]  = tgt
-            end
-        else
-            for (z, znodes) in nd.nodes_in_zone
-                ref_sum = sum(res_w[n] for n in znodes)
-                tgt_sum = sum(get(nd.RES, (n, t_tgt), 0.0) for n in znodes)
-                Δ = tgt_sum - ref_sum
-                # keep reference intra-zone RES shares; fall back to redist key if zone had no RES
-                w = ref_sum > 0 ? Dict(n => res_w[n] for n in znodes) :
-                    _redist_weights(method.redist, nd, params, znodes, t_tgt; gsk = gsk)
-                ws = sum(values(w)); ws <= 0 && (ws = length(znodes); w = Dict(n => 1.0 for n in znodes))
-                for n in znodes
-                    d = Δ * w[n] / ws
-                    _record!(trace, t_tgt, n, "RES_prestep", d)
-                    p_new[n] += d
-                    res_w[n] += d
-                end
-            end
+        for n in nodes
+            tgt = get(nd.RES, (n, t_tgt), 0.0)
+            _record!(trace, t_tgt, n, "RES_prestep", tgt - lev.res[n])
+            p_new[n] += tgt - lev.res[n]
+            lev.res[n] = tgt
         end
     end
 
@@ -678,24 +918,35 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
 
         carried = 0.0
         for comp in order
-            amount = get(share, comp, 0.0) * D + carried
+            β = get(share, comp, 0.0)
+            amount = β * D + carried
             if abs(amount) < 1e-12
+                _record_diag!(diag, t_tgt, string(z), string(comp), amount, 0.0, 0.0, β, 0.0)
                 carried = 0.0
                 continue
             end
-            w  = _redist_weights(method.redist, nd, params, znodes, t_tgt; gsk = gsk)
+            # keys MAY depend on the lever (RefPropRedist weights each one by the
+            # reference day's own texture of that component), so the weights are
+            # rebuilt per lever rather than once per zone
+            w = _redist_weights(method.redist, nd, params, znodes, t_tgt, ref_of_node;
+                                gsk = gsk, comp = comp)
             lo = Dict{String,Float64}(); hi = Dict{String,Float64}()
             for n in znodes
-                lo[n], hi[n] = _comp_bounds(comp, n, t_tgt, nd, res_w, conv_w, load_w)
+                lo[n], hi[n] = _comp_bounds(comp, n, t_tgt, nd, lev)
             end
-            applied, rem = _waterfill(amount, znodes, w, lo, hi)
+            applied, rem, reallocated = _waterfill(amount, znodes, w, lo, hi)
+            tot = 0.0; absmoved = 0.0
             for n in znodes
                 _record!(trace, t_tgt, n, string(comp), applied[n])
                 p_new[n] += applied[n]
-                comp == :conv && (conv_w[n] += applied[n])
-                comp == :RES  && (res_w[n]  += applied[n])
-                comp == :load && (load_w[n] -= applied[n])   # +injection ⇒ load down
+                tot += applied[n]; absmoved += abs(applied[n])
+                comp == :conv && (lev.conv[n] += applied[n])
+                comp == :RES  && (lev.res[n]  += applied[n])
+                comp == :sto  && (lev.sto[n]  += applied[n])
+                comp == :load && (lev.load[n] -= applied[n])   # +injection ⇒ load down
             end
+            _record_diag!(diag, t_tgt, string(z), string(comp), amount, tot, reallocated,
+                          β, abs(D) < 1e-12 ? 0.0 : absmoved / abs(D))
             carried = rem
         end
         # gap the physical levers left open = this zone's NP relaxed toward reference
@@ -705,7 +956,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
 
     # global balance: force Σ_n p_new = 0 (production = consumption) via conventional gen
     method.enforce_balance &&
-        _enforce_global_balance!(p_new, nd, t_tgt, conv_w, load_w, trace)
+        _enforce_global_balance!(p_new, nd, t_tgt, lev, trace)
     return p_new
 end
 
@@ -752,9 +1003,10 @@ produced by [`match_by_scope`](@ref)). Returns a Dict with the keys `calc_ram`
 - `:lineflows`   => DenseAxisArray (line × target_time) = PTDFn · netinput
 
 so the reference-day construction is a drop-in replacement for the
-`TwoDayAhead` optimization. With the shift's `enforce_balance` (default), each
-target column is globally balanced (`Σ_n netinput_ac[n, tt] = 0`, production =
-consumption), keeping the PTDF flow computation physically consistent.
+`TwoDayAhead` optimization. With the shift's `enforce_balance = true` (opt-in),
+each target column is additionally globally balanced (`Σ_n netinput_ac[n, tt] = 0`,
+production = consumption), which is what keeps the PTDF flow computation
+physically consistent; by default no such pass runs.
 
 # Scoped (per-TSO) matching
 Pass `scope` (e.g. `ZonalMatchScope()`) together with a `matches` table from
@@ -772,7 +1024,12 @@ a `Dict{Symbol,DataFrame}` with:
 - `:REFDAY_SHIFT`  — sparse per-(Time, node, component) injection deltas from
   `shift_single` (physical `RES`/`conv`/`load`/`sto` levers plus `balance`), and
   per-(Time, zone) `np_relax` rows (zone label in the `node` column) recording
-  how far each zone's net position was left relaxed toward the reference.
+  how far each zone's net position was left relaxed toward the reference;
+- `:REFDAY_DIAG`   — per-(Time, zone, component) apportionment diagnostics of the
+  gap cascade: how much each lever was asked for (`want`) and absorbed
+  (`applied`), how much of its key-proportional split was clipped and re-spread
+  (`reallocated`), and configured vs realised share of the gap
+  (`beta_configured` / `beta_realised`). See `ShiftDiagCollector`.
 
 Together they reconstruct the construction exactly. Trace deltas are
 export-positive (feed-in) while the persisted `ACINJECTION` (and the returned
@@ -805,13 +1062,15 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
           build_gsk(params, method.redist.strategy; normalize_empty = :flat) : nothing
 
     collector = collect_trace ? ShiftTraceCollector() : nothing
+    diagnostics = collect_trace ? ShiftDiagCollector() : nothing
 
     nodes = nd.nodes
     nidx  = Dict(n => i for (i, n) in enumerate(nodes))
     Pmat  = zeros(length(nodes), length(build_times))
     for (j, tt) in enumerate(build_times)
         ref_of_node = Dict(n => refmap[(n, tt)] for n in nodes)
-        p_new = shift_single(nd, params, tt, ref_of_node, method; gsk = gsk, trace = collector)
+        p_new = shift_single(nd, params, tt, ref_of_node, method;
+                             gsk = gsk, trace = collector, diag = diagnostics)
         for n in nodes
             # shift_single works export-positive (feed-in); :netinput_ac must be
             # in the model's import-positive ACINJECTION convention (what
@@ -839,6 +1098,7 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
             :REFDAY_MATCH  => _refday_match_trace(groupmap, matches, fallback_matches),
             :REFDAY_GROUPS => groups_df,
             :REFDAY_SHIFT  => shift_trace_df(collector),
+            :REFDAY_DIAG   => shift_diag_df(diagnostics),
         )
     end
     return out

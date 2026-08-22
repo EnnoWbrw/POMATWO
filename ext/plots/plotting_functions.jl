@@ -942,7 +942,7 @@ function _circular_node_positions(ids)
     return pos
 end
 
-"Axis label marking a figure that fell back to [`_circular_node_positions`](@ref)."
+"Axis subtitle marking a figure that fell back to [`_circular_node_positions`](@ref)."
 const _NO_COORDS_NOTE = "no node coordinates in the input data — circular layout"
 
 """
@@ -955,7 +955,8 @@ While at least one node carries usable coordinates this is exactly
 [`_line_endpoints_from_results`](@ref) and `geographic` is `true`. Only when **no** node does
 — every one of them on the `[0.0, 0.0]` sentinel, or the node input never had a `lon`/`lat`
 column — are the nodes placed on a unit circle instead, with `node_coords` `nothing` and
-`geographic` `false`. Callers must then skip the basemap and `_auto_map_extent`.
+`geographic` `false`. Callers must then skip the basemap and `_auto_map_extent`, and pass
+`geographic = false` to [`create_lineplot_layout`](@ref) so the map styling is skipped too.
 
 Without this a coordinate-free result set draws every node on top of the same point and
 every line as a zero-length segment: a blank map rather than an error.
@@ -1024,12 +1025,15 @@ function _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, typ
     end
     isempty(segments) || linesegments!(ax, segments; color = segcolors, linewidth = 1.5)
 
+    # The caption belongs on the colorbar it explains, not on `ax.xlabel` — that now carries
+    # the map's "Longitude".
     if type == "max"
-        Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla, limits = (0, isempty(df_line_util) ? 1 : maximum(df_line_util.max)))
-        ax.xlabel = "Line color indicates count of timesteps with utilization >= $(threshold * 100)%"
+        Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla,
+                 limits = (0, isempty(df_line_util) ? 1 : maximum(df_line_util.max)),
+                 label = "count of timesteps with utilization >= $(threshold * 100)%")
     else
-        Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla, limits = (0.0, 1.0))
-        ax.xlabel = "Line color based on average line utilization in selected timeframe"
+        Colorbar(fig[1, 2], colormap = ColorSchemes.lajolla, limits = (0.0, 1.0),
+                 label = "average line utilization in selected timeframe")
     end
 
     isempty(node_lonlat) ||
@@ -1065,11 +1069,36 @@ function _auto_map_extent(node_coords; pad = 0.5)
     )
 end
 
+"""
+    create_lineplot_layout(figsize = (800, 1000); background_map = true,
+                           extent = _DEFAULT_MAP_CUTOUT, geographic = true,
+                           map_axis = true)
+
+The single axis factory every map in this extension goes through. Returns `(fig, ax)`.
+
+`background_map` decides only whether Tyler draws raster tiles; `geographic` decides whether
+the axis holds real coordinates. The two are independent: a caller may turn the tiles off for
+speed and still be plotting Web Mercator metres, which is why the publication styling
+([`_style_map_axis!`](@ref) — degree ticks, `Longitude`/`Latitude`, scale bar, north arrow)
+is gated on `geographic` and not on `background_map`. Pass `geographic = false` for the
+[`_circular_node_positions`](@ref) fallback layout, whose unit-circle coordinates would turn
+every one of those decorations into a fabrication.
+
+`map_axis` is what the caller of a public entry point controls: `true` for the default
+styling, `false` for a bare Web Mercator axis, or a `NamedTuple` splatted into
+`_style_map_axis!` (`map_axis = (scalebar = false,)`). It is a request, not an override —
+`geographic` is the hard gate, so on the fallback layout even `map_axis = true` draws
+nothing. See [`_map_axis_style_kwargs`](@ref) for the validation.
+"""
 function create_lineplot_layout(
     figsize = (800, 1000);
     background_map = true,
     extent = _DEFAULT_MAP_CUTOUT,
+    geographic = true,
+    map_axis = true,
 )
+    # Before the window opens and before any tile fetch: see `_map_axis_style_kwargs`.
+    style = _map_axis_style_kwargs(map_axis)
     GLMakie.activate!(inline = false)
     fig = Figure(; size = figsize)
     ax = Axis(fig[1, 1])
@@ -1082,21 +1111,50 @@ function create_lineplot_layout(
         ax.aspect = DataAspect()
     end
 
+    # After `wait(tm)`, never before: Tyler sets axis attributes itself while the map spins
+    # up and would otherwise land on top of the ticks and labels. `geographic` is checked
+    # first and cannot be overridden by `map_axis`: on the unit-circle fallback there is no
+    # geography to label, whatever the caller asked for.
+    if geographic && style !== nothing
+        _style_map_axis!(ax; style...)
+    end
+
     return fig, ax
 end
 
-function create_lineplot(
+"""
+    create_lineplot(results_path, type="max", exclude_dc_lines=false, threshhold=0.95)
+
+The results-only method of [`create_lineplot`](@ref): identical to the
+`(results_path, data, ...)` method below, but the line geometry is read from `results.params`
+instead of from input CSVs. Both are methods of the same exported function; nothing else
+differs, so see the other one for the arguments and the plot description.
+
+It takes the same keywords, `map_axis` included.
+
+The two never compete: this method's second positional argument is typed `::String`, so
+`create_lineplot(path, "avg")` selects it while `create_lineplot(path, datafiles)` selects the
+other. A `String` passed where `data` belongs would land here and be read as `type` — it then
+fails in `_render_lineplot!` unless the string happens to be `"max"` or `"avg"`.
+"""
+function POMATWO.create_lineplot(
     results_path,
     type::String = "max",
     exclude_dc_lines::Bool = false,
     threshhold::Float64 = 0.95;
     background_map::Bool = true,
     extent = nothing,
+    map_axis = true,
 )
     results, df_line_util, line_from_to, node_lonlat, node_coords =
         _prepare_lineplot_common(DataFiles(results_path), nothing, exclude_dc_lines, threshhold)
     extent === nothing && (extent = _auto_map_extent(node_coords))
-    fig, ax = create_lineplot_layout(; background_map = background_map, extent = extent)
+    # Same sentinel trap as in `plot_network`: `_line_endpoints_from_*` place a node parked
+    # on `[0.0, 0.0]` like any other, so only `_has_coords` can tell a real map from a
+    # degenerate one.
+    geographic = any(n -> _has_coords(node_coords, n), keys(node_coords))
+    fig, ax = create_lineplot_layout(; background_map = background_map, extent = extent,
+                                     geographic = geographic, map_axis = map_axis)
     return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshhold)
 end
 
@@ -1105,9 +1163,13 @@ end
 
 Creates a geographical network map showing transmission line utilization with color-coded lines based on either maximum utilization frequency or average utilization.
 
+This is one of two methods of `create_lineplot`. Drop the `data` argument
+(`create_lineplot(results_path, "avg")`) to read the line geometry from `results.params`
+instead of from the input CSVs; everything below applies to both.
+
 # Arguments
 - `results_path`: Path to the directory containing simulation results.
-- `data`: A dictionary containing file paths for required network data tables (see section [Input Data Load](@ref)).
+- `data`: A dictionary containing file paths for required network data tables (see section [Input Data Load](@ref)). Pass it as a `Dict{Symbol,String}`: the argument is untyped, so a `String` here would be taken for the `type` of the results-only method instead.
 - `type`: (optional, default: `"max"`) Visualization mode:
     - `"max"`: Color lines by the count of timesteps where utilization >= `threshhold`.
     - `"avg"`: Color lines by the average utilization across all timesteps.
@@ -1116,16 +1178,32 @@ Creates a geographical network map showing transmission line utilization with co
 
 # Keyword arguments
 - `background_map`: (default: `true`) Draw Tyler/CartoDB raster tiles behind the network.
+  Turning them off changes nothing about the axis: it stays geographic and keeps its degree
+  ticks, scale bar and north arrow.
 - `extent`: (default: `nothing`) Map window as a `Tyler.Extents.Extent`. `nothing` fits it
   to the node coordinates; result sets whose nodes carry no coordinates fall back to
   `_DEFAULT_MAP_CUTOUT` (Germany).
+- `map_axis`: (default `true`) map-axis styling. `true` for degree ticks, `Longitude` /
+  `Latitude` labels, a scale bar and a north arrow; `false` for a bare axis in raw Web
+  Mercator metres; or a `NamedTuple` to override individual settings, e.g.
+  `map_axis = (scalebar = false,)`, `(projection_note = true,)` (adds the CRS as the
+  subtitle), `(north_arrow_position = :lt,)`. Accepted fields: `scalebar`, `north_arrow`,
+  `projection_note`, `scalebar_position`, `north_arrow_position`. Ignored on a dataset
+  without node coordinates, where none of the decorations mean anything.
 
 # Plot Details
 - Lines are colored using the `ColorSchemes.lajolla` colormap.
-- **Max mode**: Colorbar shows the count of hours where line utilization exceeds the threshold.
+- **Max mode**: Colorbar shows the count of hours where line utilization exceeds the
+  threshold; the colorbar's own label states what the colour means.
 - **Avg mode**: Colorbar shows average utilization percentage (0-100%).
 - Network nodes are displayed as black points.
-- Uses geographical coordinates with Web Mercator projection.
+- The axis is a map axis: ticks are labelled in degrees (`10°E`, `52°N`), the axes are
+  labelled `Longitude` / `Latitude`, and the figure carries a kilometre scale bar and a
+  north arrow. Geometry stays in Web Mercator throughout — state the CRS,
+  `WGS 84 / Pseudo-Mercator (EPSG:3857)`, in the figure caption. Mercator scale is
+  latitude-dependent, so the scale bar is exact only at the latitude it is drawn at.
+- A result set whose nodes carry no coordinates at all draws every node on the mercator
+  origin; the map decorations are suppressed there rather than labelling a degenerate map.
 
 # Returns
 - `fig`: A Makie figure object with the network map, color-coded lines, and colorbar.
@@ -1158,11 +1236,17 @@ function POMATWO.create_lineplot(
     threshhold::Float64 = 0.95;
     background_map::Bool = true,
     extent = nothing,
+    map_axis = true,
 )
     results, df_line_util, line_from_to, node_lonlat, node_coords =
         _prepare_lineplot_common(DataFiles(results_path), data, exclude_dc_lines, threshhold)
     extent === nothing && (extent = _auto_map_extent(node_coords))
-    fig, ax = create_lineplot_layout(; background_map = background_map, extent = extent)
+    # Same sentinel trap as in `plot_network`: `_line_endpoints_from_*` place a node parked
+    # on `[0.0, 0.0]` like any other, so only `_has_coords` can tell a real map from a
+    # degenerate one.
+    geographic = any(n -> _has_coords(node_coords, n), keys(node_coords))
+    fig, ax = create_lineplot_layout(; background_map = background_map, extent = extent,
+                                     geographic = geographic, map_axis = map_axis)
     return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshhold)
 end
 
@@ -1174,10 +1258,25 @@ Plots a simple network map of an energy system using line and node geographical 
 # Arguments
 - `data`: A dictionary containing file paths for required network data tables (see section [Input Data Load](@ref))
 
+# Keyword arguments
+- `map_axis`: (default `true`) map-axis styling. `true` for degree ticks, `Longitude` /
+  `Latitude` labels, a scale bar and a north arrow; `false` for a bare axis in raw Web
+  Mercator metres; or a `NamedTuple` to override individual settings, e.g.
+  `map_axis = (scalebar = false,)`, `(projection_note = true,)` (adds the CRS as the
+  subtitle), `(north_arrow_position = :lt,)`. Accepted fields: `scalebar`, `north_arrow`,
+  `projection_note`, `scalebar_position`, `north_arrow_position`. Ignored on a dataset
+  without node coordinates, where none of the decorations mean anything.
+
 # Plot Details
 - **AC lines** are drawn as solid black lines.
 - **DC lines** are drawn as dashed black lines.
 - **Nodes** are plotted as black points.
+- The axis is a map axis: degree ticks (`10°E`, `52°N`), `Longitude` / `Latitude` labels, a
+  kilometre scale bar and a north arrow. Geometry stays in Web Mercator — state the CRS,
+  `WGS 84 / Pseudo-Mercator (EPSG:3857)`, in the figure caption, and note that mercator
+  scale is latitude-dependent, so the scale bar is exact only at its own latitude.
+- A node file whose `lon`/`lat` are all `0, 0` draws every node on the mercator origin. The
+  map decorations are suppressed in that case rather than labelling a degenerate map.
 
 # Returns
 - `fig`: The Makie figure object containing the network plot.
@@ -1196,12 +1295,18 @@ datafiles = Dict{Symbol,String}(
 fig = plot_network(datafiles)
 ```
 """
-function POMATWO.plot_network(data::Dict{Symbol,String})
+function POMATWO.plot_network(data::Dict{Symbol,String}; map_axis = true)
     node_coords = _read_node_coords(data[:nodes])
     node_lonlat = Dict{String,Point2f}(
         n => project_point2f(c[1], c[2]) for (n, c) in node_coords)
 
-    fig, ax = create_lineplot_layout(; extent = _auto_map_extent(node_coords))
+    # `_read_node_coords` keeps the `0.0, 0.0` sentinel rows, and `_auto_map_extent` answers
+    # a Germany cutout when every row is one — so without this check a coordinate-free node
+    # file would get degree ticks and a Germany-scaled scale bar over nodes stacked on the
+    # mercator origin.
+    geographic = any(n -> _has_coords(node_coords, n), keys(node_coords))
+    fig, ax = create_lineplot_layout(; extent = _auto_map_extent(node_coords),
+                                     geographic = geographic, map_axis = map_axis)
 
     # One draw call per line style and one for all nodes, rather than one per row.
     for (path, style) in ((data[:lines], :solid), (data[:dclines], :dash))

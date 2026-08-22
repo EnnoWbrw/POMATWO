@@ -266,17 +266,18 @@ end
     _write_refday_trace(mr::ModelRun, T, artifacts)
 
 Write the reference-day trace tables sliced to split `T` as Arrow files into
-the split's subrun folder (`REFDAY_MATCH`, `REFDAY_SHIFT`; the time-independent
-`REFDAY_GROUPS` lives at the scenario root). No-op when the artifacts carry no
-`:trace`. Thread-safe under parallel splits: each split writes only into its
-own folder and the shared trace frames are never mutated.
+the split's subrun folder (`REFDAY_MATCH`, `REFDAY_SHIFT`, `REFDAY_DIAG`; the
+time-independent `REFDAY_GROUPS` lives at the scenario root). No-op when the
+artifacts carry no `:trace`. Thread-safe under parallel splits: each split
+writes only into its own folder and the shared trace frames are never mutated.
 """
 function _write_refday_trace(mr::ModelRun, T, artifacts)
     trace = artifacts === nothing ? nothing : get(artifacts, :trace, nothing)
     trace === nothing && return nothing
     sr_dir = mkpath(joinpath(mr.scen_dir, "subrun_t$(T[1])-t$(T[end])"))
     Tset = Set(T)
-    for (name, timecol) in ((:REFDAY_MATCH, :target_time), (:REFDAY_SHIFT, :Time))
+    for (name, timecol) in ((:REFDAY_MATCH, :target_time), (:REFDAY_SHIFT, :Time),
+                            (:REFDAY_DIAG, :Time))
         df = trace[name]
         isempty(df) || (df = filter(timecol => in(Tset), df))
         Arrow.write(joinpath(sr_dir, string(name) * ".arrow"), df)

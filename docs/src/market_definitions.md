@@ -49,6 +49,7 @@ CustomWeightsGSK
 build_gsk
 POMATWO.build_gsk_timeseries
 POMATWO.is_time_dependent
+POMATWO.timedep_node_weight
 zonal_ptdf
 ```
 

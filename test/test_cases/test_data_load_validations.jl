@@ -5,6 +5,8 @@ Test suite for data load validations including:
 - Validation error/warning reporting
 """
 
+using DataFrames
+
 @testset "Data Load Validations" begin
     
     @testset "Time Horizon Length - Demand Validation" begin
@@ -298,7 +300,98 @@ Test suite for data load validations including:
     @test !isempty(warnings)
         @test any(w -> occursin("node_missing_availability", w.category) && occursin("n2", w.message), warnings)
     end
-    
+
+    @testset "Plant Consistency - Availability Validation" begin
+        # validate_params flags an availability key that is not a known plant
+        params = create_test_params(
+            nodes=["n1"],
+            plants=["p1"],
+            slack=["n1"]
+        )
+        params.nodal_load["n1"] = POMATWO.HourlyProfile([10.0, 20.0])
+        params.avail["p1"] = POMATWO.HourlyProfile([0.9, 0.8])
+        params.avail["p999"] = POMATWO.HourlyProfile([0.5, 0.5])  # Unknown plant
+
+        setup = ModelSetup(TimeHorizon=TimeHorizon(start=1, stop=2, split=2, offset=0))
+        report = POMATWO.validate_params(params, setup)
+
+        # Should have error for unknown plant in availability
+        @test report.has_errors
+        errors = POMATWO.get_errors(report)
+        @test any(e -> occursin("unknown_plant_in_availability", e.category) && occursin("p999", e.message), errors)
+
+        # A known plant should not produce that error
+        params_ok = create_test_params(
+            nodes=["n1"],
+            plants=["p1"],
+            slack=["n1"]
+        )
+        params_ok.nodal_load["n1"] = POMATWO.HourlyProfile([10.0, 20.0])
+        params_ok.avail["p1"] = POMATWO.HourlyProfile([0.9, 0.8])
+
+        report_ok = POMATWO.validate_params(params_ok, setup)
+        errors_ok = POMATWO.get_errors(report_ok)
+        @test !any(e -> occursin("unknown_plant_in_availability", e.category), errors_ok)
+
+        # Level 1 loader: unknown column errors and is not written to params.avail
+        params_load = create_test_params(
+            nodes=["n1"],
+            plants=["p1"],
+            slack=["n1"]
+        )
+        report_load = POMATWO.DataReport()
+        df = DataFrame(:p1 => [0.9, 0.8], :p999 => [0.5, 0.5])
+        POMATWO.add_avail!(params_load, df, report_load, "test")
+
+        @test report_load.has_errors
+        load_errors = POMATWO.get_errors(report_load)
+        @test any(e -> occursin("unknown_plant_in_availability", e.category) && occursin("p999", e.message), load_errors)
+        @test haskey(params_load.avail, "p1")
+        @test !haskey(params_load.avail, "p999")
+
+        # Level 1 loader: a leading time column is skipped, not flagged as a plant
+        params_time = create_test_params(
+            nodes=["n1"],
+            plants=["p1"],
+            slack=["n1"]
+        )
+        report_time = POMATWO.DataReport()
+        df_time = DataFrame(:Hour => [1, 2], :p1 => [0.9, 0.8])
+        POMATWO.add_avail!(params_time, df_time, report_time, "test")
+
+        time_errors = POMATWO.get_errors(report_time)
+        @test !any(e -> occursin("unknown_plant_in_availability", e.category), time_errors)
+        @test !haskey(params_time.avail, "Hour")
+        @test haskey(params_time.avail, "p1")
+
+        # Level 1 loader: an empty DataFrame warns and loads nothing
+        params_empty = create_test_params(
+            nodes=["n1"],
+            plants=["p1"],
+            slack=["n1"]
+        )
+        report_empty = POMATWO.DataReport()
+        POMATWO.add_avail!(params_empty, DataFrame(), report_empty, "test")
+
+        empty_warnings = POMATWO.get_warnings(report_empty)
+        @test any(w -> occursin("empty_availability_data", w.category), empty_warnings)
+        @test !report_empty.has_errors
+
+        # Level 1 loader: a file holding only a time column warns and loads nothing
+        params_only_time = create_test_params(
+            nodes=["n1"],
+            plants=["p1"],
+            slack=["n1"]
+        )
+        report_only_time = POMATWO.DataReport()
+        POMATWO.add_avail!(params_only_time, DataFrame(:Hour => [1, 2]), report_only_time, "test")
+
+        only_time_warnings = POMATWO.get_warnings(report_only_time)
+        @test any(w -> occursin("empty_availability_data", w.category), only_time_warnings)
+        @test !report_only_time.has_errors
+        @test isempty(params_only_time.avail)
+    end
+
     @testset "Base Validation Still Works" begin
         # validate_params requires ModelSetup; use a default one so time-horizon
         # check compares against stop=8760 (well above the 3-element profile)
