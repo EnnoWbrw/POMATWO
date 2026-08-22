@@ -263,7 +263,26 @@ function _basecase_f0(params::Parameters, basecase_results::Dict, PTDFz::DenseAx
     for (i, l) in enumerate(cne_lines), (j, t) in enumerate(T)
         f0_data[i, j] = -lineflows[l, t] - sum(_ptdfz(PTDFz, l, z, t) * NP[z, t] for z in zones)
     end
-    # Steps to include non flow based zones (which is not currently accounted for).
+    # NON-FLOW-BASED ZONES. The sum above runs over ALL zones (`zones = params.sets.Z`),
+    # so f0 is the pure intra-zonal residual: the commercial term is removed for the NTC
+    # zones too, not only for the flow-based CCR. That is deliberate and it pairs with the
+    # day-ahead constraint in `add_exchange(sr, ::Type{FlowBased})`, which re-adds the
+    # commercial term over all zones as well (NP for FBCCR, NP_ntc for NTCCCR). The two
+    # call sites must stay in step: bounding an FBCCR-only sum against a RAM built from
+    # this all-zone f0 would leave the NTC zones' contribution to the CNE flow modelled
+    # nowhere, i.e. the domain would behave as if their net positions were zero while the
+    # day-ahead moves them freely. Nothing errors if they drift apart — the domain just
+    # silently stops representing the flow it is supposed to bound.
+    #
+    # This is NOT the Core/CWE construction. Core freezes the external zones at their
+    # reference position, builds F0FB over the flow-based CCR only, and deducts the
+    # difference as unaligned flow F_uaf inside the AMR (formulas below). Switching to it
+    # means summing over `params.sets.FBCCR` here, restoring the FBCCR-only constraint,
+    # supplying `fixed_exchange` for the external zones, and implementing the F_uaf term.
+    # The model form used here is exact instead for endogenous external net positions,
+    # which is what this model has. FAV, IVA and LTA inclusion remain unimplemented in
+    # either variant.
+    #
     # ENTSO-E notation below writes Fref for the reference flow; in THIS model that is
     # -lineflows (lineflows is import-positive, see the sign note above), so the model
     # form uses a leading minus that the raw ENTSO-E symbols do not show:

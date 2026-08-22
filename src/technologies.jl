@@ -802,18 +802,52 @@ function add_exchange(sr::SubRun, ::Type{FlowBased})
 
     @objective(m, Min, 100000 * sum(FBMC_INF_POS[l, t] + FBMC_INF_NEG[l, t] for l in cne, t in T))
 
+    # Commercial flow on the CNE from the day-ahead net positions of ALL zones — the
+    # flow-based ones (NP) and the NTC ones (NP_ntc) alike.
+    #
+    # WHY ALL ZONES, not just FBCCR: the RAM these constraints bound is derived from
+    # f0 = -lineflow_ref - Σ_{z ∈ Z} PTDFz[l,z]·NP_ref[z] (`_basecase_f0`), i.e. the
+    # commercial term is removed for EVERY zone, leaving f0 as the pure intra-zonal
+    # residual. Re-adding it for FBCCR only left the NTC zones' contribution to the CNE
+    # flow modelled nowhere: the domain behaved as if their net positions were zero,
+    # while the day-ahead was free to move them (they are bounded only by `ac_NTC`, and
+    # by `fixed_exchange` where one is supplied). Summing over all zones here makes the
+    # constrained quantity the full commercial flow the RAM was derived against, so
+    #     f0 + Σ_{z ∈ Z} PTDFz·NP_DA  ==  the modelled physical flow
+    # holds exactly.
+    #
+    # This departs from the Core/CWE formulation, which instead freezes the external
+    # zones at their reference position and builds f0 over the flow-based CCR only
+    # (F0FB, with the residual handled as unaligned flow in the AMR). That variant is
+    # the right one when external net positions are an exogenous forecast; this one is
+    # the right one for a model where they are endogenous decision variables, as they
+    # are here.
+    #
+    # The CCM assignment in data_load.jl guarantees FBCCR ∪ NTCCCR == Z with no overlap
+    # (an unassigned zone is a hard validation error, and an absent CCM column puts every
+    # zone in FBCCR), so each zone is counted exactly once. With no NTC zones the second
+    # sum is empty and the expression reduces to the former FBCCR-only form.
+    #
     # _ptdfz resolves the zonal PTDF for both static (l×z) and time-dependent
-    # (l×z×t, e.g. GenLoadGSK) matrices
+    # (l×z×t, e.g. GenLoadGSK) matrices. Its zone axis spans all of `sets.Z` (the GSK is
+    # built over every zone, see `_gsk_orderings`), so the NTC columns exist.
+    @expression(
+        m,
+        FBMC_FLOW[l = cne, t = T],
+        -sum(_ptdfz(fbmc_params[:PTDFz], l, z, t) * NP[z, t] for z in FBCCR; init = 0.0)
+        - sum(_ptdfz(fbmc_params[:PTDFz], l, z, t) * NP_ntc[z, t] for z in NTCCCR; init = 0.0)
+    )
+
     @constraint(
         m,
         FBMC_pos[l = cne, t = T],
-        -sum(_ptdfz(fbmc_params[:PTDFz], l, z, t) * NP[z, t] for z in FBCCR) <= fbmc_params[:RAM][l,t,"pos"] + FBMC_INF_POS[l, t]
+        FBMC_FLOW[l, t] <= fbmc_params[:RAM][l,t,"pos"] + FBMC_INF_POS[l, t]
     )
 
     @constraint(
         m,
         FBMC_neg[l = cne, t = T],
-        fbmc_params[:RAM][l,t,"neg"] - FBMC_INF_NEG[l, t] <= -sum(_ptdfz(fbmc_params[:PTDFz], l, z, t) * NP[z, t] for z in FBCCR)
+        fbmc_params[:RAM][l,t,"neg"] - FBMC_INF_NEG[l, t] <= FBMC_FLOW[l, t]
     )
 
     @expression(m, EXCHANGE[z = Z, t = T],

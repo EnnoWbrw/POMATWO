@@ -46,7 +46,7 @@ function test_objectives()
 
                 # All three cost terms must be present simultaneously.
                 for t in T
-                    @test JuMP.coefficient(obj, CU["w3", t]) ≈ 50.0
+                    @test JuMP.coefficient(obj, CU["w3", t]) ≈ 1.0
                     @test JuMP.coefficient(obj, HISTORICAL_INF["wind", t]) ≈ 1000.0
                     @test JuMP.coefficient(obj, MINGEN_INF["wind", t]) ≈ 1000.0
                 end

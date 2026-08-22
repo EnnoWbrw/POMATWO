@@ -215,6 +215,7 @@ has_nonpass(::Any) = false
         include(joinpath("test_cases", "test_redispatch.jl"))
         include(joinpath("test_cases", "test_objectives.jl"))
         include(joinpath("test_cases", "test_expected_results.jl"))
+        include(joinpath("test_cases", "test_fbmc_mixed_ccr.jl"))
     end
     quiet() do
         test_data_load()
@@ -231,6 +232,7 @@ has_nonpass(::Any) = false
         test_redispatch()
         test_objectives()
         test_expected_results()
+        test_fbmc_mixed_ccr()
     end
 end
  
