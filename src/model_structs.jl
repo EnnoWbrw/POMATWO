@@ -431,6 +431,7 @@ struct SubRun{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchSetup, MS<:Market
         end
         link_balance(self)
         report_nodal_flows!(self)
+        fix_net_positions!(self)
         for c in comps
             collect_results!(c, self)
         end

@@ -70,6 +70,37 @@ function create_refday_load_nd()
     )
 end
 
+# Helper: a fixture whose LOAD *and* RES differ between the reference hour (t=1) and
+# the target hour (t=2) — the two other fixtures hold load constant over time, which
+# makes a load pre-step a silent no-op. `P(n,1) = RES + CONV − LOAD` (export-positive),
+# so the reference seed is internally consistent; `P(n,2)` is a free target used only
+# for the net-position gap. gmax_conv equals CONV, so the conventional lever has no
+# room UP — a γ test can then attribute everything it sees to the load lever.
+function create_refday_prestep_nd()
+    nodes = ["n1", "n2", "n3"]; times = [1, 2]
+    return (
+        nodes = nodes, times = times,
+        RES  = Dict(("n1",1)=>4.0, ("n2",1)=>1.0, ("n3",1)=>8.0,
+                    ("n1",2)=>6.0, ("n2",2)=>2.0, ("n3",2)=>5.0),
+        CONV = Dict(("n1",1)=>8.0, ("n2",1)=>2.0, ("n3",1)=>15.0,
+                    ("n1",2)=>8.0, ("n2",2)=>2.0, ("n3",2)=>15.0),
+        STO  = Dict{Tuple{String,Int},Float64}(),
+        gmax_conv = Dict(("n1",1)=>8.0, ("n2",1)=>2.0, ("n3",1)=>15.0,
+                         ("n1",2)=>8.0, ("n2",2)=>2.0, ("n3",2)=>15.0),
+        gmax_res  = Dict(("n1",1)=>4.0, ("n2",1)=>1.0, ("n3",1)=>8.0,
+                         ("n1",2)=>6.0, ("n2",2)=>2.0, ("n3",2)=>8.0),
+        gmax_sto_dis = Dict(n => 0.0 for n in nodes),
+        gmax_sto_chg = Dict(n => 0.0 for n in nodes),
+        P    = Dict(("n1",1)=>8.0,  ("n2",1)=>-3.0, ("n3",1)=>18.0,
+                    ("n1",2)=>20.0, ("n2",2)=>-10.0, ("n3",2)=>18.0),
+        LOAD = Dict(("n1",1)=>4.0, ("n2",1)=>6.0, ("n3",1)=>5.0,
+                    ("n1",2)=>7.0, ("n2",2)=>3.0, ("n3",2)=>5.0),
+        load_max = Dict("n1"=>7.0, "n2"=>6.0, "n3"=>5.0),
+        load_min = Dict("n1"=>4.0, "n2"=>3.0, "n3"=>5.0),
+        nodes_in_zone = Dict("z1" => ["n1", "n2"], "z2" => ["n3"]),
+    )
+end
+
 # Helper: lever state seeded from `nd` at a single reference hour. γ = 1.0 keeps the
 # load lever's UPWARD bound at the reference load, i.e. the pre-F4 behaviour, so tests
 # about the cascade itself are not entangled with the load cap (which F4's own tests pin).
@@ -110,7 +141,7 @@ function test_refday_basecase()
         rd = ReferenceDayBasecase(
             source = "results/forecast",
             matching = MatchingConfig(lookback = 4, scope = ZonalMatchScope()),
-            shift = ShareShift(β_conv = 0.5, β_load = 0.5, res_prestep = true),
+            shift = ShareShift(β_conv = 0.5, β_load = 0.5, prestep = :res),
         )
         fb2 = FlowBased(GSKStrategy = DispOnlyGSK(), basecase = rd)
         @test fb2.basecase isa ReferenceDayBasecase
@@ -368,7 +399,7 @@ function test_refday_basecase()
             ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, load_shift_share=1.0,
                        resolution=:zonal, redist=RefPropRedist(), enforce_balance=false),
             ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, load_shift_share=1.0,
-                       resolution=:zonal, res_prestep=true, redist=RefPropRedist(), enforce_balance=false),
+                       resolution=:zonal, prestep=:res, redist=RefPropRedist(), enforce_balance=false),
             ShareShift(β_conv=0.5, β_load=0.5, β_RES=0.0, load_shift_share=1.0,
                        resolution=:zonal, redist=LoadPropRedist(), enforce_balance=false),
         )
@@ -424,7 +455,7 @@ function test_refday_basecase()
         # (n1 += 2.4, n2 += 0.6) — that is what F2 fixed.
         for res in (:zonal, :nodal)
             m = ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0, load_shift_share=1.0,
-                           resolution=res, res_prestep=true, redist=RefPropRedist(),
+                           resolution=res, prestep=:res, redist=RefPropRedist(),
                            enforce_balance=false)
             tr = POMATWO.ShiftTraceCollector()
             POMATWO.shift_single(nd, params, 2, 1, m; trace = tr)
@@ -446,7 +477,7 @@ function test_refday_basecase()
         nd0 = merge(nd, (RES = Dict(("n1",1)=>0.0, ("n2",1)=>0.0, ("n3",1)=>0.0,
                                     ("n1",2)=>6.0, ("n2",2)=>2.0, ("n3",2)=>5.0),))
         m0 = ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0, load_shift_share=1.0,
-                        resolution=:zonal, res_prestep=true, redist=RefPropRedist(),
+                        resolution=:zonal, prestep=:res, redist=RefPropRedist(),
                         enforce_balance=false)
         tr0 = POMATWO.ShiftTraceCollector()
         POMATWO.shift_single(nd0, params, 2, 1, m0; trace = tr0)
@@ -455,6 +486,82 @@ function test_refday_basecase()
             @test isapprox(sum(df0.delta[df0.node .== n]; init = 0.0), nd0.RES[(n, 2)];
                            atol = 1e-9)
         end
+    end
+
+    @testset "prestep components: :res, :load and both" begin
+        # ndP is the only fixture whose load moves between the reference and the target
+        # hour, so a load pre-step is observable at all.
+        ndP = create_refday_prestep_nd()
+        # every β = 0 ⇒ the gap cascade shifts nothing and the whole net-position gap is
+        # left as np_relax; whatever p_new differs from the seed by IS the pre-step.
+        mP(pre) = ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0, load_shift_share=1.0,
+                             resolution=:zonal, prestep=pre, redist=RefPropRedist(),
+                             enforce_balance=false)
+        seed(n)  = ndP.P[(n, 1)]
+        dres(n)  = ndP.RES[(n, 2)] - ndP.RES[(n, 1)]     # +injection
+        dload(n) = ndP.LOAD[(n, 1)] - ndP.LOAD[(n, 2)]   # load down ⇒ +injection
+
+        # :load alone — nodal injection moves by the load forecast difference only
+        trL = POMATWO.ShiftTraceCollector()
+        pL = POMATWO.shift_single(ndP, params, 2, 1, mP(:load); trace = trL)
+        for n in ndP.nodes
+            @test isapprox(pL[n], seed(n) + dload(n); atol = 1e-9)
+        end
+        dfL = POMATWO.shift_trace_df(trL)
+        @test "RES_prestep" ∉ dfL.component
+        for n in ndP.nodes
+            traced = sum(dfL.delta[(dfL.node .== n) .& (dfL.component .== "load_prestep")];
+                         init = 0.0)
+            @test isapprox(traced, dload(n); atol = 1e-9)
+        end
+
+        # :res alone — unchanged behaviour, and no load_prestep rows
+        pR = POMATWO.shift_single(ndP, params, 2, 1, mP(:res))
+        for n in ndP.nodes
+            @test isapprox(pR[n], seed(n) + dres(n); atol = 1e-9)
+        end
+
+        # both, as a vector — the two hard-sets are independent and add up
+        trB = POMATWO.ShiftTraceCollector()
+        pB = POMATWO.shift_single(ndP, params, 2, 1, mP([:res, :load]); trace = trB)
+        for n in ndP.nodes
+            @test isapprox(pB[n], seed(n) + dres(n) + dload(n); atol = 1e-9)
+        end
+        dfB = POMATWO.shift_trace_df(trB)
+        @test Set(["RES_prestep", "load_prestep"]) ⊆ Set(dfB.component)
+
+        # a bare symbol and a one-element vector are the same configuration
+        @test POMATWO.prestep_components(mP(:load)) == [:load]
+        @test POMATWO.prestep_components(mP([:load])) == [:load]
+        @test POMATWO.prestep_components(mP(Symbol[])) == Symbol[]
+        # default: no pre-step at all
+        @test POMATWO.prestep_components(ShareShift()) == Symbol[]
+        pN = POMATWO.shift_single(ndP, params, 2, 1, mP(Symbol[]))
+        @test all(isapprox(pN[n], seed(n); atol = 1e-9) for n in ndP.nodes)
+    end
+
+    @testset "load pre-step re-anchors the γ budget to the target day" begin
+        # The pre-step is a hard-set, outside the γ budget (exactly as the RES pre-step
+        # is outside β_RES). Afterwards `load0` is the TARGET hour's load, so γ caps the
+        # deviation from the delivery-day forecast — not from the reference day.
+        ndP = create_refday_prestep_nd()
+        γ = 0.1
+        m = ShareShift(β_conv=0.0, β_load=1.0, β_RES=0.0, load_shift_share=γ,
+                       resolution=:nodal, prestep=:load, redist=RefPropRedist(),
+                       enforce_balance=false)
+        p = POMATWO.shift_single(ndP, params, 2, 1, m)
+
+        for n in ndP.nodes
+            after_prestep = ndP.P[(n, 1)] + ndP.LOAD[(n, 1)] - ndP.LOAD[(n, 2)]
+            D  = ndP.P[(n, 2)] - after_prestep          # :nodal ⇒ per-node gap
+            lo = -γ * ndP.load_max[n]                   # budget re-anchored: spent = 0
+            hi = min(γ * ndP.load_min[n], ndP.LOAD[(n, 2)])
+            @test isapprox(p[n], after_prestep + clamp(D, lo, hi); atol = 1e-9)
+        end
+        # n1 needs load UP and n2 load DOWN, so both bounds are exercised and the
+        # not-re-anchored reading (spent = load_ref − load_tgt ≠ 0) is excluded
+        @test isapprox(p["n1"], 5.0 + 0.4; atol = 1e-9)
+        @test isapprox(p["n2"], 0.0 - 0.6; atol = 1e-9)
     end
 
     @testset "storage lever + availability-weighted cap" begin
@@ -576,7 +683,7 @@ function test_refday_basecase()
         dfS = POMATWO.shift_trace_df(trS)
         @test isapprox(Σp(pS), 0.0; atol = 1e-6)
         @test isapprox(sum(dfS.delta[dfS.component .== "balance"]; init=0.0), -4.0; atol = 1e-6)
-        @test all(in(Set(["RES_prestep","RES","conv","load","sto","balance","np_relax"])), dfS.component)
+        @test all(in(Set(["RES_prestep","load_prestep","RES","conv","load","sto","balance","np_relax"])), dfS.component)
         @test !("NP" in dfS.component)
 
         # deficit target (Σ P(·,2)=−4) → conventional-gen raise restores balance
@@ -640,6 +747,20 @@ function test_refday_basecase()
             ShareShift(resolution = :bogus))
         @test_throws ErrorException POMATWO.validate_shares(
             ShareShift(load_shift_share = -0.1))
+        @test_throws ErrorException POMATWO.validate_shares(
+            ShareShift(prestep = :bogus))
+        @test_throws ErrorException POMATWO.validate_shares(
+            ShareShift(prestep = [:res, :bogus]))
+        # valid pre-step configurations pass
+        for pre in (Symbol[], :res, :load, [:res, :load])
+            @test POMATWO.validate_shares(ShareShift(prestep = pre, β_conv = 0.0,
+                                                     β_load = 0.0)) === nothing
+        end
+        # moving a component twice (hard-set, then balancer) is warned, not blocked
+        @test_logs (:warn, r"prestep") POMATWO.validate_shares(
+            ShareShift(prestep = :res, β_RES = 0.5, β_conv = 0.0, β_load = 0.0))
+        @test_logs (:warn, r"prestep") POMATWO.validate_shares(
+            ShareShift(prestep = :load, β_conv = 0.0, β_load = 0.5))
     end
 
     @testset "load lever bounded by load_shift_share (γ)" begin
@@ -741,14 +862,15 @@ function test_refday_basecase()
 
     @testset "shift_single trace: deltas complete and valid" begin
         # enforce_balance off → isolate the physical cascade + np_relax bookkeeping.
-        valid_comps = Set(["RES_prestep", "RES", "conv", "load", "sto", "balance", "np_relax"])
+        valid_comps = Set(["RES_prestep", "load_prestep", "RES", "conv", "load", "sto", "balance",
+                           "np_relax"])
         for m in (
             ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0,
                        resolution=:zonal, redist=RefPropRedist(), enforce_balance=false),
             ShareShift(β_conv=0.5, β_load=0.5, β_RES=0.0,
-                       resolution=:zonal, res_prestep=true, redist=LoadPropRedist(), enforce_balance=false),
+                       resolution=:zonal, prestep=:res, redist=LoadPropRedist(), enforce_balance=false),
             ShareShift(β_conv=0.5, β_load=0.5, resolution=:nodal,
-                       res_prestep=true, redist=RefPropRedist(), enforce_balance=false),
+                       prestep=:res, redist=RefPropRedist(), enforce_balance=false),
             ShareShift(β_conv=0.0, β_load=0.0, β_RES=0.0,
                        resolution=:zonal, redist=RefPropRedist(), enforce_balance=false),
         )
@@ -760,7 +882,7 @@ function test_refday_basecase()
             @test all(in(valid_comps), df.component)
             @test all(==(2), df.Time)
             # prestep rows appear iff the pre-step is active
-            @test ("RES_prestep" in df.component) == m.res_prestep
+            @test ("RES_prestep" in df.component) == (:res in POMATWO.prestep_components(m))
             @test !("NP" in df.component)             # no phantom exchange lever
 
             # deltas are complete: p_new = P_ref + Σ nodal deltas (np_relax excluded)
@@ -854,7 +976,7 @@ function test_refday_trace_e2e()
                                           scope = ZonalMatchScope()),
                 # enforce_balance explicit: the default is false, and the balance
                 # assertions further down exercise the opt-in pass end to end.
-                shift = ShareShift(β_conv = 0.5, β_load = 0.5, res_prestep = true,
+                shift = ShareShift(β_conv = 0.5, β_load = 0.5, prestep = :res,
                                    enforce_balance = true,
                                    redist = GSKRedist(DispOnlyGSK())),
             )
@@ -873,6 +995,9 @@ function test_refday_trace_e2e()
                 @test isfile(joinpath(scen, sub, "REFDAY_MATCH.arrow"))
                 @test isfile(joinpath(scen, sub, "REFDAY_SHIFT.arrow"))
                 @test isfile(joinpath(scen, sub, "REFDAY_DIAG.arrow"))
+                # the assembled basecase itself — what calc_fbmc_params consumed
+                @test isfile(joinpath(scen, sub, "REFDAY_NETINPUT.arrow"))
+                @test isfile(joinpath(scen, sub, "REFDAY_LINEFLOW.arrow"))
                 # flow-based domain persisted per subrun (DayAhead stage, no prefix)
                 @test isfile(joinpath(scen, sub, "DayAhead_RAM.arrow"))
             end
@@ -926,6 +1051,50 @@ function test_refday_trace_e2e()
                 @test r.reallocated >= -1e-9
             end
 
+            # ── the exported basecase IS what the flow-based parameters were built from ──
+            ni = out.REFDAY_NETINPUT
+            lf = out.REFDAY_LINEFLOW
+            @test !isempty(ni) && !isempty(lf)
+            @test sort(unique(ni.Time)) == [1, 2, 3, 4]
+            @test sort(unique(lf.Time)) == [1, 2, 3, 4]
+            @test nrow(ni) == length(params.sets.N) * 4
+            @test nrow(lf) == length(params.sets.L) * 4
+            @test nrow(unique(ni[:, [:index, :Time]])) == nrow(ni)
+            @test nrow(unique(lf[:, [:index, :Time]])) == nrow(lf)
+            @test Set(ni.index) == Set(params.sets.N)
+            @test Set(lf.index) == Set(params.sets.L)
+
+            # exact equality with the in-memory artifacts, not a recomputation: the
+            # persisted numbers must be the ones calc_fbmc_params was handed.
+            for r in eachrow(ni)
+                @test isapprox(r.ACINJECTION, base[:netinput_ac][r.index, r.Time]; atol = 1e-9)
+            end
+            for r in eachrow(lf)
+                @test isapprox(r.LINEFLOW, base[:lineflows][r.index, r.Time]; atol = 1e-9)
+            end
+
+            # ACINJECTION_REF is the source state's injection at that node's matched
+            # reference hour, so the shift reads end-to-end from this table alone:
+            # ACINJECTION = ACINJECTION_REF − Σ deltas (trace is export-positive).
+            for r in eachrow(ni)
+                @test isapprox(r.ACINJECTION_REF, P_src[(r.index, refmap[(r.index, r.Time)])];
+                               atol = 1e-6)
+                s = out.REFDAY_SHIFT
+                d = sum(s.delta[(s.node .== r.index) .& (s.Time .== r.Time) .&
+                                (s.component .!= "np_relax")]; init = 0.0)
+                @test isapprox(r.ACINJECTION, r.ACINJECTION_REF - d; atol = 1e-6)
+            end
+
+            # LINEFLOW is the import-positive PTDF image of ACINJECTION (params.ptdf maps
+            # NETINPUT to LINEFLOW directly — see the sign-convention note in CLAUDE.md).
+            let PTDFn = POMATWO.dict_to_matrix(params.ptdf),
+                inj = Dict((r.index, r.Time) => r.ACINJECTION for r in eachrow(ni))
+                for r in eachrow(lf)
+                    want = sum(PTDFn[r.index, n] * inj[(n, r.Time)] for n in axes(PTDFn, 2))
+                    @test isapprox(r.LINEFLOW, want; atol = 1e-6)
+                end
+            end
+
             # RAM table: one row per CNE line and timestep, covering both splits, with
             # the 70%-rule reproducible from the persisted columns alone
             @test !isempty(out.RAM)
@@ -943,7 +1112,8 @@ function test_refday_trace_e2e()
             # non-refday results read back with empty trace tables
             fc_out = DataFiles(joinpath(tmpdir, "forecast"))
             @test isempty(fc_out.REFDAY_MATCH) && isempty(fc_out.REFDAY_GROUPS) &&
-                  isempty(fc_out.REFDAY_SHIFT) && isempty(fc_out.REFDAY_DIAG)
+                  isempty(fc_out.REFDAY_SHIFT) && isempty(fc_out.REFDAY_DIAG) &&
+                  isempty(fc_out.REFDAY_NETINPUT) && isempty(fc_out.REFDAY_LINEFLOW)
             @test isempty(@test_logs (:warn, r"no reference-day trace") refday_reference_times(fc_out))
             # ... but the RAM table is written for the OptimizationBasecase run too
             @test !isempty(fc_out.RAM)
@@ -959,7 +1129,7 @@ function test_refday_trace_e2e()
                 matching = MatchingConfig(cluster_size = 2, lookback = 1,
                                           scope = ZonalMatchScope()),
                 # enforce_balance explicit: default is false (see bc above)
-                shift = ShareShift(β_conv = 0.5, β_load = 0.5, res_prestep = true,
+                shift = ShareShift(β_conv = 0.5, β_load = 0.5, prestep = :res,
                                    enforce_balance = true,
                                    redist = GSKRedist(DispOnlyGSK())),
             )

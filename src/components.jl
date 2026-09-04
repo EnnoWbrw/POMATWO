@@ -150,9 +150,10 @@ label(::ProsumerComp) = :prosumer
 
 # Function stubs whose methods are defined after SubRun/ModelSetup exist
 # (energy_balances.jl): `components`, `link_balance`, `regions`, `balance_load`,
-# `report_nodal_flows!`.
+# `report_nodal_flows!`, `fix_net_positions!`.
 function components end
 function link_balance end
 function regions end
 function balance_load end
 function report_nodal_flows! end
+function fix_net_positions! end

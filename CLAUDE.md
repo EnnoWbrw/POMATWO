@@ -25,14 +25,19 @@ isolation:
 | Cost | Where | Meaning |
 |---|---|---|
 | 50 | `technologies.jl` DA ndisp | day-ahead curtailment |
-| 150 | `DCLF` fields | redispatch activation (see below) |
+| 150 / 500 | `DCLF` fields | redispatch activation (see below) |
 | 1000 | `technologies.jl` DA ndisp | historical / min-generation slack |
 | 9000 | `energy_balances.jl` | nodal+zonal `CU` / `LL` infeasibility slack |
 | 10000 | `technologies.jl` storage | storage balance `INF` |
 | 100000 | `technologies.jl` FBMC | FBMC RAM slack |
 
-Redispatch costs are configurable on `DCLF`: `disp_cost` (150), `res_up_cost` (1),
-`res_down_cost` (150), `sto_cost` (150). The rest are still literals.
+Redispatch costs are configurable on `DCLF`: `disp_cost` (150), `res_up_cost` (150),
+`res_down_cost` (150), `sto_cost` (500). Generation redispatch is priced the same in every
+direction, renewable recall included; storage is dearer because it shifts energy across
+hours, not just across nodes. The rest are still literals. `DCLF` also has an
+opt-in `fix_net_positions::Bool` flag (default `false`, no cost — a hard equality
+constraint, not a penalty): when `true`, redispatch may only reshuffle generation within a
+zone, since each zone's net position is pinned to its day-ahead cleared value.
 
 **Edit every stage, not just one.** Dispatch keys off `SubRun{MT,PS,RD,MS}` where
 `MS <: DayAhead | TwoDayAhead | Redispatch`. The same function name (`add_disp_generators`,
@@ -63,6 +68,10 @@ the names suggest. Consequences:
   back on exit (`build_refday_basecase`). `REFDAY_SHIFT` trace deltas are therefore
   export-positive (positive = more feed-in), unlike the result tables:
   `netinput_ac[n,tt] = ACINJECTION_source(n, ref(n,tt)) − Σ deltas(n,tt)`.
+  The assembled basecase is exported too — `REFDAY_NETINPUT` (`ACINJECTION_REF`,
+  `ACINJECTION`) and `REFDAY_LINEFLOW` — and those, being result tables, are
+  IMPORT-positive. So the one identity spans both conventions: a `REFDAY_SHIFT` row and a
+  `REFDAY_NETINPUT` row of the same (node, hour) have opposite signs by construction.
 - **`params.ptdf` is import-positive too.** It maps `NETINPUT` to `LINEFLOW` directly
   (`PTDF · NETINPUT == LINEFLOW`), i.e. the negation of the usual export-positive PTDF.
   The whole flow-based subsystem consistently works in that negated convention — the FBMC
@@ -90,6 +99,14 @@ overload is the congestion redispatch then resolves. Do not "fix" it by adding l
   zone's summed net input and its `EXCHANGE` differ by them.
 - Consequence for tests: the nodal invariant `inv_network!` cannot run on a zonal DA (no
   `DELTA`, limits may be violated) — `inv_zonal_da_network!` covers it instead.
+
+**Redispatch is always nodal.** `add_network` for `MS<:Redispatch` dispatches on
+`DCLF{LF}` regardless of `MarketType` (`src/technologies.jl`), so there is never an
+`EXCHANGE` variable in the redispatch stage, zonal or nodal. A "zonal net position" during
+redispatch is therefore a derived aggregate — `sum(NETINPUT[n,t] for n in
+nodes_in_zone[z])` — not a variable of its own; that is how `fix_net_positions!`
+(`energy_balances.jl`) and its day-ahead counterpart `zonal_net_position`
+(`utils/df_utils.jl`) build it.
 
 ---
 
@@ -129,6 +146,25 @@ energy balance.
 Result DataFrames are populated with unresolved JuMP `AffExpr`/`VariableRef` during model
 build and only resolved to floats after solving. That is why the `df_*` schemas in
 `src/utils/df_utils.jl` are typed `AffOrVarOrFloatOrInt`.
+
+**Two rules keep that from being ruinously slow.** `JuMP.value` on a Plasmo node variable
+is a round-trip into the solved optimizer, one variable at a time, and `value(::AffExpr)`
+repeats it per term — so a variable that appears in many rows is re-fetched once per
+occurrence.
+
+1. `fetch_results` resolves against `primal_cache(sr)` (`src/utils/model_utils.jl`), which
+   fetches every variable's primal once. Terms and summation order are untouched, so the
+   numbers are identical.
+2. A quantity that enters **no constraint** must not be built as a JuMP expression at all.
+   `add_to_expression!` flattens, so a PTDF line flow — a dense row over the nodes, each
+   `ACINJECTION[n,t]` itself a sum over that node's plants — would carry one term per
+   plant, per line, per hour. Compute such reporting quantities after the solve in
+   `derive_results!` (`src/energy_balances.jl`), which is called from `_run_states` between
+   `fetch_results` and `write_results`. The zonal day-ahead `LINEFLOW` is one matrix
+   product there; as expressions it cost ~60 s of a 672 h split's result extraction.
+
+`ModelRun(verbose = true)` logs `build`/`solve`/`fetch`/`write` seconds per stage, which is
+how to tell which of the four a slow subrun is actually spending its time in.
 
 Stages hand data forward through a `ctx` dict (`prev_results_for_redispatch`,
 `prev_results_for_fbmc` in `df_utils.jl`), not by sharing variables.
@@ -242,3 +278,19 @@ Registered in `test/test_cases/cases.jl`, files under `test/test_cases/data/`.
 julia --project=docs -e "using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()"
 julia --project=docs docs/make.jl
 ```
+
+## graphify (optional, local-only)
+
+**This whole section applies only if the `graphify` CLI is installed AND `graphify-out/graph.json`
+exists locally.** `graphify-out/` is gitignored and never shipped with the repo, so a fresh clone
+has neither. If either is missing, ignore this section entirely and use normal file reading and
+search — do not install anything, and do not tell the user to.
+
+When both are present, graphify-out/ holds a knowledge graph of this repo with god nodes,
+community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"`. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

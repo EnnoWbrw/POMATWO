@@ -430,7 +430,7 @@ function add_storage(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS <:Prosume
     @objective(
         m,
         Min,
-        sum(redispatch_cost * (GEN_UP[s, t] + GEN_DOWN[s, t]) for s in S, t in T) +
+        sum(redispatch_cost * (GEN_UP[s, t] + GEN_DOWN[s, t]) for s in S, t in T) + redispatch_cost * sum(CHARGE_UP[s, t] + CHARGE_DOWN[s, t] for s in S, t in T) +
         sum(10000 * (INF_POS[s, t] + INF_NEG[s, t]) for s in S, t in T)
     )
   

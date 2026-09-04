@@ -109,12 +109,22 @@ scoped), `shift_single` proceeds as follows:
 
 1. **Baseline.** Start from the reference hour's nodal injection ``P(n,r)`` and its
    per-node RES generation, conventional generation, and load.
-2. **Optional RES pre-step** (`res_prestep = true`). Hard-set every node's renewable
-   infeed to the target hour's value — per node at *both* resolutions, so afterwards the
-   intra-zone RES distribution (not just the zonal total) is the target day's. This
-   mirrors the D2CF step of inserting the delivery-day wind/solar forecast into the
-   snapshot: what is inserted is the forecast itself, not the reference day rescaled to
-   the forecast's total.
+2. **Optional pre-steps** (`prestep = :res`, `:load`, or `[:res, :load]`; default
+   `Symbol[]` = none). Hard-set every node's renewable infeed and/or its load to the
+   target hour's value — per node at *both* resolutions, so afterwards that component's
+   intra-zone distribution (not just the zonal total) is the target day's. This mirrors
+   the D2CF step of inserting the delivery-day forecast into the snapshot: what is
+   inserted is the forecast itself, not the reference day rescaled to the forecast's
+   total. The pre-steps are traced as `RES_prestep` / `load_prestep`.
+
+   A pre-step is a *hard-set*, outside the budget the corresponding lever is otherwise
+   held to: `:res` ignores ``β_{RES}`` exactly as `:load` ignores ``γ``. For load this
+   has one further consequence — the pre-step **re-anchors** ``γ``: afterwards `load0`
+   is the target hour's load, so `load_shift_share` caps how far the gap cascade and the
+   balance pass may move load away from the *delivery day's* forecast, rather than away
+   from the reference day's. Without the re-anchor a day whose load differs from the
+   reference by more than ``γ`` times the load envelope would arrive at the cascade with
+   its whole budget already spent.
 3. **Net-position gap.** Per zone: ``D(z) = NP_{target}(z) − NP_{current}(z)``, where
    ``NP`` is the zonal sum of nodal injections. (With `resolution = :nodal` the gap is
    computed per node instead — the output then *equals* the target's own nodal injection
@@ -182,14 +192,33 @@ For a given timestep and already matched reference-day the shifting process, usi
 ![apportionment](figs/a3.png)
 ### Traceability
 
-With `collect_trace = true` (the default in the solving pipeline) four Arrow tables
+With `collect_trace = true` (the default in the solving pipeline) six Arrow tables
 reconstruct the construction exactly: `REFDAY_MATCH` (per group and target hour: matched
 time, cluster distance, fallback flag), `REFDAY_GROUPS` (group → node membership),
 `REFDAY_SHIFT` (per target hour, node, and component: the applied injection delta,
-export-positive) and `REFDAY_DIAG` (see below). The reconstruction identity is
+export-positive), `REFDAY_DIAG` (see below), and the assembled basecase itself:
+
+| Table | Row | Columns |
+|---|---|---|
+| `REFDAY_NETINPUT` | (`Time`, node) | `ACINJECTION_REF` — the unshifted seed, the source state's injection at that node's *own* matched reference hour; `ACINJECTION` — the shifted result |
+| `REFDAY_LINEFLOW` | (`Time`, AC line) | `LINEFLOW` = ``PTDF · ACINJECTION``, over every AC line rather than only the CNEs |
+
+These last two are the in-memory `:netinput_ac` / `:lineflows` in long form — the numbers
+the flow-based parameters were actually built from, not a recomputation. Both are
+**import-positive**, like every other persisted `ACINJECTION`/`LINEFLOW` column and unlike
+the export-positive `REFDAY_SHIFT` deltas. `REFDAY_LINEFLOW` is what `calc_ram` turns into
+the persisted `F0`; the `RAM` table keeps only that intercept, and only for CNEs.
+
+The reconstruction identity is
 
 ```
 netinput_ac[n, t] = ACINJECTION_source(n, ref(n, t)) − Σ deltas(n, t)
+```
+
+which, read entirely off the exported tables, is
+
+```
+ACINJECTION[n, t] = ACINJECTION_REF[n, t] − Σ REFDAY_SHIFT.delta(n, t)
 ```
 
 (the minus stems from the sign-convention flip between trace and result tables; the
@@ -217,7 +246,7 @@ zone), the same convention as the `np_relax` rows.
     | Decision | Default | Risk |
     |---|---|---|
     | ``β`` shares | `β_conv = β_load = 0.5` | Pure judgment call — *who absorbs the forecast gap* directly shapes the basecase flows, hence ``f_0`` and RAM. Shares must sum to ``≤ 1`` (leftover is `np_relax`); a sum ``> 1`` is a hard error. |
-    | `res_prestep` | `false` | Combined with `β_RES > 0`, RES is moved twice (warned, not blocked). |
+    | `prestep` | `Symbol[]` (none) | Combined with the matching ``β`` (`:res` with `β_RES > 0`, `:load` with `β_load > 0`), that component is moved twice (warned, not blocked). `:load` additionally re-anchors the ``γ`` budget to the target day. |
     | `resolution` | `:zonal` | `:nodal` discards the reference day entirely (see above). |
     | `redist` | `GSKRedist(FlatGSK())` | The spatial allocation of every correction is user-chosen. With `GSKRedist`, GSK assumptions enter the basecase *and* enter again through the zonal PTDF — the same heuristic used twice. |
     | `fallback_order` | `[:conv, :sto, :load]` | Physical levers only. A gap no lever can absorb is relaxed toward the reference (`np_relax`), not faked. |

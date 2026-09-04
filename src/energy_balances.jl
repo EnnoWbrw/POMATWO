@@ -251,6 +251,53 @@ every redispatch stage go through [`add_dclf`](@ref), which writes these tables 
 """
 report_nodal_flows!(::SubRun) = nothing
 
+"""
+    derive_results!(sr::SubRun)
+
+Fill in result tables that are cheaper computed from solved values than carried as JuMP
+expressions. Called once per stage from `_run_states`, after [`fetch_results`](@ref) has
+resolved every expression already in `sr.results`, and before the tables are written.
+No-op by default.
+"""
+derive_results!(::SubRun) = nothing
+
+# PTDF line flows of a zonal day-ahead, the counterpart to `report_nodal_flows!`.
+#
+# `params.ptdf` is import-positive: it maps NETINPUT to LINEFLOW without a sign flip (see
+# the sign-convention section of CLAUDE.md). Read from the dict directly — the axes of
+# `dict_to_matrix` are lexicographically sorted, not in `sets.L`/`sets.N` order.
+function derive_results!(
+    sr::SubRun{ZonalMarket{XF},PS,RD,MS},
+) where {XF<:ExchangeFormulation,PS<:ProsumerSetup,RD<:RedispatchSetup,MS<:DayAhead}
+    params = sr.modelrun.params
+    N, L = params.sets.N, params.sets.L
+    @unpack acline_capacity, ptdf = params
+    (isempty(L) || isempty(ptdf) || !haskey(sr.results, :NETINPUT)) && return nothing
+    T = collect(sr.market_state.Time)
+
+    # Keyed rather than positional: the nodal table's row order is this stage's own
+    # (`report_nodal_flows!`), but a keyed lookup cannot silently transpose if that
+    # changes or another writer appends to :NETINPUT first.
+    acinj = Dict{Tuple{String,Int},Float64}(
+        (String(r.index), Int(r.Time)) => Float64(r.ACINJECTION)
+        for r in eachrow(sr.results[:NETINPUT])
+    )
+
+    P = [get(ptdf, (l, n), 0.0) for l in L, n in N]        # lines x nodes
+    A = [acinj[(n, t)] for n in N, t in T]                 # nodes x hours
+    flows = P * A                                          # lines x hours, one BLAS call
+
+    # Replaces the empty frame `df_lineflow` initialised during the build: these values are
+    # already floats and must not be run through `fetch_results` again.
+    sr.results[:LINEFLOW] = DataFrame(
+        index = repeat(L, inner = length(T)),
+        Time = repeat(T, outer = length(L)),
+        LINEFLOW = vec(permutedims(flows)),                # row-major: t fastest, then l
+        line_capacity = [acline_capacity[l] for l in L for t in T],
+    )
+    return nothing
+end
+
 # DC-line flow expression container of a zonal day-ahead network node, or `nothing` when the
 # formulation does not model DC lines.
 _zonal_dc_flow(::SubRun, ::Type{NTC}) = nothing
@@ -319,29 +366,13 @@ function report_nodal_flows!(
         DELTA = zeros(length(N) * length(T)),
     ))
 
-    # `params.ptdf` is import-positive: it maps NETINPUT to LINEFLOW without a sign flip
-    # (see the sign-convention section of CLAUDE.md). Read from the dict directly — the
-    # axes of `dict_to_matrix` are lexicographically sorted, not in `sets.L`/`sets.N` order.
-    # No line-limit constraint: the point of these flows is that they can be overloaded.
-    if !isempty(L) && !isempty(ptdf)
-        LINEFLOW = Containers.DenseAxisArray(Matrix{AffExpr}(undef, length(L), length(T)), L, T)
-        for l in L, t in T
-            ex = AffExpr()
-            for n in N
-                coef = get(ptdf, (l, n), 0.0)
-                iszero(coef) && continue
-                add_to_expression!(ex, coef, ACINJECTION[n, t])
-            end
-            LINEFLOW[l, t] = ex
-        end
-
-        append_results!(sr.results, :LINEFLOW, DataFrame(
-            index = repeat(L, inner = length(T)),
-            Time = repeat(T, outer = length(L)),
-            LINEFLOW = [LINEFLOW[l, t] for l in L for t in T],
-            line_capacity = [acline_capacity[l] for l in L for t in T],
-        ))
-    end
+    # The PTDF line flows are NOT built here. They enter no constraint — the point of
+    # these flows is that they can be overloaded — so they are pure reporting, and as
+    # JuMP expressions they are ruinous: `add_to_expression!` flattens, so every `LINEFLOW[l,t]`
+    # would hold one term per plant (the PTDF row is dense over the nodes, and each
+    # `ACINJECTION[n,t]` is itself a sum over that node's plants). That is lines x hours x
+    # plants terms to build and, later, to resolve. `derive_results!` computes the same
+    # numbers after the solve as one PTDF matrix product over the solved ACINJECTION.
 
     if !isnothing(F)
         append_results!(sr.results, :DCLINEFLOW, DataFrame(
@@ -353,6 +384,56 @@ function report_nodal_flows!(
     end
 
     return sr.results
+end
+
+### Opt-in: pin zonal net positions during redispatch to their day-ahead values
+#
+# Redispatch (`add_network` for `MS<:Redispatch`, technologies.jl) always dispatches to
+# `add_dclf` regardless of `MarketType` — there is no `:EXCHANGE` variable/expression on
+# the redispatch `:network` node, zonal or nodal. So "the zonal net position in redispatch"
+# is not a variable to constrain directly; it has to be rebuilt as the sum of nodal
+# `NETINPUT` over each zone's nodes. Both `NETINPUT` (here) and the day-ahead `EXCHANGE`
+# it is pinned against (`zonal_net_position` in df_utils.jl) are import-positive under the
+# same convention (see the sign-convention section of CLAUDE.md), so no sign flip is
+# needed to compare them.
+
+"""
+    fix_net_positions!(sr::SubRun)
+
+No-op for every stage except an opted-in redispatch (`DCLF.fix_net_positions == true`),
+where it constrains each zone's net position to exactly equal its day-ahead cleared value.
+"""
+fix_net_positions!(::SubRun) = nothing
+
+function fix_net_positions!(
+    sr::SubRun{MT,PS,DCLF{LF},MS},
+) where {MT<:MarketType,PS<:ProsumerSetup,LF<:DCLFFormulation,MS<:Redispatch}
+    sr.modelrun.setup.RedispatchSetup.fix_net_positions || return nothing
+
+    params = sr.modelrun.params
+    @unpack nodes_in_zone = params
+    Z = params.sets.Z
+    T = sr.market_state.Time
+    m = sr.network
+    NETINPUT = sr.vars[:network][:NETINPUT]
+
+    haskey(sr.market_state.da_market_result, :zonal_net_position) || error(
+        "fix_net_positions = true but the day-ahead result has no :zonal_net_position " *
+        "entry. This requires the day-ahead SubRun to have populated it (see " *
+        "`prev_results_for_redispatch` in df_utils.jl).",
+    )
+    np_da = sr.market_state.da_market_result[:zonal_net_position]
+
+    # Skip zones with no nodes rather than emitting a trivially-infeasible `0 == np_da` row.
+    zones = [z for z in Z if !isempty(get(nodes_in_zone, z, String[]))]
+
+    @constraint(
+        m,
+        FixNetPosition[z = zones, t = T],
+        sum(NETINPUT[n, t] for n in nodes_in_zone[z]) == np_da[z, t]
+    )
+
+    return nothing
 end
 
 function _push_balance_results!(sr::SubRun, key::Symbol, regioncol::Symbol, con, CU, LL, R, T)

@@ -1104,7 +1104,7 @@ function create_lineplot_layout(
     ax = Axis(fig[1, 1])
 
     if background_map
-        provider = CartoDB()
+        provider = OpenStreetMap(:DE)
         tm = Tyler.Map(extent; provider, figure = fig, axis = ax)
         wait(tm)
     else

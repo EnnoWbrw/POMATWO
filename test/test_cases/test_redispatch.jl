@@ -33,15 +33,24 @@ function test_redispatch()
         ndisp_rows(r) = filter(row -> row.index in params.sets.NDISP, r.REDISP)
         disp_rows(r) = filter(row -> row.index in params.sets.DISP, r.REDISP)
 
+        # Zone `z`'s net position at `t`, aggregated from a nodal NETINPUT table. Both
+        # NETINPUT and the day-ahead EXCHANGE are import-positive, so the two are directly
+        # comparable — see the sign-convention section of CLAUDE.md.
+        zone_np(ni, z, t) = sum(
+            row.NETINPUT for row in eachrow(ni)
+            if row.Time == t && row.index in params.nodes_in_zone[z];
+            init = 0.0,
+        )
+
         # =================================================================
         @testset "DCLF cost fields" begin
             # Defaults, and both constructors still work unchanged.
             d = DCLF()
             @test d isa DCLF{PhaseAngle}
             @test d.disp_cost == 150.0
-            @test d.res_up_cost == 1.0
+            @test d.res_up_cost == 150.0
             @test d.res_down_cost == 150.0
-            @test d.sto_cost == 150.0
+            @test d.sto_cost == 500.0
 
             @test DCLF(PhaseAngle) isa DCLF{PhaseAngle}
             @test DCLF(POMATWO.PTDF) isa DCLF{POMATWO.PTDF}
@@ -53,7 +62,8 @@ function test_redispatch()
         end
 
         mktempdir() do tmpdir
-            # Default: non-dispatchables may be recalled (res_up_cost = 1.0).
+            # Default: non-dispatchables may be recalled (res_up_cost = 150.0 — the same
+            # price as dispatchable redispatch, so recall is an option, not a freebie).
             results = run_redisp(tmpdir, "rd_recall_on", DCLF())
             # Recall priced out of the market: reproduces the pre-change, downward-only
             # behaviour of non-dispatchable redispatch.
@@ -128,6 +138,82 @@ function test_redispatch()
                 @test !isempty(wind)
                 @test all(wind.difference .> 1e-6)
                 @test all(isapprox.(wind.difference, expected[:res_recall], atol=1e-6))
+            end
+        end
+
+        # =================================================================
+        @testset "net positions pinned to day-ahead levels" begin
+            @test DCLF().fix_net_positions == false
+            @test DCLF(; fix_net_positions = true).fix_net_positions == true
+            @test DCLF(; fix_net_positions = true) isa DCLF{PhaseAngle}
+            @test DCLF(POMATWO.PTDF; fix_net_positions = true).fix_net_positions == true
+
+            mktempdir() do tmpdir
+                free   = run_redisp(tmpdir, "np_free",   DCLF())
+                pinned = run_redisp(tmpdir, "np_pinned", DCLF(; fix_net_positions = true))
+
+                dir_free = joinpath(tmpdir, "np_free")
+                dir_pin  = joinpath(tmpdir, "np_pinned")
+
+                T = 1:4
+                Z = params.sets.Z
+
+                # Redispatch has no EXCHANGE variable at all, so the day-ahead side comes
+                # from the zonal DA table and the redispatch side from nodal NETINPUT.
+                da_ex = DataFiles(dir_free, DayAhead).EXCHANGE
+                da_np(z, t) = only(filter(r -> r.index == z && r.Time == t, da_ex)).EXCHANGE
+
+                ni_free = DataFiles(dir_free, Redispatch).NETINPUT
+                ni_pin  = DataFiles(dir_pin,  Redispatch).NETINPUT
+
+                # The flag touches redispatch only — both runs clear the same day-ahead.
+                @test DataFiles(dir_pin, DayAhead).EXCHANGE.EXCHANGE ≈ da_ex.EXCHANGE
+
+                # Day-ahead net positions are NTC-capped at ±40 (Z2 exports to Z1).
+                @test maximum(abs, da_ex.EXCHANGE) ≈ 40.0 atol=1e-6
+
+                # Teeth: unpinned, redispatch moves the net positions (the wind recall at
+                # n3 in Z2 paired with gas coming down at n1 in Z1 is a cross-zonal shift).
+                @test any(abs(zone_np(ni_free, z, t) - da_np(z, t)) > 1.0 for z in Z, t in T)
+
+                # Pinned: every zone, every hour, exactly at its day-ahead value.
+                for z in Z, t in T
+                    @test zone_np(ni_pin, z, t) ≈ da_np(z, t) atol=1e-6
+                end
+
+                # Case 3's congestion is only relievable across the zonal border, so the
+                # pin forces the model off the recall solution and onto lost load.
+                @test sum(free.NodalMarketRedispBalance.LL) ≈ 0.0 atol=1e-6
+                @test sum(pinned.NodalMarketRedispBalance.LL) > 1e-6
+                @test sum(ndisp_rows(pinned).GEN_UP) < sum(ndisp_rows(free).GEN_UP)
+            end
+        end
+
+        # =================================================================
+        @testset "net position pinning under a nodal market" begin
+            # Covers the NodalMarket branch of `zonal_net_position`, which derives the
+            # day-ahead net position from nodal NETINPUT because a nodal market has no
+            # EXCHANGE table.
+            mktempdir() do tmpdir
+                with_logger(logger) do
+                    setup = ModelSetup(
+                        TimeHorizon     = TimeHorizon(stop=4),
+                        MarketType      = NodalMarket(),
+                        ProsumerSetup   = NoProsumer(),
+                        RedispatchSetup = DCLF(; fix_net_positions = true),
+                    )
+                    mr = ModelRun(params, setup, solver;
+                        resultdir=tmpdir, scenarioname="np_nodal", overwrite=true)
+                    POMATWO.run(mr)
+                end
+
+                dir = joinpath(tmpdir, "np_nodal")
+                ni_da = DataFiles(dir, DayAhead).NETINPUT
+                ni_rd = DataFiles(dir, Redispatch).NETINPUT
+
+                for z in params.sets.Z, t in 1:4
+                    @test zone_np(ni_rd, z, t) ≈ zone_np(ni_da, z, t) atol=1e-6
+                end
             end
         end
 

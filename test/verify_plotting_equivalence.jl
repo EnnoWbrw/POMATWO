@@ -310,7 +310,9 @@ function old_prepare_redisp(results, sf, th)
            old_dispatch_by_zone(results, merged, tv)
 end
 
-const _SC = ["RES_prestep", "RES", "conv", "load", "sto", "balance"]
+# deliberate change: ShareShift gained a :load pre-step, whose trace component
+# "load_prestep" is a real nodal delta and stacks alongside "RES_prestep".
+const _SC = ["RES_prestep", "load_prestep", "RES", "conv", "load", "sto", "balance"]
 
 function old_shift_arrays(results)
     df = results.REFDAY_SHIFT

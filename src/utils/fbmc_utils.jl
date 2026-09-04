@@ -384,9 +384,13 @@ Calculate FBMC parameters: GSK, PTDFn, PTDFz, PTDFzz.
     * `:minRAM`, `:FRM` => the fractions used for this calculation
 """
 function calc_fbmc_params(sr::SubRun, params::Parameters, TwoDayAhead_result::Dict, T; kwargs...)
-    # Extract GSKStrategy from the market setup and delegate to the strategy-based core
-    gsk_strategy = sr.modelrun.setup.MarketType.exchange_formulation.GSKStrategy
-    return calc_fbmc_params(gsk_strategy, params, TwoDayAhead_result, T; kwargs...)
+    # GSK strategy and the two margins all come from the run's own FlowBased setup, so a
+    # result directory can never disagree with the setup that produced it. An explicit
+    # keyword still wins: keyword arguments later in the call override earlier ones, and
+    # `kwargs...` is spliced last.
+    xf = sr.modelrun.setup.MarketType.exchange_formulation
+    return calc_fbmc_params(xf.GSKStrategy, params, TwoDayAhead_result, T;
+                            minRAM = xf.minRAM, FRM = xf.FRM, kwargs...)
 end
 
 """

@@ -57,7 +57,7 @@ setup_refday = ModelSetup(;
             shift = ShareShift(
                 β_conv = 0.5, β_load = 0.5, β_RES = 0.0,
                 resolution = :zonal,
-                res_prestep = true,        # hard-align RES to the target first
+                prestep = [:res, :load],   # hard-align RES and load to the target first
                 redist = GSKRedist(DispOnlyGSK()),
             ),
         ),

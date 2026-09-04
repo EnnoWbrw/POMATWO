@@ -24,19 +24,21 @@
 
 # Stacking/legend order of the real nodal shift components ("np_relax" is a
 # per-zone residual, not a nodal delta — it is reported separately).
-const _SHIFT_COMPONENTS = ["RES_prestep", "RES", "conv", "load", "sto", "balance"]
+const _SHIFT_COMPONENTS = ["RES_prestep", "load_prestep", "RES", "conv", "load", "sto",
+                           "balance"]
 
 # Muted colors + black stroke mark shift-delta segments as synthetic (not
 # plant types). Makie has no hatching. Parsed once, so the colour vectors handed
 # to Makie are `Vector{RGBAf}` rather than `Vector{Any}` of hex strings.
 const REFDAY_SHIFT_COLORS = Dict{String,RGBAf}(
-    "RES_prestep" => _hex_color("#b5d4b0"),
-    "RES"         => _hex_color("#5aa469"),
-    "conv"        => _hex_color("#8c8c8c"),
-    "load"        => _hex_color("#c9a227"),
-    "sto"         => _hex_color("#4ca37a"),
-    "balance"     => _hex_color("#a9a9a9"),
-    "np_relax"    => _hex_color("#c85a89"),
+    "RES_prestep"  => _hex_color("#b5d4b0"),
+    "load_prestep" => _hex_color("#e0c766"),
+    "RES"          => _hex_color("#5aa469"),
+    "conv"         => _hex_color("#8c8c8c"),
+    "load"         => _hex_color("#c9a227"),
+    "sto"          => _hex_color("#4ca37a"),
+    "balance"      => _hex_color("#a9a9a9"),
+    "np_relax"     => _hex_color("#c85a89"),
 )
 
 # Storage charging (pumped-hydro/PSP): a real withdrawal that lowers net position.

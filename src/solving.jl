@@ -256,8 +256,12 @@ function _seed_fbmc!(ctx::Dict{Symbol,Any}, mr::ModelRun, T, artifacts)
         "ReferenceDayBasecase: split $(T) is not fully covered by the reference-day " *
         "basecase (source horizon: $(extrema(collect(covered)))). The current run's " *
         "TimeHorizon must lie inside the forecast run's time steps.")
-    gsk = mr.setup.MarketType.exchange_formulation.GSKStrategy
-    ctx[:fbmc_params] = calc_fbmc_params(gsk, mr.params, artifacts, T)
+    # Same margins as the OptimizationBasecase path (`calc_fbmc_params(::SubRun, ...)`), so a
+    # reference-day run and an optimisation run differ only in the basecase, never in the
+    # flow-based domain's margins.
+    xf = mr.setup.MarketType.exchange_formulation
+    ctx[:fbmc_params] = calc_fbmc_params(xf.GSKStrategy, mr.params, artifacts, T;
+                                         minRAM = xf.minRAM, FRM = xf.FRM)
     _write_refday_trace(mr, T, artifacts)
     return nothing
 end
@@ -277,7 +281,8 @@ function _write_refday_trace(mr::ModelRun, T, artifacts)
     sr_dir = mkpath(joinpath(mr.scen_dir, "subrun_t$(T[1])-t$(T[end])"))
     Tset = Set(T)
     for (name, timecol) in ((:REFDAY_MATCH, :target_time), (:REFDAY_SHIFT, :Time),
-                            (:REFDAY_DIAG, :Time))
+                            (:REFDAY_DIAG, :Time), (:REFDAY_NETINPUT, :Time),
+                            (:REFDAY_LINEFLOW, :Time))
         df = trace[name]
         isempty(df) || (df = filter(timecol => in(Tset), df))
         Arrow.write(joinpath(sr_dir, string(name) * ".arrow"), df)
@@ -293,14 +298,28 @@ function _run_states(
     for (i, ST) in enumerate(seq)
         lbl = state_label(ST)
         isnothing(prog) || ProgressMeter.update!(prog, desc = "$lbl -> Building Model")
-        market_state = init_state(ST, mr, T, ctx)
-        sr = SubRun(mr, market_state, ctx)
+        local market_state, sr
+        t_build = @elapsed begin
+            market_state = init_state(ST, mr, T, ctx)
+            sr = SubRun(mr, market_state, ctx)
+        end
         isnothing(prog) || ProgressMeter.update!(prog, desc = "$lbl -> Optimizing")
-        optimize!(sr)  # silent unless ModelRun(verbose = true); see _silent_solver
-        log_status(sr, lbl)
+        t_solve = @elapsed optimize!(sr)  # silent unless ModelRun(verbose = true); see _silent_solver
+        # Gate on the status BEFORE fetching: an early-stopped solve that still holds an
+        # incumbent would otherwise be persisted as if it were a proven optimum.
+        assert_optimal(log_status(sr, lbl), sr, lbl)
         isnothing(prog) || ProgressMeter.update!(prog, desc = "$lbl -> Fetching Results")
-        fetch_results(sr)
-        write_results(sr; prefix = result_prefix(market_state))
+        t_fetch = @elapsed begin
+            fetch_results(sr)
+            derive_results!(sr)
+        end
+        t_write = @elapsed write_results(sr; prefix = result_prefix(market_state))
+        # Stage timings: result extraction used to dominate a subrun (dense reporting
+        # expressions resolved one solver round-trip per term), so the split between
+        # solving and persisting is worth seeing rather than guessing at.
+        mr.verbose && @info "$lbl timings [s]" build = round(t_build; digits = 2) solve =
+            round(t_solve; digits = 2) fetch = round(t_fetch; digits = 2) write =
+            round(t_write; digits = 2)
         record_carry!(sr, ctx)
         i < length(seq) && postprocess!(sr, ctx)
     end

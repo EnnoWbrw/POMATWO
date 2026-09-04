@@ -120,11 +120,16 @@ Apportion the net-position gap among components by user shares.
 - `resolution`: `:zonal` (gap per zone, spread by `redist`) or `:nodal` (gap per
   node; the output nodal net injection then equals the target's nodal injection
   where physically reachable).
-- `res_prestep`: if `true`, hard-set every node's RES to the target hour's nodal
-  RES first, then apportion the rest. At BOTH resolutions this is the per-node
-  hard-set: after the pre-step the intra-zone RES distribution *is* the target
-  day's (with the target day's zonal total), mirroring the D2CF step of inserting
-  the delivery-day RES forecast into the reference snapshot.
+- `prestep`: which components are hard-set to the target hour's nodal value
+  *before* the gap is apportioned — `:res`, `:load`, both as `[:res, :load]`, or
+  the default `Symbol[]` for no pre-step. At BOTH resolutions a pre-step is the
+  per-node hard-set: afterwards the intra-zone distribution of that component *is*
+  the target day's (with the target day's zonal total), mirroring the D2CF step of
+  inserting the delivery-day forecast into the reference snapshot.
+  The load pre-step additionally **re-anchors the γ budget**: after it, `load0` is
+  the target hour's load, so `load_shift_share` caps the deviation from the
+  delivery-day load forecast rather than from the reference day's (the hard-set
+  itself is outside the budget, just as the RES pre-step is outside `β_RES`).
 - `redist`: nodal redistribution key for zonal corrections.
 - `fallback_order`: cascade order for remainders when a component saturates
   (physical levers only). A zone's gap that no physical lever can absorb is left
@@ -145,18 +150,32 @@ Base.@kwdef struct ShareShift <: ShiftMethod
     β_conv::Float64 = 0.5
     β_load::Float64 = 0.5
     resolution::Symbol = :zonal
-    res_prestep::Bool  = false
+    prestep::Union{Symbol,Vector{Symbol}} = Symbol[]
     redist::RedistKey  = GSKRedist()
     fallback_order::Vector{Symbol} = [:conv, :sto, :load]
     enforce_balance::Bool = false
     load_shift_share::Float64 = 0.2
 end
 
-"Error on invalid share sum, resolution or load-lever share; warn on double-moved RES."
+"The components hard-set by the pre-step, normalized to a deduplicated vector."
+prestep_components(m::ShareShift) =
+    m.prestep isa Symbol ? [m.prestep] : unique(m.prestep)
+
+"Pre-step components that exist, and the β share each one would be moved by twice."
+const PRESTEP_COMPONENTS = (:res => :β_RES, :load => :β_load)
+
+"Error on invalid share sum, resolution, load-lever share or pre-step component; warn on double-moved levers."
 function validate_shares(m::ShareShift)
     s = m.β_RES + m.β_conv + m.β_load
     s <= 1.0 + 1e-6 || error("Shift shares sum to $s, must be ≤ 1.0 (leftover fraction is np_relax)")
-    (m.res_prestep && m.β_RES > 0) && @warn "res_prestep=true with β_RES>0: RES moved twice (hard-set, then balancer)"
+    pre = prestep_components(m)
+    bad = setdiff(pre, first.(PRESTEP_COMPONENTS))
+    isempty(bad) ||
+        error("unsupported prestep component(s) $bad (allowed: :res, :load)")
+    for (comp, βname) in PRESTEP_COMPONENTS
+        (comp in pre && getfield(m, βname) > 0) &&
+            @warn "prestep includes :$comp with $βname>0: $comp moved twice (hard-set, then balancer)"
+    end
     m.resolution in (:zonal, :nodal) || error("resolution must be :zonal or :nodal, got :$(m.resolution)")
     m.load_shift_share >= 0.0 ||
         error("load_shift_share must be ≥ 0 (got $(m.load_shift_share))")
@@ -241,7 +260,7 @@ setup = ModelSetup(;
         basecase = ReferenceDayBasecase(
             source = "results/forecast_run",
             matching = MatchingConfig(lookback = 4, scope = ZonalMatchScope()),
-            shift = ShareShift(β_conv = 0.5, β_load = 0.5, res_prestep = true),
+            shift = ShareShift(β_conv = 0.5, β_load = 0.5, prestep = [:res, :load]),
         ),
     )),
 )
@@ -618,9 +637,11 @@ are in the basecase under construction, seeded from that node's reference hour.
 `shift_single` mutates it as deltas are applied, so every lever's remaining room
 (`_comp_bounds`) is always relative to the state reached so far.
 
-`load0` keeps the seed load immutably, which is what lets the load lever's cap
-apply to the CUMULATIVE deviation — the gap cascade and the global balance pass
-share one budget (`_load_bounds`).
+`load0` holds the load the γ budget is measured against, which is what lets the load
+lever's cap apply to the CUMULATIVE deviation — the gap cascade and the global balance
+pass share one budget (`_load_bounds`). It is the reference hour's load, unless the
+`:load` pre-step re-anchored it to the target hour's (see `shift_single`); the cascade
+never writes it.
 """
 struct ShiftLevers
     res::Dict{String,Float64}
@@ -654,8 +675,9 @@ global balance pass is confined to
     δ ∈ [ −γ·load_max[n] ,  min(γ·load_min[n], load0[n]) ]
 
 with γ = `ShareShift.load_shift_share`, `load_max`/`load_min` the node's extreme
-loads over the forecast horizon and `load0[n]` its reference-hour load (so load
-can never be driven negative). The part already spent is `load0[n] - load[n]`,
+loads over the forecast horizon and `load0[n]` the load the budget is anchored at —
+the reference hour's, or the target hour's when the `:load` pre-step re-anchored it
+(so load can never be driven negative). The part already spent is `load0[n] - load[n]`,
 which is why this returns the *remaining* room rather than the total bound.
 """
 function _load_bounds(lev::ShiftLevers, nd, n)
@@ -772,8 +794,8 @@ load; note the persisted NETINPUT/ACINJECTION result tables use the opposite
 (import-positive) convention. For the `"load"` component the actual load
 change is `-delta`.
 
-Components: `"RES_prestep"`, `"RES"`, `"conv"`, `"load"`, `"sto"` (physical
-per-node levers), `"balance"` (per-node conventional-gen/load deltas from the
+Components: `"RES_prestep"` / `"load_prestep"` (the hard pre-steps), `"RES"`,
+`"conv"`, `"load"`, `"sto"` (physical per-node levers), `"balance"` (per-node conventional-gen/load deltas from the
 global balance pass, `_enforce_global_balance!`), and `"np_relax"` — a
 per-zone row (zone label in the `node` column) recording how far the zone's net
 position was left relaxed toward the reference (target NP minus reachable NP).
@@ -874,8 +896,8 @@ the whole result to be globally balanced (`Σ_n net_injection = 0`) via
 conventional generation (traced `"balance"`); see `_enforce_global_balance!`.
 
 Pass a `ShiftTraceCollector` as `trace` to record every applied per-node
-injection delta (components `"RES_prestep"`, `"RES"`, `"conv"`, `"load"`,
-`"sto"`, `"balance"`, plus the per-zone `"np_relax"`), and a
+injection delta (components `"RES_prestep"`, `"load_prestep"`, `"RES"`, `"conv"`,
+`"load"`, `"sto"`, `"balance"`, plus the per-zone `"np_relax"`), and a
 [`ShiftDiagCollector`](@ref) as `diag` for the per-zone apportionment
 diagnostics (how much of each lever's share was really absorbed, and how much of
 its key-proportional split was clipped away).
@@ -891,16 +913,30 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
     p_new = Dict(n => get(nd.P, (n, ref_of_node[n]), 0.0) for n in nodes)
     lev   = ShiftLevers(nd, ref_of_node, method.load_shift_share)
 
-    # ---- optional hard RES pre-step: pin every node's RES to the target hour ----
-    # Per node at BOTH resolutions: the point of the pre-step is that the basecase
-    # carries the delivery day's RES forecast, so afterwards the intra-zone RES
-    # distribution is the target day's, not the reference day's.
-    if method.res_prestep
+    # ---- optional hard pre-steps: pin a component to its target-hour nodal value ----
+    # Per node at BOTH resolutions: the point of a pre-step is that the basecase carries
+    # the delivery day's forecast, so afterwards that component's intra-zone distribution
+    # is the target day's, not the reference day's.
+    pre = prestep_components(method)
+    if :res in pre
         for n in nodes
             tgt = get(nd.RES, (n, t_tgt), 0.0)
             _record!(trace, t_tgt, n, "RES_prestep", tgt - lev.res[n])
             p_new[n] += tgt - lev.res[n]
             lev.res[n] = tgt
+        end
+    end
+    if :load in pre
+        for n in nodes
+            tgt = get(nd.LOAD, (n, t_tgt), 0.0)
+            δ = lev.load[n] - tgt          # export-positive: load down ⇒ injection up
+            _record!(trace, t_tgt, n, "load_prestep", δ)
+            p_new[n] += δ
+            lev.load[n]  = tgt
+            # the hard-set is outside the γ budget (as the RES pre-step is outside
+            # β_RES): re-anchor load0 so `_load_bounds` measures the cascade's and the
+            # balance pass's deviation from the TARGET day's load, not the reference's.
+            lev.load0[n] = tgt
         end
     end
 
@@ -963,6 +999,61 @@ end
 # ---------------------------------------------------------------------------
 # Basecase assembly
 # ---------------------------------------------------------------------------
+
+"""
+    _basecase_nodal_df(nodes, times, Prefmat, Pmat) -> DataFrame
+
+The assembled basecase's nodal injection as a long table (`REFDAY_NETINPUT`): one row per
+(`Time`, `index` = node) with
+
+- `ACINJECTION_REF` — the unshifted seed, i.e. the source state's AC injection at that
+  node's own matched reference hour;
+- `ACINJECTION` — what the shift made of it, the exact value handed to `calc_fbmc_params`.
+
+Both are **import-positive** (`load + charge − gen`), like every persisted
+`NETINPUT`/`ACINJECTION` column and unlike the export-positive `REFDAY_SHIFT` deltas.
+That flip is what puts the minus in the reconstruction identity
+
+    ACINJECTION = ACINJECTION_REF − Σ deltas(n, t)
+
+(the sum over the nodal components of `REFDAY_SHIFT`, `np_relax` excluded).
+"""
+function _basecase_nodal_df(nodes, times, Prefmat::AbstractMatrix, Pmat::AbstractMatrix)
+    n_n, n_t = length(nodes), length(times)
+    T   = Vector{Int}(undef, n_n * n_t)
+    idx = Vector{String}(undef, n_n * n_t)
+    ref = Vector{Float64}(undef, n_n * n_t)
+    val = Vector{Float64}(undef, n_n * n_t)
+    k = 0
+    for (j, t) in enumerate(times), (i, n) in enumerate(nodes)
+        k += 1
+        T[k] = Int(t); idx[k] = String(n)
+        ref[k] = Prefmat[i, j]; val[k] = Pmat[i, j]
+    end
+    return DataFrame(Time = T, index = idx, ACINJECTION_REF = ref, ACINJECTION = val)
+end
+
+"""
+    _basecase_line_df(lines, times, LF) -> DataFrame
+
+The assembled basecase's line flows as a long table (`REFDAY_LINEFLOW`): one row per
+(`Time`, `index` = AC line) carrying `LINEFLOW = params.ptdf · ACINJECTION` over every AC
+line, not just the CNEs. Import-positive like the injection it is derived from, so it is
+the negative of the physical feed-in flow — the same convention as the persisted
+`LINEFLOW` result tables, and the one `_basecase_f0` negates once when forming `F0`.
+"""
+function _basecase_line_df(lines, times, LF::AbstractMatrix)
+    n_l, n_t = length(lines), length(times)
+    T   = Vector{Int}(undef, n_l * n_t)
+    idx = Vector{String}(undef, n_l * n_t)
+    val = Vector{Float64}(undef, n_l * n_t)
+    k = 0
+    for (j, t) in enumerate(times), (i, l) in enumerate(lines)
+        k += 1
+        T[k] = Int(t); idx[k] = String(l); val[k] = LF[i, j]
+    end
+    return DataFrame(Time = T, index = idx, LINEFLOW = val)
+end
 
 """
     _refday_match_trace(groupmap, matches, fallback_matches) -> DataFrame
@@ -1029,7 +1120,15 @@ a `Dict{Symbol,DataFrame}` with:
   gap cascade: how much each lever was asked for (`want`) and absorbed
   (`applied`), how much of its key-proportional split was clipped and re-spread
   (`reallocated`), and configured vs realised share of the gap
-  (`beta_configured` / `beta_realised`). See `ShiftDiagCollector`.
+  (`beta_configured` / `beta_realised`). See `ShiftDiagCollector`;
+- `:REFDAY_NETINPUT` — the assembled basecase itself, per (Time, node): the unshifted
+  seed `ACINJECTION_REF` and the shifted `ACINJECTION`, both import-positive. See
+  `_basecase_nodal_df`;
+- `:REFDAY_LINEFLOW` — its `LINEFLOW` per (Time, AC line), the same numbers `calc_ram`
+  turns into `F0`. See `_basecase_line_df`.
+
+The last two are `:netinput_ac` / `:lineflows` in long form: the persisted basecase is
+the one the flow-based parameters were built from, not a recomputation of it.
 
 Together they reconstruct the construction exactly. Trace deltas are
 export-positive (feed-in) while the persisted `ACINJECTION` (and the returned
@@ -1067,6 +1166,9 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
     nodes = nd.nodes
     nidx  = Dict(n => i for (i, n) in enumerate(nodes))
     Pmat  = zeros(length(nodes), length(build_times))
+    # the unshifted seed, kept in the same import-positive convention as `Pmat` so the
+    # persisted basecase can state its own starting point (`REFDAY_NETINPUT`)
+    Prefmat = zeros(length(nodes), length(build_times))
     for (j, tt) in enumerate(build_times)
         ref_of_node = Dict(n => refmap[(n, tt)] for n in nodes)
         p_new = shift_single(nd, params, tt, ref_of_node, method;
@@ -1076,6 +1178,7 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
             # in the model's import-positive ACINJECTION convention (what
             # calc_ram / build_gsk_timeseries consume), so negate back here.
             Pmat[nidx[n], j] = -p_new[n]
+            Prefmat[nidx[n], j] = -get(nd.P, (n, ref_of_node[n]), 0.0)
         end
     end
 
@@ -1095,10 +1198,12 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
             push!(groups_df, (g, n))
         end
         out[:trace] = Dict{Symbol,DataFrame}(
-            :REFDAY_MATCH  => _refday_match_trace(groupmap, matches, fallback_matches),
-            :REFDAY_GROUPS => groups_df,
-            :REFDAY_SHIFT  => shift_trace_df(collector),
-            :REFDAY_DIAG   => shift_diag_df(diagnostics),
+            :REFDAY_MATCH    => _refday_match_trace(groupmap, matches, fallback_matches),
+            :REFDAY_GROUPS   => groups_df,
+            :REFDAY_SHIFT    => shift_trace_df(collector),
+            :REFDAY_DIAG     => shift_diag_df(diagnostics),
+            :REFDAY_NETINPUT => _basecase_nodal_df(nodes, build_times, Prefmat, Pmat),
+            :REFDAY_LINEFLOW => _basecase_line_df(lines, build_times, LF),
         )
     end
     return out

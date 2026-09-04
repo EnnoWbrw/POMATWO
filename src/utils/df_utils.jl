@@ -257,6 +257,37 @@ end
 
 read_csv(file) = CSV.read(file, DataFrame, stringtype = String)
 
+"""
+    zonal_net_position(sr::SubRun) -> DenseAxisArray
+
+Cleared zonal net position (import-positive) of a day-ahead `SubRun`, indexed `[z, t]`
+with `z::String` and `t::Int`. Dispatches on the market type:
+- `ZonalMarket`: the day-ahead stage already has an `:EXCHANGE` container (variable under
+  `NTC`, expression under `FlowBased`) on the `:network` node — read it directly.
+- `NodalMarket`: there is no `EXCHANGE`; the zonal aggregate is rebuilt by summing the
+  nodal `NETINPUT` expression over each zone's nodes.
+
+Used to seed `:zonal_net_position` in [`prev_results_for_redispatch`](@ref), which feeds
+[`fix_net_positions!`](@ref) when `DCLF.fix_net_positions` is opted in.
+"""
+function zonal_net_position(sr::SubRun{MT}) where {MT<:ZonalMarketType}
+    return value.(sr.vars[:network][:EXCHANGE])
+end
+
+function zonal_net_position(sr::SubRun{MT}) where {MT<:NodalMarketType}
+    params = sr.modelrun.params
+    @unpack Z = params.sets
+    @unpack nodes_in_zone = params
+    T = collect(sr.market_state.Time)
+    NETINPUT = sr.vars[:network][:NETINPUT]
+
+    data = [
+        sum(value(NETINPUT[n, t]) for n in get(nodes_in_zone, z, String[]); init = 0.0)
+        for z in Z, t in T
+    ]
+    return Containers.DenseAxisArray(data, Z, T)
+end
+
 function prev_results_for_redispatch(sr::SubRun)
     d = sr.vars
 
@@ -265,6 +296,7 @@ function prev_results_for_redispatch(sr::SubRun)
         :ndisp_cu => value.(d[:ndisp][:CU]),
         :sto_generation => value.(d[:sto][:GEN]),
         :sto_charge => value.(d[:sto][:CHARGE]),
+        :zonal_net_position => zonal_net_position(sr),
     )
 end
 

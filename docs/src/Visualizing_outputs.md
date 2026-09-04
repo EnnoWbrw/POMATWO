@@ -211,7 +211,7 @@ These two figures visualize a [`ReferenceDayBasecase`](@ref) run and require a r
 ### `plot_shift_map_interactive(results; kwargs...)`
 Geographical map of the ShareShift impact for one reference-day scenario. The network topology is drawn with AC lines solid and DC lines dashed, plus one circle per node: green for a net injection increase, red for a decrease, gray for ≈ 0, with marker area proportional to `|Σ delta|` in the selected time window.
 
-Deltas follow the injection convention of `REFDAY_SHIFT`: for the `load` component a positive delta means a load *decrease*. The `"total"` entry sums the real nodal components (`RES_prestep`, `RES`, `conv`, `load`, `sto`, `balance`); the per-zone `np_relax` residual is not a nodal delta and is reported in the info label only.
+Deltas follow the injection convention of `REFDAY_SHIFT`: for the `load` component a positive delta means a load *decrease*. The `"total"` entry sums the real nodal components (`RES_prestep`, `load_prestep`, `RES`, `conv`, `load`, `sto`, `balance`); the per-zone `np_relax` residual is not a nodal delta and is reported in the info label only.
 
 If **no** node in the run carries coordinates, the nodes are laid out on a circle instead, the basemap is suppressed and none of the map decorations are drawn (noted in the axis subtitle). Topology, line styling and the node markers all still read correctly; only the geography is gone. While *some* node has coordinates the behaviour is unchanged: a node without them cannot be placed and its deltas are dropped, with a warning naming the total dropped MW.
 
@@ -246,7 +246,7 @@ Per-zone comparison of generation, load and net position across the four stages 
 
 1. **Reference day** — the source (basecase) run's dispatch by plant type at the matched reference times.
 2. **Target day** — the source run's dispatch at the forecast/target times the matching algorithm shifted towards.
-3. **Shifted basecase** — the reference-day stack plus one black-stroked segment per ShareShift component (`ΔRES_prestep`, `ΔRES`, `Δconv`, `Δload`, `Δsto`, `Δbalance`). The shift is a nodal injection change and cannot be attributed to plant types, which is what the separate stroked segments express.
+3. **Shifted basecase** — the reference-day stack plus one black-stroked segment per ShareShift component (`ΔRES_prestep`, `Δload_prestep`, `ΔRES`, `Δconv`, `Δload`, `Δsto`, `Δbalance`). The shift is a nodal injection change and cannot be attributed to plant types, which is what the separate stroked segments express.
 4. **DA result** — the variant run's actual flow-based day-ahead dispatch at the target times.
 
 Horizontal black markers show the zonal load per group. Blue diamonds show the zonal net position (+ = export) per stage, computed as `Σgen − load − charge`; the shifted-basecase net position uses the identity `NP(reference) + Σ shift deltas`. The shift guarantees `NP(shifted) + unabsorbed ≈ NP(target)`, which can be read off the info label.

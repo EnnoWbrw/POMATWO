@@ -147,4 +147,20 @@ S_{s,t}^{lvl,redisp} = S_{s,t-1}^{lvl,redisp} - \frac{GEN_{s,t}^{redisp}}{\eta_s
 \end{aligned}
 ```
 
+### Net Position Constraint (optional)
+
+The redispatch phase always solves the nodal load flow formulation above — it has no
+zonal exchange variable, regardless of whether the day-ahead market was zonal or nodal.
+When `DCLF.fix_net_positions = true` (default `false`), each zone's net position is
+nevertheless pinned to its day-ahead cleared value by aggregating `INJ_n` over the zone's
+nodes:
+
+```math
+\sum_{n \in z}^N INJ_{n,t} = EX_{z,t}^{net,DA}, \qquad \forall z \in Z, t \in T
+```
+
+`INJ_n` and `EX_z^{net}` follow the same import-positive convention, so no sign flip is
+needed. With this constraint active, redispatch may only reshuffle generation within a
+zone — it can no longer change cross-border exchange.
+
 

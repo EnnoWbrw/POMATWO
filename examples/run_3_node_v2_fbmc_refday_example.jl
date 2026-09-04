@@ -117,10 +117,10 @@ pretty(match_by_scope(match_frame, cfg_multi.scope, ref.params; kw_multi...))
 # -----------------------------------------------------------------------------
 shifts = Dict(
     :zonal => ShareShift(β_conv = 0.5, β_load = 0.5, β_RES = 0.0,
-                         resolution = :zonal, res_prestep = true,
+                         resolution = :zonal, prestep = :res,
                          redist = GSKRedist(DispOnlyGSK())),
     :nodal => ShareShift(β_conv = 0.5, β_load = 0.5, β_RES = 0.0,
-                         resolution = :nodal, res_prestep = true,
+                         resolution = :nodal, prestep = :res,
                          redist = GSKRedist(DispOnlyGSK())),
 )
 for res in (:zonal, :nodal)

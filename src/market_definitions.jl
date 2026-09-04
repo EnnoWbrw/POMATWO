@@ -56,22 +56,39 @@ Flow-based market coupling formulation.
 - `basecase::BasecaseMethod`: Basecase methodology (defaults to
   [`OptimizationBasecase`](@ref); see [`ReferenceDayBasecase`](@ref) for the
   reference-day / D2CF-style alternative).
+- `minRAM::Float64`: floor on the remaining available margin as a fraction of line
+  capacity (defaults to `0.7`, the 70 %-rule of Art. 16(8) Reg. (EU) 2019/943).
+- `FRM::Float64`: Flow Reliability Margin as a fraction of line capacity (defaults to `0.1`).
+
+`minRAM` and `FRM` are what [`calc_ram`](@ref) applies to every CNE:
+`RAM = max(fmax - F0 - FRM*fmax, minRAM*fmax)`.
 
 # Constructors
-- `FlowBased()`: `FlatGSK()` + `OptimizationBasecase()`.
+- `FlowBased()`: `FlatGSK()` + `OptimizationBasecase()`, `minRAM = 0.7`, `FRM = 0.1`.
 - `FlowBased(strategy::GSKStrategy)`: provided GSK strategy + `OptimizationBasecase()`.
-- `FlowBased(; GSKStrategy = FlatGSK(), basecase = OptimizationBasecase())`: keyword form.
+- `FlowBased(; GSKStrategy = FlatGSK(), basecase = OptimizationBasecase(),
+   minRAM = 0.7, FRM = 0.1)`: keyword form.
 """
 struct FlowBased <: ExchangeFormulation
     GSKStrategy::GSKStrategy
     basecase::BasecaseMethod
+    minRAM::Float64
+    FRM::Float64
+
+    function FlowBased(gsk::GSKStrategy, bc::BasecaseMethod, minRAM::Real, FRM::Real)
+        0.0 <= minRAM <= 1.0 || error("minRAM must be between 0 and 1, got $minRAM")
+        0.0 <= FRM <= 1.0 || error("FRM must be between 0 and 1, got $FRM")
+        return new(gsk, bc, Float64(minRAM), Float64(FRM))
+    end
 end
 
 FlowBased(s::GSKStrategy) = FlowBased(s, OptimizationBasecase())
+FlowBased(s::GSKStrategy, bc::BasecaseMethod) = FlowBased(s, bc, 0.7, 0.1)
 # NOTE: no explicit zero-arg constructor — the all-defaults keyword method
 # below already covers `FlowBased()`.
-FlowBased(; GSKStrategy = FlatGSK(), basecase = OptimizationBasecase()) =
-    FlowBased(GSKStrategy, basecase)
+FlowBased(; GSKStrategy = FlatGSK(), basecase = OptimizationBasecase(),
+            minRAM = 0.7, FRM = 0.1) =
+    FlowBased(GSKStrategy, basecase, minRAM, FRM)
 
 ### MarketTypes
 """
@@ -228,11 +245,20 @@ technical potential), `res_down_cost` prices additional curtailment.
 # Fields
 - `DCF`: DC load flow formulation type (e.g., `PhaseAngle`, `PTDF`).
 - `disp_cost`: Cost per MWh of dispatchable up- or downward redispatch. Defaults to `150.0`.
-- `res_up_cost`: Cost per MWh of recalled non-dispatchable generation. Defaults to `1.0`,
-  i.e. near-free (no fuel is burnt), but nonzero so that recall only happens where it
-  actually relieves a network constraint.
+- `res_up_cost`: Cost per MWh of recalled non-dispatchable generation. Defaults to `150.0`,
+  the same price as dispatchable redispatch: no fuel is burnt, but recall is an activation
+  like any other and should only happen where it actually relieves a network constraint.
+  Set it lower to make recall the preferred lever, or to `0.0` to make it free.
 - `res_down_cost`: Cost per MWh of additional non-dispatchable curtailment. Defaults to `150.0`.
-- `sto_cost`: Cost per MWh of storage up- or downward redispatch. Defaults to `150.0`.
+- `sto_cost`: Cost per MWh of storage up- or downward redispatch. Defaults to `500.0` —
+  dearer than generation redispatch, since moving storage shifts energy across hours
+  rather than only across nodes.
+- `fix_net_positions`: When `true`, each market zone's net position during redispatch is
+  constrained to exactly equal its day-ahead cleared value, so redispatch may only reshuffle
+  generation within zones and cannot change cross-border exchange. Only meaningful when
+  zones are defined (i.e. under a `ZonalMarket`, though the constraint is built from nodal
+  `NETINPUT` regardless — see `fix_net_positions!` in `energy_balances.jl`); the constraint
+  is a hard equality, not a bound. Defaults to `false`.
 
 # Constructors
 - `DCLF()`: Uses `PhaseAngle` as default.
@@ -244,6 +270,7 @@ struct DCLF{DCF<:DCLFFormulation} <: RedispatchType
     res_up_cost::Float64
     res_down_cost::Float64
     sto_cost::Float64
+    fix_net_positions::Bool
 end
 
 # 1) Null-Argument-Default: PhaseAngle
@@ -253,11 +280,12 @@ DCLF(; kwargs...) = DCLF(PhaseAngle; kwargs...)
 function DCLF(
     ::Type{DCF};
     disp_cost::Real = 150.0,
-    res_up_cost::Real = 1.0,
+    res_up_cost::Real = 150.0,
     res_down_cost::Real = 150.0,
-    sto_cost::Real = 150.0,
+    sto_cost::Real = 500.0,
+    fix_net_positions::Bool = false,
 ) where {DCF<:DCLFFormulation}
-    return DCLF{DCF}(disp_cost, res_up_cost, res_down_cost, sto_cost)
+    return DCLF{DCF}(disp_cost, res_up_cost, res_down_cost, sto_cost, fix_net_positions)
 end
 
 """
