@@ -1109,6 +1109,52 @@ function test_refday_trace_e2e()
                 @test r.RAM_NEG ≈ min(-r.fmax - r.F0 + r.FRM * r.fmax, -r.minRAM * r.fmax)
             end
 
+            # ── F0 recomputation from the persisted basecase ──────────────────
+            # The run used DispOnlyGSK, so recomputing F0 from REFDAY_NETINPUT /
+            # REFDAY_LINEFLOW with that same strategy must reproduce the persisted
+            # RAM.F0 exactly. This is the invariant that pins the sign convention of
+            # `refday_f0` — a flipped sign here still produces plausible numbers.
+            art = POMATWO.refday_basecase_artifacts(out)
+            @test sort(collect(axes(art[:netinput_ac], 1))) == sort(params.sets.N)
+            @test sort(collect(axes(art[:lineflows], 1))) == sort(params.sets.L)
+            @test art[:times] == [1, 2, 3, 4]
+            for n in params.sets.N, t in 1:4
+                @test isapprox(art[:netinput_ac][n, t], base[:netinput_ac][n, t]; atol = 1e-9)
+            end
+            for l in params.sets.L, t in 1:4
+                @test isapprox(art[:lineflows][l, t], base[:lineflows][l, t]; atol = 1e-9)
+            end
+
+            f0_disp = refday_f0(out, DispOnlyGSK())
+            # every AC line, not only the CNEs
+            @test sort(collect(axes(f0_disp, 1))) == sort(params.sets.L)
+            @test collect(axes(f0_disp, 2)) == [1, 2, 3, 4]
+            persisted_f0 = Dict((r.index, r.Time) => r.F0 for r in eachrow(out.RAM))
+            @test !isempty(persisted_f0)
+            for ((l, t), v) in persisted_f0
+                @test isapprox(f0_disp[l, t], v; atol = 1e-6)
+            end
+
+            # the GSK actually matters: a different strategy gives a different F0 on at
+            # least one CNE, otherwise the menu would be decorative
+            f0_flat = refday_f0(out, FlatGSK())
+            @test any(!isapprox(f0_flat[l, t], persisted_f0[(l, t)]; atol = 1e-6)
+                      for (l, t) in keys(persisted_f0))
+
+            # a time-dependent strategy builds one GSK slice per hour and still runs
+            f0_gl = refday_f0(out, GenLoadGSK())
+            @test all(isfinite, [f0_gl[l, t] for l in params.sets.L, t in 1:4])
+
+            # explicit line subset, ordered as given
+            one = first(sort(params.sets.L))
+            f0_one = refday_f0(out, DispOnlyGSK(); lines = [one])
+            @test collect(axes(f0_one, 1)) == [one]
+            @test isapprox(f0_one[one, 1], f0_disp[one, 1]; atol = 1e-9)
+
+            # a run without a reference-day basecase says so instead of returning zeros
+            @test_throws ErrorException POMATWO.refday_basecase_artifacts(
+                DataFiles(joinpath(tmpdir, "forecast")))
+
             # non-refday results read back with empty trace tables
             fc_out = DataFiles(joinpath(tmpdir, "forecast"))
             @test isempty(fc_out.REFDAY_MATCH) && isempty(fc_out.REFDAY_GROUPS) &&

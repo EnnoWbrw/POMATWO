@@ -1422,3 +1422,120 @@ function build_refday_basecase(bc::ReferenceDayBasecase, params::Parameters;
                                  collect_trace = collect_trace,
                                  source_state = state)
 end
+
+# ---------------------------------------------------------------------------
+# Reading a persisted reference-day basecase back
+# ---------------------------------------------------------------------------
+
+"""
+    refday_basecase_artifacts(results) -> Dict{Symbol,Any}
+
+The assembled reference-day basecase of a finished run, read back from its
+`REFDAY_NETINPUT` / `REFDAY_LINEFLOW` tables into the same shape
+[`build_refday_basecase`](@ref) returns:
+
+- `:netinput_ac` — `DenseAxisArray` (node × time), the `ACINJECTION` column,
+- `:lineflows`   — `DenseAxisArray` (AC line × time), the `LINEFLOW` column,
+- `:times`       — the sorted timesteps both tables cover.
+
+Both stay **import-positive**, exactly as persisted (see the NETINPUT/ACINJECTION note in
+`CLAUDE.md`), so the dict can be handed straight to [`calc_fbmc_params`](@ref) or
+[`refday_f0`](@ref) without a sign change anywhere in between.
+
+Errors when either table is empty — that means the run had no
+[`ReferenceDayBasecase`](@ref), or ran it with `collect_trace = false`.
+"""
+function refday_basecase_artifacts(results)
+    ni = results.REFDAY_NETINPUT
+    lf = results.REFDAY_LINEFLOW
+    (ni isa DataFrame && !isempty(ni)) || error(
+        "REFDAY_NETINPUT is empty — this run has no assembled reference-day basecase " *
+        "(a ReferenceDayBasecase run with collect_trace enabled writes it).")
+    (lf isa DataFrame && !isempty(lf)) || error(
+        "REFDAY_LINEFLOW is empty — this run has no assembled reference-day basecase " *
+        "(a ReferenceDayBasecase run with collect_trace enabled writes it).")
+
+    times = sort!(unique(Int.(ni.Time)))
+    sort!(unique(Int.(lf.Time))) == times || error(
+        "REFDAY_NETINPUT and REFDAY_LINEFLOW cover different timesteps.")
+
+    nodes = sort!(unique(String.(ni.index)))
+    lines = sort!(unique(String.(lf.index)))
+    tpos = Dict{Int,Int}(t => i for (i, t) in enumerate(times))
+    npos = Dict{String,Int}(n => i for (i, n) in enumerate(nodes))
+    lpos = Dict{String,Int}(l => i for (i, l) in enumerate(lines))
+
+    P = zeros(Float64, length(nodes), length(times))
+    _fill_refday_cells!(P, ni.index, ni.Time, ni.ACINJECTION, npos, tpos)
+    F = zeros(Float64, length(lines), length(times))
+    _fill_refday_cells!(F, lf.index, lf.Time, lf.LINEFLOW, lpos, tpos)
+
+    return Dict{Symbol,Any}(
+        :netinput_ac => Containers.DenseAxisArray(P, nodes, times),
+        :lineflows => Containers.DenseAxisArray(F, lines, times),
+        :times => times,
+    )
+end
+
+"""
+Fill loop of [`refday_basecase_artifacts`](@ref), taken as arguments so it specialises on
+the concrete DataFrame column types rather than dispatching per row.
+"""
+function _fill_refday_cells!(M, idx, tt, vals, rowpos, tpos)
+    @inbounds for k in eachindex(idx, tt, vals)
+        v = vals[k]
+        ismissing(v) && continue
+        i = get(rowpos, String(idx[k]), 0)
+        j = get(tpos, Int(tt[k]), 0)
+        (i == 0 || j == 0) && continue
+        M[i, j] = Float64(v)
+    end
+    return M
+end
+
+"""
+    refday_f0(results, strategy = FlatGSK(); lines = nothing, normalize_empty = :flat)
+
+Flow-based reference flow `F0[l,t]` of a persisted reference-day basecase, recomputed
+under `strategy` — the GSK is what turns a basecase into a flow-based domain, so
+different strategies give different intercepts from the same physical basecase.
+
+Returns a `DenseAxisArray` indexed `(line, t)`. `lines` defaults to **every** AC line in
+`REFDAY_LINEFLOW`, not only `params.cne`: the CNE list is a property of the run's own GSK,
+and asking "what would F0 look like under a different one" is exactly the question that
+makes it the wrong filter. Pass `lines` to restrict it.
+
+`normalize_empty` defaults to `:flat`, matching [`calc_fbmc_params`](@ref) rather than
+[`build_gsk`](@ref)'s own `:zero` default — so calling this with the run's own strategy
+reproduces the run's persisted `RAM.F0` exactly, which is what
+`test_refday_trace_e2e()` asserts.
+
+A time-dependent strategy (`is_time_dependent(strategy) == true`, e.g. [`GenLoadGSK`](@ref))
+builds one GSK per hour from this same basecase via [`build_gsk_timeseries`](@ref).
+
+`F0` is the intercept of a linearization, not a physical flow: `|F0| > fmax` is
+legitimate. Do not clamp it.
+
+# Example
+```julia
+results = DataFiles(joinpath("results", "refday_gsk"))
+F0 = refday_f0(results, DispOnlyGSK())
+F0["l1", 3]
+```
+"""
+function refday_f0(results, strategy::GSKStrategy = FlatGSK();
+                   lines = nothing, normalize_empty::Symbol = :flat)
+    artifacts = refday_basecase_artifacts(results)
+    params = results.params
+    T = artifacts[:times]
+    flow_lines = lines === nothing ? collect(axes(artifacts[:lineflows], 1)) : collect(lines)
+
+    PTDFn = dict_to_matrix(params.ptdf)
+    GSK = is_time_dependent(strategy) ?
+        build_gsk_timeseries(params, strategy, artifacts[:netinput_ac], T;
+                             normalize_empty = normalize_empty) :
+        build_gsk(params, strategy; normalize_empty = normalize_empty)
+    PTDFz = zonal_ptdf(PTDFn, GSK)
+
+    return _basecase_f0(params, artifacts, PTDFz, T; lines = flow_lines)
+end

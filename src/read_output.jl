@@ -51,13 +51,19 @@ The constructor can be called by providing the directory that contains the resul
 - `NodalMarketBalance::DataFrame`: Market balance data at the nodal level.
 - `NodalMarketRedispBalance::DataFrame`: Redispatch-adjusted nodal market balance.
 - `FBMC_INF::DataFrame`: FBMC infeasibility slack values per CNE line and time period.
+- `NP_INF::DataFrame`: Net-position pinning slack per zone (`index`) and time period, written
+  only by a redispatch run with `DCLF(; fix_net_positions = true)`. `NP_DA` is the day-ahead
+  net position the zone was pinned to, `NP_INF_POS`/`NP_INF_NEG` the non-negative slack pair
+  and `NP_INF = NP_INF_POS - NP_INF_NEG` the signed deviation actually taken, import-positive
+  like `NETINPUT` (positive = the zone imported more than it cleared). All zero on a feasible
+  pin; any non-zero row is reported by [`check_infeasibility`](@ref). Empty otherwise.
 - `RAM::DataFrame`: Flow-based domain as used by the day-ahead FBMC constraints, per CNE line and time period: `RAM_POS`/`RAM_NEG` (remaining available margin), `F0` (basecase reference flow the RAM was derived from), `fmax` (line capacity) and the `FRM`/`minRAM` fractions of that run. The 70 %-rule is reproducible from the table alone: `RAM_POS == max(fmax - F0 - FRM*fmax, minRAM*fmax)`. Empty for runs without a flow-based exchange formulation.
 - `REFDAY_MATCH::DataFrame`: Reference-day basecase trace — per (group, target_time) the matched reference time, cluster metadata (may be `missing` where a join found no counterpart) and whether the global fallback match was used. Empty for runs without a [`ReferenceDayBasecase`](@ref).
 - `REFDAY_GROUPS::DataFrame`: Reference-day basecase trace — group → node membership of the matching scope (join with `REFDAY_MATCH` on `:group` for per-node reference times, see [`refday_reference_times`](@ref)). Loaded from the scenario root, not the subrun folders.
 - `REFDAY_SHIFT::DataFrame`: Reference-day basecase trace — sparse per (Time, node, component) net-injection deltas applied by the shift (physical levers `RES_prestep`, `load_prestep`, `RES`, `conv`, `load`, `sto`, plus `balance` from the global balance pass; for `load` the actual load change is `-delta`). Also carries per (Time, zone) `np_relax` rows (zone label in the `node` column) recording how far each zone's net position was left relaxed toward the reference.
 - `REFDAY_DIAG::DataFrame`: Reference-day basecase trace — per (Time, zone, component) apportionment diagnostics of the gap cascade: `want` (amount handed to the lever, `β·gap` plus the remainder carried from the previous lever), `applied` (what it absorbed), `reallocated` (how much of the key-proportional split was clipped and re-spread over other nodes), `beta_configured` and `beta_realised` (`Σ_n |applied_n| / |gap|` — above the configured share when the lever absorbs a remainder carried over from an earlier saturated lever, below it when the lever itself saturates). Under `resolution = :nodal` the `zone` column carries node ids. Empty for runs without a [`ReferenceDayBasecase`](@ref).
 - `REFDAY_NETINPUT::DataFrame`: The assembled reference-day basecase itself — per (`Time`, `index` = node) the nodal AC injection the flow-based parameters were built from: `ACINJECTION_REF` (the source state's injection at that node's matched reference hour, i.e. the unshifted seed) and `ACINJECTION` (after the shift). Both **import-positive** (`load + charge − gen`) like every other `ACINJECTION` column, and hence opposite in sign to the export-positive `REFDAY_SHIFT` deltas: `ACINJECTION = ACINJECTION_REF − Σ deltas` over the nodal components (`np_relax` excluded). Empty for runs without a [`ReferenceDayBasecase`](@ref).
-- `REFDAY_LINEFLOW::DataFrame`: The assembled reference-day basecase's flows — per (`Time`, `index` = AC line) `LINEFLOW = params.ptdf · ACINJECTION`, over every AC line rather than only the CNEs, and import-positive like the injection it comes from. This is the flow `calc_ram` turns into the persisted `F0`. Empty for runs without a [`ReferenceDayBasecase`](@ref).
+- `REFDAY_LINEFLOW::DataFrame`: The assembled reference-day basecase's flows — per (`Time`, `index` = AC line) `LINEFLOW = params.ptdf · ACINJECTION`, over every AC line rather than only the CNEs, and import-positive like the injection it comes from. This is the flow `calc_ram` turns into the persisted `F0`; [`refday_f0`](@ref) recomputes that `F0` from this table under any GSK strategy. Empty for runs without a [`ReferenceDayBasecase`](@ref).
 
 # Constructors
 ```julia
@@ -112,6 +118,7 @@ struct DataFiles
     NodalMarketBalance::DataFrame
     NodalMarketRedispBalance::DataFrame
     FBMC_INF::DataFrame
+    NP_INF::DataFrame
     RAM::DataFrame
     REFDAY_MATCH::DataFrame
     REFDAY_GROUPS::DataFrame
@@ -624,6 +631,7 @@ Checks all infeasibility slack variables written to the result tables:
 | `NodalMarketBalance` | `LL`, `CU` | Nodal lost load / curtailment not handled by plant specific curtailment |
 | `NodalMarketRedispBalance` | `LL`, `CU` | Redispatch nodal lost load / curtailment  not handled by plant specific curtailment |
 | `FBMC_INF` | `FBMC_INF_POS`, `FBMC_INF_NEG` | FBMC RAM constraint slacks |
+| `NP_INF` | `NP_INF_POS`, `NP_INF_NEG` | Net-position pinning slacks (`fix_net_positions`) |
 | `STO_LVL` | `inf` | Day-ahead storage balance slack (`INF_POS - INF_NEG`, signed) |
 | `STO_LVL_REDISP` | `inf` | Redispatch storage balance slack (signed) |
 | `PRS` | `INF` | Prosumer energy balance slack |
@@ -686,6 +694,12 @@ function check_infeasibility(results::DataFiles; tol::Float64=1e-6)
     # FBMC RAM slacks
     _check!("FBMC_INF", results.FBMC_INF, :FBMC_INF_POS)
     _check!("FBMC_INF", results.FBMC_INF, :FBMC_INF_NEG)
+
+    # Net-position pinning slack (`DCLF.fix_net_positions`). Both halves are non-negative;
+    # the signed `NP_INF` column is their difference and would double-count, so it is not
+    # scanned.
+    _check!("NP_INF", results.NP_INF, :NP_INF_POS)
+    _check!("NP_INF", results.NP_INF, :NP_INF_NEG)
 
     # Storage balance slack: signed expression INF_POS - INF_NEG stored as `inf`.
     # Both stages have their own storage balance, so both are scanned.
