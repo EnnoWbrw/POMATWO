@@ -552,6 +552,76 @@ function test_zonal_ptdf()
         @test ram["L2", 1, "neg"] ≈ -90.0 atol=1e-9
     end
 
+    @testset "_basecase_f0: explicit `lines` keyword" begin
+        # Two-zone, two-line system. `cne` deliberately lists only L1, so the default
+        # call and the explicit `lines = ["L1", "L2"]` call must disagree in COVERAGE
+        # while agreeing on every value they share.
+        nodes = ["N1", "N2"]
+        zones = ["Z1", "Z2"]
+        params = create_gsk_test_params(nodes, zones,
+                                        Dict("N1" => "Z1", "N2" => "Z2");
+                                        lines = ["L1", "L2"],
+                                        acline_capacity = Dict("L1" => 100.0, "L2" => 100.0))
+        append!(params.cne, ["L1"])
+        params.nodes_in_zone["Z1"] = ["N1"]
+        params.nodes_in_zone["Z2"] = ["N2"]
+
+        T = 1:2
+        netinput = Containers.DenseAxisArray([10.0 20.0; -10.0 -20.0], nodes, collect(T))
+        lineflows = Containers.DenseAxisArray([3.0 6.0; 1.0 2.0], ["L1", "L2"], collect(T))
+        bc = Dict{Symbol,Any}(:netinput_ac => netinput, :lineflows => lineflows)
+        PTDFz = Containers.DenseAxisArray([0.5 -0.5; 0.25 -0.25], ["L1", "L2"], zones)
+
+        f0_default = POMATWO._basecase_f0(params, bc, PTDFz, T)
+        f0_all = POMATWO._basecase_f0(params, bc, PTDFz, T; lines = ["L1", "L2"])
+
+        @test collect(axes(f0_default, 1)) == ["L1"]
+        @test collect(axes(f0_all, 1)) == ["L1", "L2"]
+        for t in T
+            @test f0_all["L1", t] ≈ f0_default["L1", t] atol = 1e-12
+        end
+
+        # explicit value check, so a sign flip cannot hide behind self-consistency:
+        # NP[Z1,t] = -netinput[N1,t], NP[Z2,t] = -netinput[N2,t]
+        #   t=1: NP = (-10, +10) → L2: f0 = -1.0 - (0.25*(-10) + (-0.25)*10) = -1.0 + 5.0 = 4.0
+        #   t=2: NP = (-20, +20) → L2: f0 = -2.0 - (0.25*(-20) + (-0.25)*20) = -2.0 + 10.0 = 8.0
+        @test f0_all["L2", 1] ≈ 4.0 atol = 1e-12
+        @test f0_all["L2", 2] ≈ 8.0 atol = 1e-12
+
+        # a line subset that excludes the CNE still works and is ordered as given
+        f0_sub = POMATWO._basecase_f0(params, bc, PTDFz, T; lines = ["L2"])
+        @test collect(axes(f0_sub, 1)) == ["L2"]
+        @test f0_sub["L2", 1] ≈ 4.0 atol = 1e-12
+    end
+
+    @testset "gsk_strategies: dynamic roster" begin
+        strategies = gsk_strategies()
+        types = Set(typeof.(strategies))
+
+        # every shipped zero-arg strategy is discovered
+        @test FlatGSK in types
+        @test GmaxGSK in types
+        @test DispOnlyGSK in types
+        @test GenLoadGSK in types
+
+        # a strategy needing constructor arguments cannot be instantiated blind
+        @test !(CustomWeightsGSK in types)
+
+        # every entry is a usable instance, not a type
+        @test all(s -> s isa GSKStrategy, strategies)
+
+        # sorted by type name, so a menu built from this has a stable order
+        @test issorted([string(nameof(typeof(s))) for s in strategies])
+
+        # no duplicates
+        @test length(types) == length(strategies)
+
+        # NOT an equality assertion on the set: this test file itself defines
+        # `DummyTimedepGSK <: GSKStrategy` (zero-arg), so the roster legitimately
+        # picks it up here. Discovering user strategies is the whole point.
+        @test DummyTimedepGSK in types
+    end
+
     @testset "calc_ram: AMR floor active vs inactive (both directions)" begin
         # Isolate the minRAM-floor (AMR) logic with exact hand values. One node per
         # zone, shared PTDFz and netinput ⇒ Σ PTDFz·NP = -20 on every line; per-line

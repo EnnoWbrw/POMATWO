@@ -15,7 +15,8 @@ using JuMP,
     CSV,
     CategoricalArrays,
     Statistics,
-    LinearAlgebra
+    LinearAlgebra,
+    InteractiveUtils
 
 # Fix for Plasmo 0.5.4 compatibility with JuMP 1.27+
 # Tell JuMP what variable reference type to use for OptiNode
@@ -100,6 +101,7 @@ export load_data,
     get_market_statistics,
     plot_market_statistics,
     build_gsk,
+    gsk_strategies,
     zonal_ptdf,
     GSKStrategy,
     FlatGSK,

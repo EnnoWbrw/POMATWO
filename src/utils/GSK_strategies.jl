@@ -409,3 +409,46 @@ function build_gsk_timeseries(params, strategy::GSKStrategy, netinput_ac, T;
 
     return Containers.DenseAxisArray(G_data, nodes, zones, times)
 end
+"""
+    gsk_strategies() -> Vector{GSKStrategy}
+
+Every concrete [`GSKStrategy`](@ref) that can be constructed without arguments, one
+instance each, sorted by type name.
+
+Discovered at call time with `InteractiveUtils.subtypes`, walking abstract intermediate
+subtypes as well, so a strategy defined anywhere — in POMATWO, in a user script, in a
+downstream package — shows up without being registered. That is what the GSK menu of
+`plot_shift_map_interactive` is built from; hard-coding the list there would silently
+omit every strategy added afterwards.
+
+Two kinds of subtype are deliberately absent:
+
+- one whose constructor needs arguments ([`CustomWeightsGSK`](@ref) needs its weight
+  vector), because there is no defensible value to invent for it. Pass such a strategy
+  explicitly instead — every consumer of this function takes an override.
+- a parametric type (`Foo{T} <: GSKStrategy`), which `subtypes` returns as a `UnionAll`
+  and which therefore has no single instance to offer.
+
+A strategy that claims [`is_time_dependent`](@ref) but defines no
+[`timedep_node_weight`](@ref) is still listed — it is constructible, and it fails loudly
+at the point it is actually used, which is where the error belongs.
+"""
+function gsk_strategies()
+    out = GSKStrategy[]
+    seen = Set{Any}()
+    stack = Any[GSKStrategy]
+    while !isempty(stack)
+        parent = pop!(stack)
+        for S in InteractiveUtils.subtypes(parent)
+            S in seen && continue
+            push!(seen, S)
+            if isabstracttype(S)
+                push!(stack, S)
+            elseif isconcretetype(S) && hasmethod(S, Tuple{})
+                push!(out, S())
+            end
+        end
+    end
+    sort!(out; by = s -> string(nameof(typeof(s))))
+    return out
+end

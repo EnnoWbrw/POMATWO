@@ -222,9 +222,16 @@ so the value can be persisted alongside the RAM it produces (see the `:F0` entry
 [`calc_fbmc_params`](@ref)).
 
 `basecase_results` is any dict with `:lineflows` (l×t) and `:netinput_ac` (n×t).
+
+`lines` selects the line set the intercept is computed over; it defaults to `params.cne`,
+which is what the flow-based domain needs. [`refday_f0`](@ref) passes every AC line of a
+reference-day basecase instead, so a plot can show `F0` on lines that never became CNEs.
+`T` is any iterable of timesteps — a `UnitRange` from the model, a `Vector{Int}` when the
+axis was read back from a result table.
 """
-function _basecase_f0(params::Parameters, basecase_results::Dict, PTDFz::DenseAxisArray, T::UnitRange)
-    cne_lines = params.cne
+function _basecase_f0(params::Parameters, basecase_results::Dict, PTDFz::DenseAxisArray, T;
+                      lines = params.cne)
+    cne_lines = collect(lines)
 
     # lineflows[l, t] and netinput[n, t] from the basecase
     lineflows    = basecase_results[:lineflows]
