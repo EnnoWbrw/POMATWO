@@ -209,6 +209,14 @@ the flow-based parameters were actually built from, not a recomputation. Both ar
 the export-positive `REFDAY_SHIFT` deltas. `REFDAY_LINEFLOW` is what `calc_ram` turns into
 the persisted `F0`; the `RAM` table keeps only that intercept, and only for CNEs.
 
+[`refday_f0`](@ref) recomputes that intercept from the two persisted tables for **any** GSK
+strategy and over every AC line, which is what the `F0` modes of
+`plot_shift_map_interactive` show. Calling it with the run's own strategy reproduces the
+persisted `RAM.F0` exactly — that identity is asserted in `test_refday_trace_e2e()`.
+[`refday_basecase_artifacts`](@ref) is the lower-level read-back: it returns `:netinput_ac`
+and `:lineflows` in the same shape [`build_refday_basecase`](@ref) produces, so a persisted
+basecase can be fed straight back into [`calc_fbmc_params`](@ref).
+
 The reconstruction identity is
 
 ```

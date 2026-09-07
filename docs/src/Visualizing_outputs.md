@@ -215,19 +215,35 @@ Deltas follow the injection convention of `REFDAY_SHIFT`: for the `load` compone
 
 If **no** node in the run carries coordinates, the nodes are laid out on a circle instead, the basemap is suppressed and none of the map decorations are drawn (noted in the axis subtitle). Topology, line styling and the node markers all still read correctly; only the geography is gone. While *some* node has coordinates the behaviour is unchanged: a node without them cannot be placed and its deltas are dropped, with a warning naming the total dropped MW.
 
+**Line layer.** The AC lines can be coloured by the assembled reference-day basecase flow, read from `REFDAY_LINEFLOW`: `none` (flat grey, the default), `|flow| (MW)`, `utilization` (`|flow| / fmax`), `|F0| (MW)` or `|F0| / fmax`. The two `F0` modes recompute the flow-based intercept from that same basecase under the GSK selected in the GSK menu ([`refday_f0`](@ref)), over **every** AC line rather than only the CNEs — the CNE list is itself a property of the run's own GSK, so it is the wrong filter for the question "what would the domain look like under a different one".
+
+The GSK menu is populated from [`gsk_strategies`](@ref), which discovers every zero-argument `GSKStrategy` at call time; a strategy added to POMATWO later shows up without this plot being edited. A strategy needing constructor arguments (`CustomWeightsGSK`) is passed in through `gsk_options` instead.
+
+`F0` is the intercept of a linearization, not a physical flow, so `|F0| > fmax` is legitimate — the colour scale does not clamp it and no overload is implied. DC lines stay dashed grey in every mode, because `REFDAY_LINEFLOW` covers AC lines only, and an AC line the basecase has no flow for sits at the bottom of the scale.
+
+The `hours ≥ threshold` aggregation always compares against `|value| / fmax`, in the MW modes too: a threshold in MW would mean nothing across a network of mixed ratings.
+
 **Arguments**
 - `results`: A `DataFiles` object of a reference-day run.
 
 **Keyword arguments**
-- `figsize`: (default `(1000, 1100)`)
+- `figsize`: (default `(1250, 1100)`)
 - `background_map`: (default `true`) Draw Tyler/CartoDB raster tiles. The axis stays a map axis without them.
 - `exclude_dc_lines`: (default `false`)
 - `extent_pad`: (default `0.5`) Padding of the auto-fitted map window, in degrees.
 - `map_axis`: (default `true`) map-axis styling — `true`, `false` for a bare axis, or a `NamedTuple` such as `(scalebar = false,)`. See [Map axes](@ref).
 - `max_markersize`, `min_markersize`, `zero_tol`.
+- `line_value`: (default `:none`) initial line mode — `:none`, `:flow`, `:utilization`, `:f0`, `:f0_utilization`.
+- `line_agg`: (default `:mean`) — `:mean`, `:hours`, `:sum`.
+- `line_scale`: (default `:window`) colour reference — `:window` (adaptive to the visible window) or `:horizon` (fixed over the whole horizon).
+- `threshold`: (default `0.8`) initial utilization threshold of the `hours ≥ threshold` mode.
+- `gsk`: (default `nothing` → `FlatGSK`) initially selected GSK, as a `GSKStrategy` or its type name.
+- `gsk_options`: (default `gsk_strategies()`) the strategies the GSK menu offers.
+- `linewidth`, `linewidth_by_capacity` (default `true`), `linewidth_range` (default `(0.6, 4.5)`).
 
 **Interactivity**
-- *Component menu*: `total` or an individual shift component.
+- *Component menu*: `total` or an individual shift component (node markers).
+- *Line value / GSK / Aggregation / Colour scale menus and threshold slider*: the line layer.
 - *`IntervalSlider`*: a single timestep (handles together) or the sum over a window.
 
 **Returns**
@@ -239,6 +255,10 @@ using GLMakie, Tyler, ColorSchemes, Colors
 
 variant = DataFiles(joinpath("results", "refday_gsk"))
 fig = plot_shift_map_interactive(variant)
+
+# open straight on the F0 domain under a capacity-weighted GSK
+fig = plot_shift_map_interactive(variant;
+                                 line_value = :f0_utilization, gsk = GmaxGSK())
 ```
 
 ### `plot_refday_dispatch_interactive(variant, source; kwargs...)`

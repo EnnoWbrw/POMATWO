@@ -29,15 +29,21 @@ isolation:
 | 1000 | `technologies.jl` DA ndisp | historical / min-generation slack |
 | 9000 | `energy_balances.jl` | nodal+zonal `CU` / `LL` infeasibility slack |
 | 10000 | `technologies.jl` storage | storage balance `INF` |
+| 50000 | `DCLF.np_cost` | net-position pinning slack `NP_INF` (see below) |
 | 100000 | `technologies.jl` FBMC | FBMC RAM slack |
 
 Redispatch costs are configurable on `DCLF`: `disp_cost` (150), `res_up_cost` (150),
 `res_down_cost` (150), `sto_cost` (500). Generation redispatch is priced the same in every
 direction, renewable recall included; storage is dearer because it shifts energy across
 hours, not just across nodes. The rest are still literals. `DCLF` also has an
-opt-in `fix_net_positions::Bool` flag (default `false`, no cost — a hard equality
-constraint, not a penalty): when `true`, redispatch may only reshuffle generation within a
-zone, since each zone's net position is pinned to its day-ahead cleared value.
+opt-in `fix_net_positions::Bool` flag (default `false`): when `true`, redispatch may only
+reshuffle generation within a zone, since each zone's net position is pinned to its
+day-ahead cleared value. That equality is softened by the `np_cost`-priced slack pair
+`NP_INF_POS`/`NP_INF_NEG` (default 50000) so an unreachable pin reports itself instead of
+making the model infeasible — deliberately above `CU`/`LL` (9000) and storage (10000), so
+at the default the pin holds exactly whenever any other escape exists. The slack is
+written to the `NP_INF` result table (`index` = zone, plus the signed `NP_INF` and the
+pinned `NP_DA`) and scanned by `check_infeasibility`.
 
 **Edit every stage, not just one.** Dispatch keys off `SubRun{MT,PS,RD,MS}` where
 `MS <: DayAhead | TwoDayAhead | Redispatch`. The same function name (`add_disp_generators`,
@@ -72,6 +78,9 @@ the names suggest. Consequences:
   `ACINJECTION`) and `REFDAY_LINEFLOW` — and those, being result tables, are
   IMPORT-positive. So the one identity spans both conventions: a `REFDAY_SHIFT` row and a
   `REFDAY_NETINPUT` row of the same (node, hour) have opposite signs by construction.
+  `refday_basecase_artifacts` reads both back **unchanged** (still import-positive), so the
+  dict it returns is interchangeable with `build_refday_basecase`'s. Negating on read would
+  break `refday_f0`, whose formula assumes the persisted convention.
 - **`params.ptdf` is import-positive too.** It maps `NETINPUT` to `LINEFLOW` directly
   (`PTDF · NETINPUT == LINEFLOW`), i.e. the negation of the usual export-positive PTDF.
   The whole flow-based subsystem consistently works in that negated convention — the FBMC
@@ -224,6 +233,11 @@ runners lack without an xvfb workaround, so this is deliberate, not an oversight
 Consequences:
 - The docstrings in `ext/` are never processed by Documenter. `docs/src/Visualizing_*.md`
   duplicates them **by hand**; the two drift silently. Update both.
+- Anything numerically load-bearing therefore belongs in `src/`, not `ext/`. The
+  reference-day `F0` the shift map's line layer paints is computed by `refday_f0`
+  (`utils/refday_basecase.jl`) precisely so CI can pin it against the run's own persisted
+  `RAM.F0`; the extension only reads the matrix and colours it. `refday_f0` delegates the
+  sign convention to `_basecase_f0` — it must never re-derive it.
 - Verification is manual, in an environment with the four weakdeps added:
   - `julia --project=examples examples/bench_plotting.jl [results_dir] [out_dir]` —
     renders every entry point to PNG and reports ms / MiB / allocations per prep step.

@@ -47,6 +47,7 @@ GmaxGSK
 GenLoadGSK
 CustomWeightsGSK
 build_gsk
+gsk_strategies
 POMATWO.build_gsk_timeseries
 POMATWO.is_time_dependent
 POMATWO.timedep_node_weight
@@ -123,6 +124,8 @@ match_by_cluster
 match_by_scope
 build_refday_basecase
 refday_reference_times
+refday_basecase_artifacts
+refday_f0
 calc_fbmc_params
 POMATWO.zone_to_zone_ptdf
 ```
