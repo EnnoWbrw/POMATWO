@@ -3,7 +3,9 @@
 #
 #   plot_shift_map_interactive(results)          geographic map of the nodal
 #       injection deltas caused by the ShareShift (green = increase,
-#       red = decrease), with a component filter and a time-window slider.
+#       red = decrease), with a component filter and a time-window slider, plus
+#       an optional AC-line colouring by the reference-day basecase flow
+#       (|flow|, utilization, or the F0 intercept under a selectable GSK).
 #   plot_refday_dispatch_interactive(variant, source)   per-zone stacked-bar
 #       comparison of (1) the selected reference day, (2) the forecast/target
 #       day, (3) the shifted basecase and (4) the actual flow-based DA
@@ -51,6 +53,41 @@ const _SHIFT_ZERO_COLOR = RGBAf(0.40, 0.40, 0.40, 0.50)
 
 # Single key of the charge tables, which have no type dimension.
 const _CHARGE_KEY = "charge"
+
+# --- reference-day line layer ------------------------------------------------
+# Menu labels of the line-value modes. `none` keeps the flat grey topology the shift map
+# has always drawn; every other mode colours the AC lines from REFDAY_LINEFLOW.
+const _RD_LINE_NONE = "none"
+const _RD_LINE_FLOW = "|flow| (MW)"
+const _RD_LINE_UTIL = "utilization"
+const _RD_LINE_F0 = "|F0| (MW)"
+const _RD_LINE_F0UTIL = "|F0| / fmax"
+const _RD_LINE_MODES = [_RD_LINE_NONE, _RD_LINE_FLOW, _RD_LINE_UTIL,
+                        _RD_LINE_F0, _RD_LINE_F0UTIL]
+
+# Symbol form of the same, for the `line_value` keyword.
+const _RD_LINE_BY_SYMBOL = Dict{Symbol,String}(
+    :none => _RD_LINE_NONE,
+    :flow => _RD_LINE_FLOW,
+    :utilization => _RD_LINE_UTIL,
+    :f0 => _RD_LINE_F0,
+    :f0_utilization => _RD_LINE_F0UTIL,
+)
+
+# The two F0 modes are the only ones the GSK menu affects.
+_rd_is_f0(mode) = mode == _RD_LINE_F0 || mode == _RD_LINE_F0UTIL
+# The two share modes divide by fmax; the MW modes do not.
+_rd_is_share(mode) = mode == _RD_LINE_UTIL || mode == _RD_LINE_F0UTIL
+
+const _RD_AGG_MEAN = "mean"
+const _RD_AGG_HOURS = "hours ≥ threshold"
+const _RD_AGG_SUM = "sum"
+const _RD_AGG_MODES = [_RD_AGG_MEAN, _RD_AGG_HOURS, _RD_AGG_SUM]
+const _RD_AGG_BY_SYMBOL = Dict{Symbol,String}(
+    :mean => _RD_AGG_MEAN, :hours => _RD_AGG_HOURS, :sum => _RD_AGG_SUM)
+
+# Flat grey of the `none` mode — the colour the shift map drew before this layer existed.
+const _RD_LINE_PLAIN = RGBAf(0.0, 0.0, 0.0, 0.35)
 
 # =============================================================================
 # shared helpers
@@ -314,6 +351,87 @@ function _shift_fill!(comp_mats, total, unknown, compcol, nodecol, timecol, delt
 end
 
 """
+    _refday_line_arrays(results) -> (lines, times, S, cap)
+
+Reference-day basecase flows as a dense `length(lines) × length(times)` matrix.
+
+`S` keeps the persisted sign (import-positive, i.e. the negative of the physical feed-in
+flow — see the NETINPUT/ACINJECTION note in `CLAUDE.md`); every display mode takes `abs`,
+so only the magnitude is ever painted and the convention cannot mislead. `cap` is the AC
+thermal rating per line from `params.acline_capacity`, `0.0` where the line has none —
+`REFDAY_LINEFLOW` carries no `line_capacity` column of its own, unlike the `LINEFLOW`
+result tables.
+
+`lines × times` (not the transpose) so a time window is a set of contiguous columns and
+`view(S, :, cols)` needs no copy — the same layout as [`_line_util_matrix`](@ref).
+
+Empty arrays when the run carries no `REFDAY_LINEFLOW`; the caller then offers only the
+`none` line mode.
+"""
+function _refday_line_arrays(results)
+    df = results.REFDAY_LINEFLOW
+    (df isa DataFrame && !isempty(df)) ||
+        return String[], Int[], zeros(Float64, 0, 0), Float64[]
+
+    times = sort!(unique(Int.(df.Time)))
+    lines = sort!(unique(String.(df.index)))
+    tpos = Dict{Int,Int}(t => i for (i, t) in enumerate(times))
+    lpos = Dict{String,Int}(l => i for (i, l) in enumerate(lines))
+
+    S = zeros(Float64, length(lines), length(times))
+    _fill_refday_flow!(S, df.index, df.Time, df.LINEFLOW, lpos, tpos)
+
+    caps = results.params.acline_capacity
+    cap = [Float64(get(caps, l, 0.0)) for l in lines]
+    return lines, times, S, cap
+end
+
+"Function barrier for the [`_refday_line_arrays`](@ref) fill loop — see [`_fill_util!`](@ref) for why."
+function _fill_refday_flow!(S, idx, tt, vals, lpos, tpos)
+    @inbounds for k in eachindex(idx, tt, vals)
+        v = vals[k]
+        ismissing(v) && continue
+        i = get(lpos, String(idx[k]), 0)
+        j = get(tpos, Int(tt[k]), 0)
+        (i == 0 || j == 0) && continue
+        S[i, j] = Float64(v)
+    end
+    return S
+end
+
+"""
+    _rd_reduce!(dest, V, cols, agg, share, thr)
+
+Window reduction of a `lines × times` value matrix into `dest`, one entry per line.
+
+`agg` is one of [`_RD_AGG_MEAN`](@ref), [`_RD_AGG_SUM`](@ref), [`_RD_AGG_HOURS`](@ref).
+In the hours mode `share` supplies the |value| / fmax matrix the threshold is compared
+against — a threshold in MW would mean nothing across a network of mixed ratings, so the
+count is always over the utilization share even when the painted value is MW.
+
+Writes into `dest` rather than allocating, so a slider drag does not allocate per pixel.
+"""
+function _rd_reduce!(dest, V, cols, agg, share, thr)
+    n = length(cols)
+    @inbounds for i in eachindex(dest)
+        if agg == _RD_AGG_HOURS
+            c = 0
+            for j in cols
+                share[i, j] >= thr && (c += 1)
+            end
+            dest[i] = Float32(c)
+        else
+            s = 0.0
+            for j in cols
+                s += V[i, j]
+            end
+            dest[i] = Float32(agg == _RD_AGG_MEAN && n > 0 ? s / n : s)
+        end
+    end
+    return dest
+end
+
+"""
 (zone, target_time) -> matched reference time (+ fallback flag) from
 REFDAY_MATCH. Groups are zone labels under ZonalMatchScope; otherwise falls
 back to node-level matches mapped through node2zone (first node wins, warning
@@ -384,14 +502,43 @@ still read correctly; only the geography is gone. While SOME node has
 coordinates the behaviour is unchanged: a node without them cannot be placed and
 its deltas are dropped, with a warning naming the total dropped MW.
 
+# Line layer
+The AC lines can be coloured by the assembled reference-day basecase flow, read from
+`REFDAY_LINEFLOW`:
+
+- `none` — flat grey topology (the behaviour before this layer existed),
+- `|flow| (MW)` / `utilization` — the basecase flow magnitude, raw or over the line's AC
+  rating,
+- `|F0| (MW)` / `|F0| / fmax` — the flow-based intercept `F0` recomputed from that same
+  basecase under the GSK picked in the GSK menu (`refday_f0`), over **every** AC line, not
+  only the CNEs.
+
+The GSK menu is built from `gsk_strategies()`, so a strategy added to POMATWO later
+appears without this plot being changed; a strategy needing constructor arguments (e.g.
+`CustomWeightsGSK`) is supplied through `gsk_options`. `F0` is a linearization intercept,
+not a physical flow — `|F0| > fmax` is legitimate and is neither clamped nor flagged.
+
+DC lines stay dashed grey in every mode: `REFDAY_LINEFLOW` covers AC lines only. An AC line
+the basecase has no flow for sits at the bottom of the colour scale.
+
 # Interactivity
-- Component menu: total / individual shift components.
+- Component menu: total / individual shift components (node markers).
+- Line value menu, GSK menu, aggregation menu (`mean`, `hours ≥ threshold`, `sum`),
+  colour-scale menu (`adaptive (this window)` / `fixed (whole horizon)`) and a threshold
+  slider (line layer). The threshold is always compared against `|value| / fmax`, in the
+  MW modes too — a MW threshold means nothing across a network of mixed ratings.
 - IntervalSlider: single timestep (handles together) or Σ over a window.
 
 # Keyword arguments
-`figsize=(1000,1100)`, `background_map=true` (Tyler/CartoDB tiles; the axis stays
+`figsize=(1250,1100)`, `background_map=true` (Tyler/CartoDB tiles; the axis stays
 a map axis without them), `exclude_dc_lines=false`, `extent_pad=0.5` (degrees), `max_markersize=40`,
 `min_markersize=2.5`, `zero_tol=1e-6` (MW).
+
+Line layer: `line_value=:none` (`:none`, `:flow`, `:utilization`, `:f0`,
+`:f0_utilization`), `line_agg=:mean` (`:mean`, `:hours`, `:sum`), `line_scale=:window`
+(`:window`, `:horizon`), `threshold=0.8`, `gsk=nothing` (a `GSKStrategy` or its type name;
+defaults to `FlatGSK`), `gsk_options=gsk_strategies()`, `linewidth=1.0`,
+`linewidth_by_capacity=true`, `linewidth_range=(0.6,4.5)`.
 
 `map_axis=true` controls the map-axis styling: `true` for degree ticks,
 `Longitude`/`Latitude` labels, a scale bar and a north arrow, `false` for a bare
@@ -403,7 +550,7 @@ node coordinates it is ignored — the circular fallback has no geography to lab
 """
 function POMATWO.plot_shift_map_interactive(
     results;
-    figsize          = (1000, 1100),
+    figsize          = (1250, 1100),
     background_map   = true,
     exclude_dc_lines = false,
     extent_pad       = 0.5,
@@ -411,9 +558,51 @@ function POMATWO.plot_shift_map_interactive(
     min_markersize   = 2.5,
     zero_tol         = 1e-6,
     map_axis         = true,
+    line_value       = :none,
+    line_agg         = :mean,
+    line_scale       = :window,
+    threshold        = 0.8,
+    gsk              = nothing,
+    gsk_options      = POMATWO.gsk_strategies(),
+    linewidth        = 1.0,
+    linewidth_by_capacity::Bool = true,
+    linewidth_range  = (0.6, 4.5),
 )
     params = results.params
     sa = _shift_arrays(results)
+
+    haskey(_RD_LINE_BY_SYMBOL, line_value) || throw(ArgumentError(
+        "line_value must be one of $(sort!(collect(keys(_RD_LINE_BY_SYMBOL)))), got :$line_value"))
+    haskey(_RD_AGG_BY_SYMBOL, line_agg) || throw(ArgumentError(
+        "line_agg must be one of $(sort!(collect(keys(_RD_AGG_BY_SYMBOL)))), got :$line_agg"))
+    line_scale in (:window, :horizon) ||
+        throw(ArgumentError("line_scale must be :window or :horizon, got :$line_scale"))
+
+    # --- reference-day flows -------------------------------------------------
+    lf_lines, lf_times, lf_S, lf_cap = _refday_line_arrays(results)
+    has_flows = !isempty(lf_lines)
+
+    # GSK roster for the F0 modes. Dynamically discovered (see `gsk_strategies`), so a
+    # strategy added to POMATWO later appears here without this file being touched.
+    # Anything needing constructor arguments is passed in through `gsk_options` instead.
+    gsk_by_name = Dict{String,Any}(string(nameof(typeof(s))) => s for s in gsk_options)
+    gsk_names = sort!(collect(keys(gsk_by_name)))
+    default_gsk = gsk === nothing ? ("FlatGSK" in gsk_names ? "FlatGSK" :
+                                     (isempty(gsk_names) ? "" : first(gsk_names))) :
+                  (gsk isa AbstractString ? String(gsk) : string(nameof(typeof(gsk))))
+    if !(gsk isa Union{Nothing,AbstractString}) && !haskey(gsk_by_name, default_gsk)
+        gsk_by_name[default_gsk] = gsk
+        push!(gsk_names, default_gsk)
+        sort!(gsk_names)
+    end
+    isempty(gsk_names) || default_gsk in gsk_names || throw(ArgumentError(
+        "gsk \"$default_gsk\" is not among $(join(gsk_names, ", "))"))
+
+    line_modes = has_flows && !isempty(gsk_names) ? _RD_LINE_MODES :
+                 has_flows ? [_RD_LINE_NONE, _RD_LINE_FLOW, _RD_LINE_UTIL] :
+                 [_RD_LINE_NONE]
+    default_mode = _RD_LINE_BY_SYMBOL[line_value]
+    default_mode in line_modes || (default_mode = _RD_LINE_NONE)
 
     # topology: AC solid, DC dashed. `_results_topology` falls back to a circular layout
     # when no node carries coordinates — without it such a result set collapses every node
@@ -428,14 +617,46 @@ function POMATWO.plot_shift_map_interactive(
                                map_axis = map_axis)
     geographic || (ax.subtitle = _NO_COORDS_NOTE)
 
-    # One draw call per line style instead of one `lines!` per line.
-    ac_pts = Point2f[]
-    sizehint!(ac_pts, 2 * length(ac_from_to))
-    for (from, to) in values(ac_from_to)
-        push!(ac_pts, from, to)
+    # Sorted, so a line's position in `ac_pts` is a stable index the colour buffer can be
+    # written through. `values(ac_from_to)` was fine while every AC line was the same
+    # grey; it is not once the segments carry per-line values.
+    ac_lines = sort!(collect(keys(ac_from_to)))
+    ac_pts = Vector{Point2f}(undef, 2 * length(ac_lines))
+    for (i, l) in enumerate(ac_lines)
+        from, to = ac_from_to[l]
+        ac_pts[2i-1] = from
+        ac_pts[2i] = to
     end
-    isempty(ac_pts) ||
-        linesegments!(ax, ac_pts; color = (:black, 0.35), linewidth = 1.0)
+
+    # Per-line width from the AC rating, so a thin overloaded line and a thick one are
+    # visibly different problems — the same rule as `plot_line_utils_interactive`.
+    ac_widths = if linewidth_by_capacity && !isempty(ac_lines)
+        capmax = maximum(Float64[get(params.acline_capacity, l, 0.0) for l in ac_lines];
+                         init = 0.0)
+        wlo, whi = Float32(first(linewidth_range)), Float32(last(linewidth_range))
+        Float32[capmax <= 0 ? wlo :
+                clamp(wlo + (whi - wlo) *
+                      Float32(get(params.acline_capacity, l, 0.0) / capmax), wlo, whi)
+                for l in ac_lines for _ in 1:2]
+    else
+        Float32(linewidth)
+    end
+
+    # `line_pos[i]` is the row of `lf_S` for `ac_lines[i]`, or 0 for a line the
+    # reference-day basecase has no flow for (it stays at the colour-scale floor).
+    lf_row = Dict{String,Int}(l => i for (i, l) in enumerate(lf_lines))
+    line_pos = [get(lf_row, l, 0) for l in ac_lines]
+
+    crange = Observable((0.0f0, 1.0f0))
+    ac_vals = Observable(zeros(Float32, 2 * length(ac_lines)))
+    # Two plots over the same geometry: `linestyle`, `colormap` and a flat colour are all
+    # per-plot attributes in Makie, so `none` cannot be a state of the coloured plot.
+    ac_plain = isempty(ac_pts) ? nothing :
+        linesegments!(ax, ac_pts; color = _RD_LINE_PLAIN, linewidth = ac_widths)
+    ac_colored = isempty(ac_pts) ? nothing :
+        linesegments!(ax, ac_pts; color = ac_vals,
+                      colormap = ColorSchemes.lajolla.colors, colorrange = crange,
+                      linewidth = ac_widths, visible = false)
 
     if !exclude_dc_lines
         dc_segs = Dict{String,_Segment}()
@@ -446,8 +667,9 @@ function POMATWO.plot_shift_map_interactive(
         for (from, to) in values(dc_segs)
             push!(dc_pts, from, to)
         end
+        # DC always stays flat grey: REFDAY_LINEFLOW covers AC lines only.
         isempty(dc_pts) ||
-            linesegments!(ax, dc_pts; color = (:black, 0.35), linewidth = 1.0,
+            linesegments!(ax, dc_pts; color = _RD_LINE_PLAIN, linewidth = 1.0,
                           linestyle = :dash)
     end
 
@@ -457,9 +679,52 @@ function POMATWO.plot_shift_map_interactive(
     # controls
     comp_options = ["total"; [c for c in _SHIFT_COMPONENTS if haskey(sa.comp_mats, c)]]
     comp_menu = Menu(fig, options = comp_options, default = "total")
+    line_menu = Menu(fig, options = line_modes, default = default_mode)
+    gsk_menu = Menu(fig, options = isempty(gsk_names) ? ["—"] : gsk_names,
+                    default = isempty(gsk_names) ? "—" : default_gsk)
+    agg_menu = Menu(fig, options = _RD_AGG_MODES, default = _RD_AGG_BY_SYMBOL[line_agg])
+    scale_menu = Menu(fig, options = [_SCALE_WINDOW, _SCALE_HORIZON],
+                      default = line_scale === :window ? _SCALE_WINDOW : _SCALE_HORIZON)
+    thr_grid = SliderGrid(fig, (label = "threshold", range = 0:0.01:2,
+                                startvalue = threshold,
+                                format = x -> string(round(Int, 100x)) * " %"))
+    thr_slider = thr_grid.sliders[1]
+
     islider = IntervalSlider(fig[2, 1], range = sa.times,
                              startvalues = (first(sa.times), first(sa.times)))
     info = Label(fig[3, 1], ""; tellwidth = false, fontsize = 13)
+
+    cbar = Colorbar(fig[1, 3]; colormap = ColorSchemes.lajolla.colors,
+                    colorrange = crange, label = "line value")
+
+    # --- lazily built value matrices ----------------------------------------
+    # One `lines × times` matrix per (mode, GSK) actually selected, kept for the life of
+    # the figure. F0 needs a PTDFz per GSK — recomputing it on every slider pixel would
+    # make the slider unusable on anything larger than a toy network.
+    f0_cache = Dict{String,Matrix{Float64}}()
+    val_cache = Dict{String,Tuple{Matrix{Float64},Matrix{Float64}}}()
+
+    function f0_matrix(name)
+        get!(f0_cache, name) do
+            F0 = POMATWO.refday_f0(results, gsk_by_name[name]; lines = lf_lines)
+            [Float64(F0[l, t]) for l in lf_lines, t in lf_times]
+        end
+    end
+
+    # `(V, share)` for a mode: the painted magnitude and the |value| / fmax the threshold
+    # is compared against.
+    function value_matrices(mode, name)
+        key = _rd_is_f0(mode) ? "$mode|$name" : mode
+        get!(val_cache, key) do
+            base = _rd_is_f0(mode) ? f0_matrix(name) : lf_S
+            V = abs.(base)
+            share = similar(V)
+            @inbounds for i in axes(V, 1), j in axes(V, 2)
+                share[i, j] = lf_cap[i] > 0 ? V[i, j] / lf_cap[i] : 0.0
+            end
+            return (_rd_is_share(mode) ? share : V, share)
+        end
+    end
 
     # Preallocated: a slider drag reassigns these in place rather than allocating three
     # fresh vectors per pixel, which is what the previous `lift` chain did.
@@ -468,6 +733,80 @@ function POMATWO.plot_shift_map_interactive(
     node_size = Observable(fill(Float64(min_markersize), nnodes))
     scatter!(ax, node_points; color = node_color, markersize = node_size,
              strokecolor = :white, strokewidth = 0.4)
+
+    line_vals = zeros(Float32, length(lf_lines))
+
+    function redraw_lines!(lo, hi)
+        mode = line_menu.selection[]
+        ac_plain === nothing && return ""
+        if mode == _RD_LINE_NONE || !has_flows
+            ac_plain.visible[] = true
+            ac_colored.visible[] = false
+            # A colour bar over flat grey lines would be a scale for nothing. Its layout
+            # cell is kept (only the block's own scene is hidden) so switching modes does
+            # not resize the map underneath the cursor.
+            cbar.blockscene.visible[] = false
+            return ""
+        end
+        cbar.blockscene.visible[] = true
+
+        name = gsk_menu.selection[]
+        V, share = try
+            value_matrices(mode, name)
+        catch e
+            # A user strategy can claim `is_time_dependent` and define no
+            # `timedep_node_weight`; that must not kill the whole figure.
+            ac_plain.visible[] = true
+            ac_colored.visible[] = false
+            return " | F0 unavailable for $name: $(sprint(showerror, e))"
+        end
+
+        aggm = agg_menu.selection[]
+        thr = thr_slider.value[]
+        cols = searchsortedfirst(lf_times, lo):searchsortedlast(lf_times, hi)
+        _rd_reduce!(line_vals, V, cols, aggm, share, thr)
+
+        # Colour reference. `window` rescales to the visible peak (best contrast, but two
+        # windows are not comparable by colour); `horizon` uses the whole-horizon peak of
+        # the same reduction so colour means one thing throughout — see `_SCALE_WINDOW`.
+        hi_ref = if scale_menu.selection[] == _SCALE_HORIZON
+            if aggm == _RD_AGG_HOURS
+                Float32(length(lf_times))
+            elseif aggm == _RD_AGG_MEAN
+                Float32(maximum(V; init = 0.0))
+            else
+                Float32(maximum(sum(V; dims = 2); init = 0.0))
+            end
+        else
+            Float32(maximum(line_vals; init = 0.0f0))
+        end
+        # A share scale is anchored at 1.0 so "overloaded" is always the same colour, and
+        # an hour count at 1.0 so a single hour over the threshold is not painted as the
+        # maximum. An MW scale has no such landmark and floors at a hairline > 0.
+        floor_ref = aggm == _RD_AGG_HOURS || _rd_is_share(mode) ? 1.0f0 : 1.0f-9
+        crange[] = (0.0f0, max(hi_ref, floor_ref))
+
+        buf = ac_vals[]
+        @inbounds for (i, r) in enumerate(line_pos)
+            v = r == 0 ? 0.0f0 : line_vals[r]
+            buf[2i-1] = v
+            buf[2i] = v
+        end
+        notify(ac_vals)
+        ac_plain.visible[] = false
+        ac_colored.visible[] = true
+
+        unit = aggm == _RD_AGG_HOURS ? "h" :
+               _rd_is_share(mode) ? (aggm == _RD_AGG_SUM ? "share·h" : "share") :
+               (aggm == _RD_AGG_SUM ? "MWh" : "MW")
+        cbar.label = "$mode — $aggm ($unit)" * (_rd_is_f0(mode) ? ", GSK $name" : "")
+
+        # worst line of the window, named — a colour alone does not identify it
+        wi = isempty(line_vals) ? 0 : argmax(line_vals)
+        worst = wi == 0 ? "" :
+            " | max $(round(Float64(line_vals[wi]), digits = 2)) $unit on $(lf_lines[wi])"
+        return " | lines: $mode$(_rd_is_f0(mode) ? " (GSK $name)" : "")$worst"
+    end
 
     function redraw!()
         comp = comp_menu.selection[]
@@ -498,6 +837,8 @@ function POMATWO.plot_shift_map_interactive(
         notify(node_color)
         notify(node_size)
 
+        line_note = redraw_lines!(lo, hi)
+
         unabs = 0.0
         for t = lo:hi
             unabs += get(sa.unabsorbed, Int(t), 0.0)
@@ -505,12 +846,17 @@ function POMATWO.plot_shift_map_interactive(
         nhours = hi - lo + 1
         info.text = "t = $lo..$hi ($nhours h, Σ) | component: $comp | " *
                     "max |Δ| = $(round(mx, digits = 1)) MW$(nhours > 1 ? "h" : "") | " *
-                    "Σ|np_relax| = $(round(unabs, digits = 1))"
+                    "Σ|np_relax| = $(round(unabs, digits = 1))" * line_note
         return nothing
     end
 
     on(_ -> redraw!(), islider.interval)
     on(_ -> redraw!(), comp_menu.selection)
+    on(_ -> redraw!(), line_menu.selection)
+    on(_ -> redraw!(), gsk_menu.selection)
+    on(_ -> redraw!(), agg_menu.selection)
+    on(_ -> redraw!(), scale_menu.selection)
+    on(_ -> redraw!(), thr_slider.value)
 
     legend = Legend(fig,
         [MarkerElement(marker = :circle, color = _SHIFT_UP_COLOR, markersize = 15),
@@ -520,8 +866,13 @@ function POMATWO.plot_shift_map_interactive(
          LineElement(color = (:black, 0.6), linestyle = :dash)],
         ["injection increase", "injection decrease", "≈ 0", "AC line", "DC line"],
         "Shift impact")
-    fig[1, 2] = vgrid!(Label(fig, "Component", fontsize = 16), comp_menu, legend;
-                       tellheight = false)
+    fig[1, 2] = vgrid!(
+        Label(fig, "Component", fontsize = 16), comp_menu,
+        Label(fig, "Line value", fontsize = 16), line_menu,
+        Label(fig, "GSK (F0 only)", fontsize = 16), gsk_menu,
+        Label(fig, "Aggregation", fontsize = 16), agg_menu,
+        Label(fig, "Colour scale", fontsize = 16), scale_menu,
+        thr_grid, legend; tellheight = false)
 
     redraw!()
     return fig

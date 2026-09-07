@@ -156,6 +156,10 @@ if isdir(REFDAY_DIR)
     variant = DataFiles(REFDAY_DIR)
     measure("_shift_arrays", () -> PLOTTING._shift_arrays(variant))
     render("shift_map", () -> plot_shift_map_interactive(variant; background_map = false))
+    render("shift_map_util", () -> plot_shift_map_interactive(
+        variant; background_map = false, line_value = :utilization))
+    render("shift_map_f0", () -> plot_shift_map_interactive(
+        variant; background_map = false, line_value = :f0_utilization))
     render("refday_dispatch", () -> plot_refday_dispatch_interactive(variant, results))
 end
 
