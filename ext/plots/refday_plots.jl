@@ -590,10 +590,12 @@ function POMATWO.plot_shift_map_interactive(
     default_gsk = gsk === nothing ? ("FlatGSK" in gsk_names ? "FlatGSK" :
                                      (isempty(gsk_names) ? "" : first(gsk_names))) :
                   (gsk isa AbstractString ? String(gsk) : string(nameof(typeof(gsk))))
-    if !(gsk isa Union{Nothing,AbstractString}) && !haskey(gsk_by_name, default_gsk)
+    if !(gsk isa Union{Nothing,AbstractString})
+        # An explicitly passed instance wins over a roster entry of the same type name.
+        # Two `CustomWeightsGSK`s differ only in their weights, and silently plotting the
+        # one from `gsk_options` instead of the one the caller named would be invisible.
         gsk_by_name[default_gsk] = gsk
-        push!(gsk_names, default_gsk)
-        sort!(gsk_names)
+        default_gsk in gsk_names || (push!(gsk_names, default_gsk); sort!(gsk_names))
     end
     isempty(gsk_names) || default_gsk in gsk_names || throw(ArgumentError(
         "gsk \"$default_gsk\" is not among $(join(gsk_names, ", "))"))

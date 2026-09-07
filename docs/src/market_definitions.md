@@ -127,5 +127,6 @@ refday_reference_times
 refday_basecase_artifacts
 refday_f0
 calc_fbmc_params
+POMATWO.calc_ram
 POMATWO.zone_to_zone_ptdf
 ```
