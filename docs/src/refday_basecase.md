@@ -115,16 +115,22 @@ scoped), `shift_single` proceeds as follows:
    intra-zone distribution (not just the zonal total) is the target day's. This mirrors
    the D2CF step of inserting the delivery-day forecast into the snapshot: what is
    inserted is the forecast itself, not the reference day rescaled to the forecast's
-   total. The pre-steps are traced as `RES_prestep` / `load_prestep`.
+   total. The pre-steps are traced as `RES_prestep` / `load_prestep`, and their per-zone
+   totals are reported in `REFDAY_DIAG` next to the levers (see below).
 
    A pre-step is a *hard-set*, outside the budget the corresponding lever is otherwise
-   held to: `:res` ignores ``β_{RES}`` exactly as `:load` ignores ``γ``. For load this
-   has one further consequence — the pre-step **re-anchors** ``γ``: afterwards `load0`
-   is the target hour's load, so `load_shift_share` caps how far the gap cascade and the
-   balance pass may move load away from the *delivery day's* forecast, rather than away
-   from the reference day's. Without the re-anchor a day whose load differs from the
-   reference by more than ``γ`` times the load envelope would arrive at the cascade with
-   its whole budget already spent.
+   held to: `:res` ignores ``β_{RES}`` exactly as `:load` ignores ``γ``. What it sets is
+   then **frozen** for the rest of the construction — the component's lever is skipped by
+   the gap cascade *and* by the global balance pass, so the nodal texture the basecase
+   ends up carrying is the target day's, which is the entire point of the pre-step. A
+   frozen lever behaves like one with no headroom left: it absorbs nothing and passes any
+   remainder handed to it on down `fallback_order`, where it ends up as `np_relax` if no
+   other lever takes it.
+
+   Consequently a pre-stepped component may not also carry a ``β`` share — that share
+   could never be spent, so `validate_shares` **errors** rather than silently ignoring it.
+   Give the share to another lever (`β_conv = 1.0` with `prestep = [:res, :load]`) or drop
+   the component from `prestep`.
 3. **Net-position gap.** Per zone: ``D(z) = NP_{target}(z) − NP_{current}(z)``, where
    ``NP`` is the zonal sum of nodal injections. (With `resolution = :nodal` the gap is
    computed per node instead — the output then *equals* the target's own nodal injection
@@ -180,7 +186,9 @@ scoped), `shift_single` proceeds as follows:
    net-injection basecase is physically consistent for the PTDF/FBMC flow computation.
    Applied deltas are traced as `balance`. Even then balance is not unconditional: with
    conventional headroom exhausted and a small ``γ`` a residual can survive, which is
-   warned about twice. **By default the pass does not run at all**, and the basecase
+   warned about twice. With `:load` pre-stepped the load fallback is frozen along with
+   the lever — the pass warns and leaves the residual rather than undoing the target
+   day's load. **By default the pass does not run at all**, and the basecase
    carries whatever imbalance the reference day and the relaxed gaps leave behind.
 6. **Assembly.** The shifted injections are negated back to the import-positive
    convention (`:netinput_ac`) and multiplied with the nodal PTDF (`:lineflows`).
@@ -237,7 +245,9 @@ injection, and is excluded from the reconstruction sum. Filter it out by *compon
 by node: under `resolution = :nodal` its label is a node id.
 
 `REFDAY_DIAG` answers the question the deltas alone cannot: *how far did the realized
-apportionment drift from what was configured?* One row per (target hour, zone, lever):
+apportionment drift from what was configured?* One row per (target hour, zone, lever),
+preceded per zone by one row per active pre-step (`RES_prestep` / `load_prestep`, in the
+order they ran):
 
 | column | meaning |
 |---|---|
@@ -247,6 +257,15 @@ apportionment drift from what was configured?* One row per (target hour, zone, l
 | `beta_configured` | the configured share of that lever (`0.0` for levers that only receive cascaded remainders, e.g. storage) |
 | `beta_realised` | ``Σ_n \|applied_n\| / \|D\|`` — the share of the gap the lever really moved. It differs from `beta_configured` whenever the cascade interferes: *above* it when the lever absorbs a remainder carried over from an earlier saturated lever (in the worked example below the load lever realises ``12/20 = 0.6`` against a configured 0.5), *below* it when the lever itself saturates |
 
+A **pre-step row** reads those columns differently, because a hard-set is not an
+apportionment: `want == applied` (the zone's summed hard-set — nothing is asked for and
+refused), `reallocated = 0` (no redistribution key involved) and `beta_configured = 0`
+(a pre-step spends no share of the gap; one is forbidden). Its `beta_realised` uses the
+same ``|D|`` as the levers below it, so it reads as the multiple of the *remaining* gap
+that the pre-step moved — a value well above 1 is normal, and is what makes the pre-step's
+impact comparable to the levers' without a second table. A **frozen lever** reports the
+remainder it was handed as `want` with `applied = 0`.
+
 Under `resolution = :nodal` the `zone` column carries node ids (every node is its own
 zone), the same convention as the `np_relax` rows.
 
@@ -254,7 +273,7 @@ zone), the same convention as the `np_relax` rows.
     | Decision | Default | Risk |
     |---|---|---|
     | ``β`` shares | `β_conv = β_load = 0.5` | Pure judgment call — *who absorbs the forecast gap* directly shapes the basecase flows, hence ``f_0`` and RAM. Shares must sum to ``≤ 1`` (leftover is `np_relax`); a sum ``> 1`` is a hard error. |
-    | `prestep` | `Symbol[]` (none) | Combined with the matching ``β`` (`:res` with `β_RES > 0`, `:load` with `β_load > 0`), that component is moved twice (warned, not blocked). `:load` additionally re-anchors the ``γ`` budget to the target day. |
+    | `prestep` | `Symbol[]` (none) | A pre-stepped component is hard-set to the target day's nodal values and **frozen** — its lever is skipped by the cascade and the balance pass, so it can no longer help close the gap. Combining it with the matching ``β`` (`:res` with `β_RES > 0`, `:load` with `β_load > 0`) is a hard error, since that share could never be spent. |
     | `resolution` | `:zonal` | `:nodal` discards the reference day entirely (see above). |
     | `redist` | `GSKRedist(FlatGSK())` | The spatial allocation of every correction is user-chosen. With `GSKRedist`, GSK assumptions enter the basecase *and* enter again through the zonal PTDF — the same heuristic used twice. |
     | `fallback_order` | `[:conv, :sto, :load]` | Physical levers only. A gap no lever can absorb is relaxed toward the reference (`np_relax`), not faked. |

@@ -126,14 +126,17 @@ Apportion the net-position gap among components by user shares.
   per-node hard-set: afterwards the intra-zone distribution of that component *is*
   the target day's (with the target day's zonal total), mirroring the D2CF step of
   inserting the delivery-day forecast into the reference snapshot.
-  The load pre-step additionally **re-anchors the γ budget**: after it, `load0` is
-  the target hour's load, so `load_shift_share` caps the deviation from the
-  delivery-day load forecast rather than from the reference day's (the hard-set
-  itself is outside the budget, just as the RES pre-step is outside `β_RES`).
+  A pre-stepped component is then **frozen** for the rest of the construction
+  (`prestep_levers`): its lever is skipped in the gap cascade and in the balance
+  pass, so the target day's nodal texture is what the basecase ends up carrying.
+  Giving a pre-stepped component a β share is therefore a configuration error
+  (`validate_shares`), not a warning — that share could never be spent. Both
+  per-zone hard-set totals are reported in `REFDAY_DIAG` alongside the levers.
 - `redist`: nodal redistribution key for zonal corrections.
 - `fallback_order`: cascade order for remainders when a component saturates
-  (physical levers only). A zone's gap that no physical lever can absorb is left
-  relaxed toward reference and recorded as `"np_relax"`.
+  (physical levers only). A frozen lever counts as saturated: it absorbs nothing
+  and passes the remainder on. A zone's gap that no physical lever can absorb is
+  left relaxed toward reference and recorded as `"np_relax"`.
 - `enforce_balance`: **opt-in** (default `false`). When `true`, a final pass forces
   the whole basecase to be globally balanced (`Σ_n injection = 0`, i.e.
   production = consumption) by adjusting conventional generation (load as a last
@@ -161,10 +164,23 @@ end
 prestep_components(m::ShareShift) =
     m.prestep isa Symbol ? [m.prestep] : unique(m.prestep)
 
-"Pre-step components that exist, and the β share each one would be moved by twice."
-const PRESTEP_COMPONENTS = (:res => :β_RES, :load => :β_load)
+"""
+Pre-step components that exist, each with the β field that must be zero for it and the
+gap-cascade lever it freezes (see `prestep_levers`).
+"""
+const PRESTEP_COMPONENTS = (:res => (:β_RES, :RES), :load => (:β_load, :load))
 
-"Error on invalid share sum, resolution, load-lever share or pre-step component; warn on double-moved levers."
+"""
+    prestep_levers(m::ShareShift) -> Set{Symbol}
+
+The gap-cascade levers frozen by `m`'s pre-steps (`:res` → `:RES`, `:load` → `:load`).
+A frozen lever is skipped in `shift_single`'s cascade and in the global balance pass, so
+the hard-set target-day nodal texture of that component survives the whole construction.
+"""
+prestep_levers(m::ShareShift) =
+    Set(lever for (comp, (_, lever)) in PRESTEP_COMPONENTS if comp in prestep_components(m))
+
+"Error on invalid share sum, resolution, load-lever share, pre-step component, or a β share given to a pre-stepped (hence frozen) component."
 function validate_shares(m::ShareShift)
     s = m.β_RES + m.β_conv + m.β_load
     s <= 1.0 + 1e-6 || error("Shift shares sum to $s, must be ≤ 1.0 (leftover fraction is np_relax)")
@@ -172,9 +188,12 @@ function validate_shares(m::ShareShift)
     bad = setdiff(pre, first.(PRESTEP_COMPONENTS))
     isempty(bad) ||
         error("unsupported prestep component(s) $bad (allowed: :res, :load)")
-    for (comp, βname) in PRESTEP_COMPONENTS
-        (comp in pre && getfield(m, βname) > 0) &&
-            @warn "prestep includes :$comp with $βname>0: $comp moved twice (hard-set, then balancer)"
+    for (comp, (βname, _)) in PRESTEP_COMPONENTS
+        (comp in pre && getfield(m, βname) > 0) && error(
+            "prestep includes :$comp but $βname = $(getfield(m, βname)) — a pre-stepped " *
+            "component is hard-set to the target day's nodal value and frozen afterwards, " *
+            "so its β share can never be spent. Set $βname = 0.0 (give the share to " *
+            "another lever) or drop :$comp from prestep.")
     end
     m.resolution in (:zonal, :nodal) || error("resolution must be :zonal or :nodal, got :$(m.resolution)")
     m.load_shift_share >= 0.0 ||
@@ -260,7 +279,12 @@ setup = ModelSetup(;
         basecase = ReferenceDayBasecase(
             source = "results/forecast_run",
             matching = MatchingConfig(lookback = 4, scope = ZonalMatchScope()),
-            shift = ShareShift(β_conv = 0.5, β_load = 0.5, prestep = [:res, :load]),
+            # both pre-steps hard-set RES and load to the target hour and freeze
+            # them, so neither may carry a β share as well (`validate_shares`
+            # errors); conventional generation closes the remaining gap, and what
+            # it cannot absorb passes down `fallback_order` to storage — the frozen
+            # load lever hands it straight on, so it ends up as np_relax.
+            shift = ShareShift(β_conv = 1.0, β_load = 0.0, prestep = [:res, :load]),
         ),
     )),
 )
@@ -639,9 +663,10 @@ are in the basecase under construction, seeded from that node's reference hour.
 
 `load0` holds the load the γ budget is measured against, which is what lets the load
 lever's cap apply to the CUMULATIVE deviation — the gap cascade and the global balance
-pass share one budget (`_load_bounds`). It is the reference hour's load, unless the
-`:load` pre-step re-anchored it to the target hour's (see `shift_single`); the cascade
-never writes it.
+pass share one budget (`_load_bounds`). It is the reference hour's load and nothing
+writes it afterwards — a `:load` pre-step needs no re-anchoring, because it freezes the
+load lever outright (`prestep_levers`), leaving neither the cascade nor the balance pass
+a way to spend the budget at all.
 """
 struct ShiftLevers
     res::Dict{String,Float64}
@@ -675,10 +700,10 @@ global balance pass is confined to
     δ ∈ [ −γ·load_max[n] ,  min(γ·load_min[n], load0[n]) ]
 
 with γ = `ShareShift.load_shift_share`, `load_max`/`load_min` the node's extreme
-loads over the forecast horizon and `load0[n]` the load the budget is anchored at —
-the reference hour's, or the target hour's when the `:load` pre-step re-anchored it
-(so load can never be driven negative). The part already spent is `load0[n] - load[n]`,
-which is why this returns the *remaining* room rather than the total bound.
+loads over the forecast horizon and `load0[n]` the reference hour's load, the anchor
+the budget is measured from (so load can never be driven negative). The part already
+spent is `load0[n] - load[n]`, which is why this returns the *remaining* room rather
+than the total bound. Never reached when `:load` is pre-stepped — the lever is frozen.
 """
 function _load_bounds(lev::ShiftLevers, nd, n)
     γ = lev.load_shift_share
@@ -717,7 +742,7 @@ end
 const BALANCE_TOL = 1e-6
 
 """
-    _enforce_global_balance!(p_new, nd, t, lev, trace)
+    _enforce_global_balance!(p_new, nd, t, lev, trace; frozen = Set{Symbol}())
 
 Force the basecase to represent a globally **balanced** system: drive the total
 net injection `R = Σ_n p_new` (export-positive) to zero so that
@@ -730,12 +755,19 @@ a warning. All applied deltas are traced as `"balance"`. Because only physical
 quantities move, every `p_new[n]` remains `gen − load − charge`, so each zone's
 net position stays physically backed.
 
+`frozen` names the levers a pre-step hard-set (`prestep_levers`); `:load` among them
+takes the load fallback off the table, since undoing the target day's nodal load here
+is exactly what the pre-step exists to prevent. Conventional generation is never
+pre-stepped, so the primary lever is unaffected.
+
 Balance is *not* guaranteed: the load lever shares one cumulative budget with the
 gap cascade and is capped by `ShareShift.load_shift_share` (see `_load_bounds`),
 so with a small γ and exhausted conventional headroom a residual can survive —
-that case warns a second time and leaves `Σ_n p_new ≠ 0`.
+that case warns a second time and leaves `Σ_n p_new ≠ 0`. A frozen load lever
+leaves the residual outright, with a warning naming the pre-step.
 """
-function _enforce_global_balance!(p_new, nd, t, lev::ShiftLevers, trace)
+function _enforce_global_balance!(p_new, nd, t, lev::ShiftLevers, trace;
+                                  frozen = Set{Symbol}())
     nodes = nd.nodes
     R = sum(values(p_new))              # export-positive global net injection; want 0
     abs(R) <= BALANCE_TOL && return p_new
@@ -756,7 +788,11 @@ function _enforce_global_balance!(p_new, nd, t, lev::ShiftLevers, trace)
     end
 
     # --- last resort: load, within what the cascade left of its γ budget ---
-    if abs(rem) > BALANCE_TOL
+    if abs(rem) > BALANCE_TOL && :load in frozen
+        @warn "refday balance at t=$t: conventional headroom insufficient (residual " *
+              "$(round(rem; digits=3)) MW) and the load lever is frozen by the :load " *
+              "pre-step — left unbalanced rather than undoing the target day's load."
+    elseif abs(rem) > BALANCE_TOL
         @warn "refday balance at t=$t: conventional headroom insufficient (residual $(round(rem; digits=3)) MW); adjusting load."
         loL = Dict{String,Float64}(); hiL = Dict{String,Float64}()
         for n in nodes
@@ -824,8 +860,10 @@ shift_trace_df(tr::ShiftTraceCollector) =
 """
     ShiftDiagCollector()
 
-Collects the apportionment diagnostics of `shift_single`'s gap cascade — one row
-per (target hour, zone, lever), independent of the per-node `REFDAY_SHIFT` trace
+Collects the apportionment diagnostics of `shift_single` — one row per (target hour,
+zone, lever) of the gap cascade, preceded per zone by one row per active pre-step
+(`"RES_prestep"` / `"load_prestep"`, in the order they ran), independent of the
+per-node `REFDAY_SHIFT` trace
 (different schema, different granularity). Convert with `shift_diag_df`;
 persisted as the `REFDAY_DIAG` trace table. Under `resolution = :nodal` each
 "zone" is a single node and the `zone` column carries the node id (the same
@@ -845,6 +883,19 @@ Per row:
   `beta_configured` whenever the cascade interferes: it *exceeds* the configured
   share when the lever absorbs a remainder carried over from an earlier saturated
   lever, and *falls short* when the lever itself saturates.
+
+A **pre-step row** reads the same columns differently, because a hard-set is not an
+apportionment: `want == applied` (the zone's summed hard-set delta — nothing is asked
+for and refused), `reallocated == 0` (no redistribution key is involved) and
+`beta_configured == 0` (a pre-step spends no share of the gap; `validate_shares`
+forbids one). `beta_realised` uses the same `|D|` as the levers below it, so it reads
+as the multiple of the *remaining* gap that the pre-step moved — a value well above 1
+is normal and is the point of reporting it. The per-node deltas behind the row are the
+`"RES_prestep"` / `"load_prestep"` rows of `REFDAY_SHIFT`.
+
+A **frozen lever** (its component pre-stepped, see `prestep_levers`) reports the
+remainder it was handed as `want` with `applied == 0`: it absorbs nothing and passes
+the whole amount on, exactly like a lever with no headroom left.
 """
 struct ShiftDiagCollector
     Time::Vector{Int}
@@ -889,6 +940,12 @@ matching, where each group borrows its own reference day). The reference map is
 also what the reference-day-texture redistribution keys are evaluated at, see
 `_key_weights`.
 
+`method.prestep` runs first, hard-setting RES and/or load to the target hour's nodal
+value, and whatever it sets is **frozen** afterwards: that lever is skipped by the gap
+cascade and by the balance pass, so the target day's nodal texture is what the result
+carries. A frozen lever behaves like one with no headroom — it passes any remainder
+handed to it straight on down `fallback_order`.
+
 The gap is closed by physical levers only (RES/conv/load/storage); a zone's
 unreachable remainder is left relaxed toward reference (traced `"np_relax"`).
 With `method.enforce_balance = true` (opt-in, off by default) a final pass forces
@@ -898,9 +955,9 @@ conventional generation (traced `"balance"`); see `_enforce_global_balance!`.
 Pass a `ShiftTraceCollector` as `trace` to record every applied per-node
 injection delta (components `"RES_prestep"`, `"load_prestep"`, `"RES"`, `"conv"`,
 `"load"`, `"sto"`, `"balance"`, plus the per-zone `"np_relax"`), and a
-[`ShiftDiagCollector`](@ref) as `diag` for the per-zone apportionment
-diagnostics (how much of each lever's share was really absorbed, and how much of
-its key-proportional split was clipped away).
+[`ShiftDiagCollector`](@ref) as `diag` for the per-zone diagnostics: what each
+pre-step hard-set, how much of each lever's share was really absorbed, and how much of
+its key-proportional split was clipped away.
 """
 shift_single(nd, params, t_tgt, t_ref::Integer, method::ShareShift;
              gsk = nothing, trace = nothing, diag = nothing) =
@@ -916,28 +973,32 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
     # ---- optional hard pre-steps: pin a component to its target-hour nodal value ----
     # Per node at BOTH resolutions: the point of a pre-step is that the basecase carries
     # the delivery day's forecast, so afterwards that component's intra-zone distribution
-    # is the target day's, not the reference day's.
-    pre = prestep_components(method)
+    # is the target day's, not the reference day's. Whatever is hard-set here is FROZEN
+    # for the rest of the construction — see `frozen` below.
+    pre      = prestep_components(method)
+    frozen   = prestep_levers(method)
+    presteps = Pair{String,Dict{String,Float64}}[]   # trace label => per-node delta
     if :res in pre
+        δres = Dict{String,Float64}()
         for n in nodes
             tgt = get(nd.RES, (n, t_tgt), 0.0)
-            _record!(trace, t_tgt, n, "RES_prestep", tgt - lev.res[n])
-            p_new[n] += tgt - lev.res[n]
+            δres[n] = tgt - lev.res[n]
+            _record!(trace, t_tgt, n, "RES_prestep", δres[n])
+            p_new[n] += δres[n]
             lev.res[n] = tgt
         end
+        push!(presteps, "RES_prestep" => δres)
     end
     if :load in pre
+        δload = Dict{String,Float64}()
         for n in nodes
             tgt = get(nd.LOAD, (n, t_tgt), 0.0)
-            δ = lev.load[n] - tgt          # export-positive: load down ⇒ injection up
-            _record!(trace, t_tgt, n, "load_prestep", δ)
-            p_new[n] += δ
-            lev.load[n]  = tgt
-            # the hard-set is outside the γ budget (as the RES pre-step is outside
-            # β_RES): re-anchor load0 so `_load_bounds` measures the cascade's and the
-            # balance pass's deviation from the TARGET day's load, not the reference's.
-            lev.load0[n] = tgt
+            δload[n] = lev.load[n] - tgt   # export-positive: load down ⇒ injection up
+            _record!(trace, t_tgt, n, "load_prestep", δload[n])
+            p_new[n] += δload[n]
+            lev.load[n] = tgt
         end
+        push!(presteps, "load_prestep" => δload)
     end
 
     # ---- net-position gap apportionment ----
@@ -952,6 +1013,18 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
         NP_cur = sum(p_new[n] for n in znodes)
         D = NP_tgt - NP_cur
 
+        # The pre-steps ran before the gap was measured, so they head this zone's diag
+        # rows: `want == applied` (a hard-set is unconditional), no key and hence no
+        # reallocation, no configured share, and `beta_realised` against the same |D| as
+        # the levers below — it reads as the multiple of the remaining gap the pre-step
+        # moved. The per-node detail is in REFDAY_SHIFT.
+        for (label, δ) in presteps
+            tot = sum(δ[n] for n in znodes; init = 0.0)
+            absmoved = sum(abs(δ[n]) for n in znodes; init = 0.0)
+            _record_diag!(diag, t_tgt, string(z), label, tot, tot, 0.0, 0.0,
+                          abs(D) < 1e-12 ? 0.0 : absmoved / abs(D))
+        end
+
         carried = 0.0
         for comp in order
             β = get(share, comp, 0.0)
@@ -959,6 +1032,15 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
             if abs(amount) < 1e-12
                 _record_diag!(diag, t_tgt, string(z), string(comp), amount, 0.0, 0.0, β, 0.0)
                 carried = 0.0
+                continue
+            end
+            if comp in frozen
+                # Frozen by its pre-step: it behaves exactly like a lever with no
+                # headroom — absorbs nothing, passes the whole amount on. `validate_shares`
+                # rules out a configured β here, so `amount` is always a remainder carried
+                # down `fallback_order`; recorded so the trace shows the lever was asked.
+                _record_diag!(diag, t_tgt, string(z), string(comp), amount, 0.0, 0.0, β, 0.0)
+                carried = amount
                 continue
             end
             # keys MAY depend on the lever (RefPropRedist weights each one by the
@@ -992,7 +1074,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
 
     # global balance: force Σ_n p_new = 0 (production = consumption) via conventional gen
     method.enforce_balance &&
-        _enforce_global_balance!(p_new, nd, t_tgt, lev, trace)
+        _enforce_global_balance!(p_new, nd, t_tgt, lev, trace; frozen = frozen)
     return p_new
 end
 
@@ -1116,11 +1198,12 @@ a `Dict{Symbol,DataFrame}` with:
   `shift_single` (physical `RES`/`conv`/`load`/`sto` levers plus `balance`), and
   per-(Time, zone) `np_relax` rows (zone label in the `node` column) recording
   how far each zone's net position was left relaxed toward the reference;
-- `:REFDAY_DIAG`   — per-(Time, zone, component) apportionment diagnostics of the
-  gap cascade: how much each lever was asked for (`want`) and absorbed
-  (`applied`), how much of its key-proportional split was clipped and re-spread
-  (`reallocated`), and configured vs realised share of the gap
-  (`beta_configured` / `beta_realised`). See `ShiftDiagCollector`;
+- `:REFDAY_DIAG`   — per-(Time, zone, component) diagnostics: one row per active
+  pre-step, carrying the zone's summed hard-set, followed by one per lever of the
+  gap cascade — how much each was asked for (`want`) and absorbed (`applied`), how
+  much of its key-proportional split was clipped and re-spread (`reallocated`), and
+  configured vs realised share of the gap (`beta_configured` / `beta_realised`). See
+  `ShiftDiagCollector`;
 - `:REFDAY_NETINPUT` — the assembled basecase itself, per (Time, node): the unshifted
   seed `ACINJECTION_REF` and the shifted `ACINJECTION`, both import-positive. See
   `_basecase_nodal_df`;

@@ -7,20 +7,22 @@
 #       an optional AC-line colouring by the reference-day basecase flow
 #       (|flow|, utilization, or the F0 intercept under a selectable GSK).
 #   plot_refday_dispatch_interactive(variant, source)   per-zone stacked-bar
-#       comparison of (1) the selected reference day, (2) the forecast/target
-#       day, (3) the shifted basecase and (4) the actual flow-based DA
-#       clearing, with net-position markers per stage, zone menu, aggregation
-#       menu and time-window slider. Plant types use params.colors.
+#       comparison at ONE timestep of (1) the matched reference day, (2) the
+#       ShareShift decomposition, (3) the shifted reference day and (4) a
+#       selectable market state, with a net-position marker per bar, zone /
+#       market-state menus, a timestep slider and a PNG/PDF/SVG export of the
+#       current view. Bars 1/3/4 stack merged categories whose conv/RES/storage
+#       split comes from the run's MatchingConfig.res_tags.
 #
 # Private helpers are prefixed `_refday_`/`_shift_` to keep them apart from
-# plotting_functions.jl, whose `_plot_colors`, `_color_for`, `_hex_color`,
-# `_zone_load_series`, `_line_endpoints_from_results`, `_clear_legends!` and
-# `_auto_map_extent` are reused here.
+# plotting_functions.jl, whose `_hex_color`, `_zone_load_series`,
+# `_line_endpoints_from_results`, `_clear_legends!` and `_auto_map_extent` are
+# reused here.
 #
 # Both plots keep their scene children fixed and drive them through Observables:
 # the geometry (line segments, node markers, bar series) is built once and a
-# slider tick only rewrites preallocated value buffers. Reductions run over a
-# dense `key × time` matrix (`_ZoneKeyTable`) rather than the nested
+# slider tick only rewrites preallocated value buffers. Lookups go into a dense
+# `key × time` matrix (`_ZoneKeyTable`) rather than the nested
 # `Dict{String,Dict{Int,Dict{String,Float64}}}` these aggregations used to build.
 # =============================================================================
 
@@ -29,23 +31,21 @@
 const _SHIFT_COMPONENTS = ["RES_prestep", "load_prestep", "RES", "conv", "load", "sto",
                            "balance"]
 
-# Muted colors + black stroke mark shift-delta segments as synthetic (not
-# plant types). Makie has no hatching. Parsed once, so the colour vectors handed
-# to Makie are `Vector{RGBAf}` rather than `Vector{Any}` of hex strings.
+# One colour per shift component. The dispatch plot reuses these for its merged stack
+# categories too (`_RD_CAT_COLORS`), so a component and the category it folds into share a
+# hue across bars. Parsed once, so the colour vectors handed to Makie are `Vector{RGBAf}`
+# rather than `Vector{Any}` of hex strings. Shift segments additionally carry a black
+# stroke to mark them as synthetic deltas — Makie has no hatching.
 const REFDAY_SHIFT_COLORS = Dict{String,RGBAf}(
-    "RES_prestep"  => _hex_color("#b5d4b0"),
-    "load_prestep" => _hex_color("#e0c766"),
-    "RES"          => _hex_color("#5aa469"),
-    "conv"         => _hex_color("#8c8c8c"),
-    "load"         => _hex_color("#c9a227"),
-    "sto"          => _hex_color("#4ca37a"),
-    "balance"      => _hex_color("#a9a9a9"),
+    "RES_prestep"  => _hex_color("#AAB5C3"),
+    "load_prestep" => _hex_color("#DA9747"),
+    "RES"          => _hex_color("#BF5B69"),
+    "conv"         => _hex_color("#7A62A3"),
+    "load"         => _hex_color("#268675"),
+    "sto"          => _hex_color("#2F78AF"),
+    "balance"      => _hex_color("#A66B52"),
     "np_relax"     => _hex_color("#c85a89"),
 )
-
-# Storage charging (pumped-hydro/PSP): a real withdrawal that lowers net position.
-# Drawn as a downward bar so the net-position diamond reads off the stack.
-const _CHARGE_COLOR = _hex_color("#6b5b95")
 
 const _SHIFT_UP_COLOR   = RGBAf(0.13, 0.55, 0.13, 0.85)
 const _SHIFT_DOWN_COLOR = RGBAf(0.70, 0.13, 0.13, 0.85)
@@ -103,7 +103,7 @@ return. That shape cost three chained hash lookups per (key, hour) inside `redra
 `get(store, t, Dict{String,Float64}())` allocated a fresh empty `Dict` on **every** miss
 because `get`'s default argument is evaluated eagerly — at `|types| × |window|` calls per
 slider tick that was the dominant allocator of the reference-day plot. Here the keys are
-resolved to indices once and a reduction walks a matrix row.
+resolved to indices once and a lookup is a single matrix index.
 """
 struct _ZoneKeyTable
     keys::Vector{String}
@@ -146,32 +146,6 @@ function _build_zone_key_table(emit::E, zones, timepos) where {E}
     return _ZoneKeyTable(keys_, keypos, timepos, data)
 end
 
-"Time index of `t`, or `0` when it is outside the table's axis."
-_zk_index(tbl::_ZoneKeyTable, t) = get(tbl.timepos, Int(t), 0)
-
-"""
-    _zk_reduce(tbl, zone, key, tidx, use_mean; absval = false)
-
-Mean or sum of row `key` of `zone` over the time indices `tidx`.
-
-A `0` entry in `tidx` (a time the table does not cover) contributes `0.0` but still counts
-towards the mean — matching the old `[at(store, t, key) for t in W]` comprehension, which
-produced a `0.0` element for a missing time.
-"""
-function _zk_reduce(tbl::_ZoneKeyTable, zone, key, tidx, use_mean; absval::Bool = false)
-    isempty(tidx) && return 0.0
-    M = get(tbl.data, zone, nothing)
-    ki = get(tbl.keypos, key, 0)
-    (M === nothing || ki == 0) && return 0.0
-    s = 0.0
-    @inbounds for j in tidx
-        j == 0 && continue
-        v = M[ki, j]
-        s += absval ? abs(v) : v
-    end
-    return use_mean ? s / length(tidx) : s
-end
-
 "Value of one (zone, key, time index) cell."
 function _zk_value(tbl::_ZoneKeyTable, zone, key, j)
     j == 0 && return 0.0
@@ -179,30 +153,6 @@ function _zk_value(tbl::_ZoneKeyTable, zone, key, j)
     ki = get(tbl.keypos, key, 0)
     (M === nothing || ki == 0) && return 0.0
     return @inbounds M[ki, j]
-end
-
-"Sum over all keys of `zone` at time index `j` (the old `gen_tot`)."
-function _zk_total(tbl::_ZoneKeyTable, zone, j)
-    j == 0 && return 0.0
-    M = get(tbl.data, zone, nothing)
-    M === nothing && return 0.0
-    s = 0.0
-    @inbounds for i in axes(M, 1)
-        s += M[i, j]
-    end
-    return s
-end
-
-"Sum over the rows listed in `rows` of `zone` at time index `j`."
-function _zk_partial(tbl::_ZoneKeyTable, zone, rows, j)
-    j == 0 && return 0.0
-    M = get(tbl.data, zone, nothing)
-    M === nothing && return 0.0
-    s = 0.0
-    @inbounds for i in rows
-        s += M[i, j]
-    end
-    return s
 end
 
 """
@@ -881,48 +831,281 @@ function POMATWO.plot_shift_map_interactive(
 end
 
 # =============================================================================
-# Plot 2 — reference day vs shifted basecase vs DA clearing
+# Plot 2 — reference day, shift decomposition, shifted reference day, market result
 # =============================================================================
+
+# Merged stack categories of the dispatch plot. Every category value is the quantity's
+# NET POSITION contribution (export-positive): generation and storage discharge enter
+# positive, load and storage charging negative. That is what makes bar 3 a plain
+# per-category addition of bars 1 and 2 — a REFDAY_SHIFT delta is an export-positive
+# injection change, so a positive `load` delta (a load DECREASE) adds to the very
+# category that carries `−load`. It is also why the net-position marker of a bar is the
+# algebraic sum of that bar's segments.
+const _RD_CAT_CONV = "conventional"
+const _RD_CAT_RES  = "RES"
+const _RD_CAT_STO  = "storage"
+const _RD_CAT_BAL  = "balance"
+const _RD_CAT_LOAD = "load"
+
+# Stacking/legend order. Load last so it anchors the bottom of the negative half.
+const _RD_CATEGORIES = [_RD_CAT_CONV, _RD_CAT_RES, _RD_CAT_STO, _RD_CAT_BAL, _RD_CAT_LOAD]
+
+const _RD_CAT_COLORS = Dict{String,RGBAf}(
+    _RD_CAT_CONV => REFDAY_SHIFT_COLORS["conv"],
+    _RD_CAT_RES  => REFDAY_SHIFT_COLORS["RES"],
+    _RD_CAT_STO  => REFDAY_SHIFT_COLORS["sto"],
+    _RD_CAT_BAL  => REFDAY_SHIFT_COLORS["balance"],
+    _RD_CAT_LOAD => REFDAY_SHIFT_COLORS["load"],
+)
+
+# Which category a shift component folds into for bar 3. The pre-step levers keep their
+# own colour in the decomposition bar but merge with their main lever here — a pre-step
+# RES delta is a RES injection change like any other.
+const _RD_SHIFT_TO_CAT = Dict{String,String}(
+    "RES_prestep"  => _RD_CAT_RES,
+    "RES"          => _RD_CAT_RES,
+    "load_prestep" => _RD_CAT_LOAD,
+    "load"         => _RD_CAT_LOAD,
+    "conv"         => _RD_CAT_CONV,
+    "sto"          => _RD_CAT_STO,
+    "balance"      => _RD_CAT_BAL,
+)
+
+# Menu entry backed by the `variant` argument itself, always present so the two-argument
+# call keeps working without a `results_dir`.
+const _RD_STATE_SELF = "variant (as passed)"
+
+const _RD_EXPORT_PNG = "png"
+
+"`NaN` (an absent bar segment) read as zero for stacking and legend arithmetic."
+_rd_finite(v) = isnan(v) ? 0.0 : v
+
+"""
+    _refday_plant_categories(params, res_tags) -> Dict{String,String}
+
+Plant → merged stack category, classified by `POMATWO._classify_plant` — the same function
+`refday_basecase.jl` uses to split the shift levers. Passing the run's own
+`MatchingConfig.res_tags` therefore makes the plot's conventional/RES/storage split
+identical to the one the reference-day basecase applied, by construction rather than by
+convention.
+"""
+function _refday_plant_categories(params, res_tags)
+    out = Dict{String,String}()
+    for p in keys(params.plant2zone)
+        cls = POMATWO._classify_plant(p, params, res_tags)
+        out[p] = cls === :res ? _RD_CAT_RES : cls === :sto ? _RD_CAT_STO : _RD_CAT_CONV
+    end
+    return out
+end
+
+"""
+    _refday_state_options(results_dir) -> Vector{String}
+
+Canonical names of the market states that wrote a dispatch table under `results_dir`, read
+off the stage-prefixed filenames (`DayAhead_GEN.arrow` → `DayAhead`). Empty for a missing
+directory or a legacy, unprefixed result layout.
+
+Both `GEN` and `REDISP` count: the redispatch stage writes **no** `GEN` table at all — its
+dispatch is `GEN_REDISP` inside `Redispatch_REDISP.arrow` — so scanning for `_GEN.arrow`
+alone would silently drop `Redispatch` from the menu.
+"""
+function _refday_state_options(results_dir)
+    (results_dir isa AbstractString && !isempty(results_dir) && isdir(results_dir)) ||
+        return String[]
+    subruns = filter(x -> isdir(x) && occursin(r"subrun", x),
+                     readdir(results_dir, join = true))
+    seen = Set{String}()
+    for folder in subruns, f in readdir(folder)
+        (endswith(f, "_GEN.arrow") || endswith(f, "_REDISP.arrow")) || continue
+        s = POMATWO._file_stage(f)
+        s === nothing && continue
+        # Only the states the reference-day machinery can actually read a dispatch from.
+        try
+            POMATWO._source_state(s)
+        catch
+            continue
+        end
+        push!(seen, s)
+    end
+    return sort!(collect(seen))
+end
+
+"""
+    _refday_dispatch_tables(res, state_name) -> (gen, charge)
+
+Generation and storage-charging frames of one market state, via the very accessors the
+shift uses (`POMATWO._source_gen` / `_source_charge`). Going through them rather than
+reading `res.GEN` / `res.CHARGE` is what makes `Redispatch` work: that stage writes no
+`GEN` or `CHARGE` table, and its dispatch has to be read as `GEN_REDISP` / `CHARGE_REDISP`
+out of `REDISP`. Both frames come back with the plain `GEN` / `CHARGE` column names.
+"""
+function _refday_dispatch_tables(res, state_name)
+    st = POMATWO._source_state(state_name)
+    return POMATWO._source_gen(st, res), POMATWO._source_charge(st, res)
+end
+
+"""
+Loaded `CairoMakie` module, or `nothing`.
+
+GLMakie cannot write PDF or SVG. Rather than adding a hard dependency, the export menu
+offers the vector formats only when the user has `using CairoMakie` in their session, so
+the extension's weakdep set is unchanged.
+"""
+function _cairo_backend()
+    for (id, m) in Base.loaded_modules
+        id.name == "CairoMakie" && return m
+    end
+    return nothing
+end
+
+"Export formats available right now: PNG always, PDF/SVG only with CairoMakie loaded."
+_refday_export_formats() =
+    _cairo_backend() === nothing ? [_RD_EXPORT_PNG] : [_RD_EXPORT_PNG, "pdf", "svg"]
+
+"`path` with its extension forced to `fmt`."
+function _refday_with_ext(path, fmt)
+    base, ext = splitext(path)
+    isempty(ext) && return string(path, ".", fmt)
+    lowercase(ext) == string(".", fmt) && return path
+    return string(base, ".", fmt)
+end
+
+"""
+    _refday_snapshot_figure(bars, np, ticks, ylabel, caption, size) -> Figure
+
+The plotted area alone — axis, legend and caption — with none of the interactive
+furniture. The live figure carries its menus, textbox, button and slider inside the same
+`Figure`, so saving it would put the whole GUI in the file; this rebuilds just the plot
+from the values that figure currently holds.
+
+`bars` is one `(heights, offsets, color, stroked, label)` tuple per series, already
+resolved to plain vectors — the snapshot is static, so nothing here is an Observable.
+"""
+function _refday_snapshot_figure(bars, np, ticks, ylabel, caption, size)
+    fig = Figure(size = size)
+    ax = Axis(fig[1, 1]; ylabel = ylabel, xticks = ticks)
+    xs = [1.0, 2.0, 3.0, 4.0]
+    handles, labels = Any[], String[]
+    for (h, o, color, stroked, label) in bars
+        p = barplot!(ax, xs, copy(h);
+                     offset = copy(o), width = 0.7, color = color,
+                     strokecolor = stroked ? :black : :transparent,
+                     strokewidth = stroked ? 1.0 : 0.0)
+        any(v -> _rd_finite(v) != 0.0, h) || continue
+        push!(handles, p)
+        push!(labels, label)
+    end
+    npp = scatter!(ax, copy(np); marker = :circle, markersize = 16, color = :magenta,
+                   strokecolor = :black, strokewidth = 1.0)
+    push!(handles, npp)
+    push!(labels, "Net position")
+    Legend(fig[1, 2], handles, labels, "Legend", nbanks = 2)
+    Label(fig[2, 1], caption; tellwidth = false, fontsize = 13)
+    return fig
+end
+
+"""
+    _refday_export(fig, path, fmt; px_per_unit)
+
+Write `fig` to `path`. PNG goes through the active GLMakie screen; a vector format is
+rendered by CairoMakie, preferring `save(...; backend = ...)` and falling back to a
+backend switch on older Makie versions (GLMakie is reactivated either way).
+"""
+function _refday_export(fig, path, fmt; px_per_unit = 2)
+    dir = dirname(path)
+    isempty(dir) || isdir(dir) || mkpath(dir)
+    if fmt == _RD_EXPORT_PNG
+        save(path, fig; px_per_unit = px_per_unit)
+        return path
+    end
+    cm = _cairo_backend()
+    cm === nothing &&
+        error("$(uppercase(fmt)) export needs CairoMakie — run `using CairoMakie` first.")
+    try
+        save(path, fig; backend = cm)
+    catch
+        cm.activate!()
+        try
+            save(path, fig)
+        finally
+            GLMakie.activate!(inline = false)
+        end
+    end
+    return path
+end
+
 """
     plot_refday_dispatch_interactive(variant, source; kwargs...)
 
-Per-zone comparison of generation, load and net position across the four
-stages of the reference-day pipeline:
-1. **Reference day** — the source (basecase) run's dispatch by plant type at
-   the matched reference times. Pass `source` loaded with the same state the
-   `ReferenceDayBasecase` used (e.g. `DataFiles(dir, TwoDayAhead)` for
-   `source_type = "2DA"`), so these bars show the state the shift started from,
-2. **Target day** — the source run's dispatch at the forecast/target times
-   the matching algorithm shifted towards,
-3. **Shifted basecase** — the reference-day stack plus one black-stroked
-   segment per ShareShift component (ΔRES_prestep/ΔRES/Δconv/Δload/Δsto/
-   Δbalance; the shift is a nodal injection change and cannot be attributed to
-   plant types), and
-4. **DA result** — the variant run's actual flow-based DA dispatch at the
-   target times.
+Single-timestep comparison of one zone's dispatch across the reference-day pipeline, as
+four stacked bars:
 
-Horizontal black markers show zonal load per group (reference-day load,
-target load, reference-day load minus the load-shift, target load). Blue
-diamonds show the zonal net position (+ = export) per stage, computed as
-Σgen − load − charge from the respective tables; the shifted-basecase NP is
-`NP(reference) + Σ shift deltas` (all components, export-positive). The
-shift guarantees `NP(shifted) + unabsorbed ≈ NP(target)`.
+1. **`ref`** — the source (basecase) run's dispatch at the reference hour matched to the
+   selected timestep. Pass `source` loaded with the same state the `ReferenceDayBasecase`
+   used **and** the same `source_type` string — e.g. `DataFiles(dir, TwoDayAhead)` with
+   `source_type = "2DA"`.
+2. **`shift`** — the ShareShift decomposition at the selected timestep, one segment per
+   REFDAY_SHIFT component (`RES_prestep`, `load_prestep`, `RES`, `conv`, `load`, `sto`,
+   `balance`).
+3. **`shifted ref`** — bar 1 plus bar 2, with the deltas merged into the bar's own
+   categories.
+4. **market result** — the dispatch of the market state selected in the `Market state`
+   menu, at the same timestep.
+
+# Sign convention
+Every segment is an export-positive net-position contribution, so the bars read directly:
+generation and storage discharge stack upward, load and storage charging downward, and a
+shift delta lands on the axis matching its effect on the net position. REFDAY_SHIFT is
+already in that convention — a positive `load` delta is a load *decrease* — so a load
+decrease appears on the positive axis and a load increase on the negative one, exactly as
+a generation increase and decrease do. The net-position diamond of a bar is therefore the
+algebraic sum of its segments.
+
+# Categories
+Bars 1, 3 and 4 are stacked in `conventional` / `RES` / `storage` / `load` (plus
+`balance`, which only the shift produces). Plants are assigned by
+`POMATWO._classify_plant` using `matching.res_tags` — pass the run's own `MatchingConfig`
+so the split is the one the reference-day basecase applied.
 
 # Interactivity
-Zone menu, aggregation menu (`mean` = GW average over the window,
-`sum` = GWh), IntervalSlider for single timestep or period.
+Zone menu, market-state menu, a single-timestep slider, and a PNG/PDF/SVG export (PDF and
+SVG appear in the format menu only when `CairoMakie` is loaded). The export writes the
+plotted area only — axis, legend and caption — not the menus, textbox, button and slider,
+which live in the same `Figure` and would otherwise land in the file.
+
+# Reading a state's dispatch
+Which table holds a state's dispatch differs by state, and the plot delegates that to the
+shift's own accessors (`POMATWO._source_gen` / `_source_charge`). The day-ahead and
+`TwoDayAhead` states write `GEN` and `CHARGE`; **the redispatch stage writes neither** —
+its dispatch is `GEN_REDISP` / `CHARGE_REDISP` inside the `REDISP` table. Reading `.GEN`
+directly would therefore show an empty bar for a redispatch source instead of failing.
 
 # Keyword arguments
-`scalefactor=1/1000` (MW → GW), `agg=:mean`, `figsize=(1300,850)`.
+- `matching::MatchingConfig = MatchingConfig()`: the run's matching config; only
+  `res_tags` is read.
+- `source_type = ""`: which market state `source` was loaded for — the same string the
+  `ReferenceDayBasecase` was given (`""`/`"DA"`, `"2DA"`, `"REDISP"`, or a canonical state
+  name). It decides which columns bar 1 is read from; a mismatch raises instead of drawing
+  an empty bar.
+- `results_dir = ""`: results directory whose market states fill the state menu. Without
+  it the menu holds the passed `variant` alone.
+- `scalefactor = 1/1000`: MW → GW.
+- `figsize = (1300, 850)`, `px_per_unit = 2` (PNG export resolution),
+  `export_path = "refday_dispatch.png"` (prefilled export path),
+  `export_figsize = (1000, 650)` (size of the exported plot, which carries no controls).
 """
 function POMATWO.plot_refday_dispatch_interactive(
     variant, source;
+    matching    = POMATWO.MatchingConfig(),
+    source_type = "",
+    results_dir = "",
     scalefactor = 1 / 1000,
-    agg         = :mean,
     figsize     = (1300, 850),
+    px_per_unit = 2,
+    export_path = "refday_dispatch.png",
+    export_figsize = (1000, 650),
 )
     params = variant.params
-    colors = _plot_colors(variant)
 
     refmap, fbmap = _refday_zone_ref_times(variant)
     target_times = sort(unique(Int.(variant.GEN.Time)))
@@ -931,82 +1114,108 @@ function POMATWO.plot_refday_dispatch_interactive(
         push!(ref_times, r)
     end
 
-    # One shared time axis for every table, so a lookup is a single index map. Bar 2 needs
-    # the target times from the *source* run, hence the union.
+    # One shared time axis for every table, so a lookup is a single index map.
     times = sort!(collect(union(ref_times, Set(target_times))))
     timepos = Dict{Int,Int}(t => i for (i, t) in enumerate(times))
     zones = sort(collect(keys(refmap)))
     isempty(zones) && error("No zones with reference-day matches found.")
 
     p2z = params.plant2zone
-    ptype = params.plant_type
-    src_tbl = _build_zone_key_table(zones, timepos) do f
-        _emit_plant_column(f, source.GEN, :GEN, p2z, ptype, nothing)
+    cat_of = _refday_plant_categories(params, matching.res_tags)
+
+    # Dispatch of one market state as a (gen, charge) pair of category tables. Which
+    # columns that state actually stores is `_refday_dispatch_tables`' business.
+    function stage_tables(res, state_name)
+        gen_df, chg_df = _refday_dispatch_tables(res, state_name)
+        gen = _build_zone_key_table(zones, timepos) do f
+            _emit_plant_column(f, gen_df, :GEN, p2z, cat_of, nothing)
+        end
+        chg = _build_zone_key_table(zones, timepos) do f
+            _emit_plant_column(f, chg_df, :CHARGE, p2z, cat_of, _CHARGE_KEY)
+        end
+        return (gen = gen, chg = chg)
     end
-    var_tbl = _build_zone_key_table(zones, timepos) do f
-        _emit_plant_column(f, variant.GEN, :GEN, p2z, ptype, nothing)
-    end
-    src_chg = _build_zone_key_table(zones, timepos) do f
-        _emit_plant_column(f, hasproperty(source, :CHARGE) ? source.CHARGE : nothing,
-                           :CHARGE, p2z, ptype, _CHARGE_KEY)
-    end
-    var_chg = _build_zone_key_table(zones, timepos) do f
-        _emit_plant_column(f, hasproperty(variant, :CHARGE) ? variant.CHARGE : nothing,
-                           :CHARGE, p2z, ptype, _CHARGE_KEY)
-    end
+
+    src_gen_df, _ = _refday_dispatch_tables(source, source_type)
+    isempty(src_gen_df) && error(
+        "plot_refday_dispatch_interactive: the `source` results carry no dispatch for " *
+        "market state \"$(isempty(source_type) ? "DayAhead" : source_type)\". Pass the " *
+        "`source_type` the ReferenceDayBasecase used, together with a `source` loaded " *
+        "for that state — e.g. source_type = \"REDISP\" with DataFiles(dir, Redispatch).")
+    src = stage_tables(source, source_type)
+    src_tbl, src_chg = src.gen, src.chg
     shift_tbl = _build_zone_key_table(zones, timepos) do f
         _emit_shift_rows(f, variant.REFDAY_SHIFT, params.node2zone)
     end
 
-    # Reuses the extension's zonal-load helper; `_refday_zone_load` recomputed this from
-    # `params.nodal_load` on every slider tick, twice (load markers and net positions).
+    # Market states of bar 4. The passed `variant` is always available; anything found in
+    # `results_dir` is loaded on first selection and kept.
+    state_options = String[_RD_STATE_SELF; _refday_state_options(results_dir)]
+    state_cache = Dict{String,Any}(_RD_STATE_SELF => stage_tables(variant, ""))
+    function state_tables(name)
+        haskey(state_cache, name) && return state_cache[name]
+        res = DataFiles(results_dir, POMATWO.market_state_type(name))
+        tbls = stage_tables(res, name)
+        state_cache[name] = tbls
+        return tbls
+    end
+
     zone_load = _zone_load_series(params, times)
     for z in zones   # a REFDAY_MATCH group need not be in params.sets.Z
         haskey(zone_load, z) || (zone_load[z] = zeros(Float64, length(times)))
     end
 
-    # Fixed series sets, so the bar objects can be created once. Both are window
-    # independent — the old `redraw!` rebuilt `types` per tick by splatting an unbounded
-    # number of key vectors into `vcat`.
-    types = sort!(collect(union(Set(src_tbl.keys), Set(var_tbl.keys))))
     shift_comps = [c for c in _SHIFT_COMPONENTS if haskey(shift_tbl.keypos, c)]
-    shift_core_rows = [shift_tbl.keypos[c] for c in _SHIFT_COMPONENTS
-                       if haskey(shift_tbl.keypos, c)]
+
+    # Fixed series set: the merged categories (bars 1/3/4) followed by the shift
+    # components (bar 2 only), so every bar object is created once and a redraw only
+    # rewrites preallocated value buffers.
+    series_kind = Symbol[fill(:cat, length(_RD_CATEGORIES));
+                         fill(:shift, length(shift_comps))]
+    series_key = String[_RD_CATEGORIES; shift_comps]
+    series_labels = String[_RD_CATEGORIES; ["Δ$(c)" for c in shift_comps]]
+    nseries = length(series_key)
 
     GLMakie.activate!(inline = false)
     fig = Figure(size = figsize)
-    ax = Axis(fig[1:3, 1];
-              xticks = ([1, 2, 3, 4],
-                        ["Reference day", "Target day", "Shifted basecase", "DA result"]),
-              title = "")
-    zone_menu = Menu(fig, options = zones, fontsize = 20)
-    agg_menu = Menu(fig, options = ["mean", "sum"], default = string(agg), fontsize = 20)
-    fig[1, 2] = vgrid!(Label(fig, "Market Zone", fontsize = 20, width = 300), zone_menu,
-                       Label(fig, "Aggregation", fontsize = 20), agg_menu;
-                       tellheight = false)
-    islider = IntervalSlider(fig[4, 1], range = target_times,
-                             startvalues = (first(target_times), first(target_times)))
-    info = Label(fig[5, 1], ""; tellwidth = false, fontsize = 13)
+    ax = Axis(fig[1:4, 1]; ylabel = "GW", title = "")
 
-    # --- persistent bar series ------------------------------------------------
-    # One `barplot!` per series over the four x positions, created once. The previous
-    # `stack!` created one `barplot!` per (stage, segment) — up to 4·(|types|+|comps|)
-    # scene children — and destroyed them all on every slider tick.
-    series_labels = String[types; "storage charge"; ["Δ$(c) shift" for c in shift_comps]]
-    nseries = length(series_labels)
+    zone_menu = Menu(fig, options = zones, fontsize = 20)
+    state_menu = Menu(fig, options = state_options, default = first(state_options),
+                      fontsize = 20)
+    fmt_menu = Menu(fig, options = _refday_export_formats(), default = _RD_EXPORT_PNG,
+                    fontsize = 20)
+    path_box = Textbox(fig, width = 280, placeholder = "output path",
+                       stored_string = export_path, displayed_string = export_path)
+    export_btn = Button(fig, label = "Export view", fontsize = 18)
+    # Two rows for the control column and one for the legend: the seven widgets overflow
+    # a single row and the topmost one is clipped by the figure edge.
+    fig[1:2, 2] = vgrid!(Label(fig, "Market Zone", fontsize = 20, width = 300), zone_menu,
+                         Label(fig, "Market state", fontsize = 20), state_menu,
+                         Label(fig, "Export format", fontsize = 20), fmt_menu,
+                         path_box, export_btn; tellheight = false)
+
+    sgrid = SliderGrid(fig[5, 1],
+                       (label = "Timestep", range = target_times,
+                        startvalue = first(target_times)))
+    tslider = sgrid.sliders[1]
+    info = Label(fig[6, 1], ""; tellwidth = false, fontsize = 13)
+    status = Label(fig[7, 1], ""; tellwidth = false, fontsize = 12, color = :gray30)
+
+    # A shift series is absent from three of the four bars, and a stroked zero-height
+    # segment renders as a black line across whatever it sits on top of. `strokewidth` has
+    # to stay scalar (GLMakie draws the outlines as one polyline set), so an absent segment
+    # is `NaN` instead of `0.0` and is not drawn at all. `_rd_finite` is what keeps the
+    # stacking arithmetic and the legend from tripping over those.
     heights = [Observable(zeros(Float64, 4)) for _ = 1:nseries]
     offsets = [Observable(zeros(Float64, 4)) for _ = 1:nseries]
     bar_handles = Any[]
+    series_colors = RGBAf[]
     xs = [1.0, 2.0, 3.0, 4.0]
     for s = 1:nseries
-        is_shift = s > length(types) + 1
-        color = if s <= length(types)
-            _color_for(colors, types[s])
-        elseif s == length(types) + 1
-            _CHARGE_COLOR
-        else
-            REFDAY_SHIFT_COLORS[shift_comps[s-length(types)-1]]
-        end
+        is_shift = series_kind[s] === :shift
+        color = is_shift ? REFDAY_SHIFT_COLORS[series_key[s]] : _RD_CAT_COLORS[series_key[s]]
+        push!(series_colors, color)
         push!(bar_handles, barplot!(
             ax, xs, heights[s];
             offset = offsets[s], width = 0.7, color = color,
@@ -1014,69 +1223,65 @@ function POMATWO.plot_refday_dispatch_interactive(
             strokewidth = is_shift ? 1.0 : 0.0))
     end
 
-    load_pts = Observable(fill(Point2f(0, 0), 4))
-    loadplot = scatter!(ax, load_pts; marker = :hline, markersize = 30, color = :black)
     np_pts = Observable(fill(Point2f(0, 0), 4))
-    npplot = scatter!(ax, np_pts; marker = :diamond, markersize = 16, color = :royalblue,
+    npplot = scatter!(ax, np_pts; marker = :circle, markersize = 16, color = :magenta,
                       strokecolor = :black, strokewidth = 1.0)
 
     function redraw!()
         zone = zone_menu.selection[]
-        is_mean = agg_menu.selection[] == "mean"
-        lo, hi = islider.interval[]
+        t = Int(tslider.value[])
+        jw = get(timepos, t, 0)
+        r = get(get(refmap, zone, Dict{Int,Int}()), t, 0)
+        jr = r == 0 ? 0 : get(timepos, r, 0)
+        # No match for this (zone, hour): bars 1–3 are empty, and so are the shift rows.
+        jm = r == 0 ? 0 : jw
+        fb = get(get(fbmap, zone, Dict{Int,Bool}()), t, false)
+        tbl = state_tables(state_menu.selection[])
 
-        # Window in the shared time index space. `Wm`/`R` are the target/reference time
-        # pairs that actually carry a match, in the same order.
-        zref = get(refmap, zone, Dict{Int,Int}())
-        zfb  = get(fbmap, zone, Dict{Int,Bool}())
-        Wj = Int[]
-        Wmj = Int[]
-        Rj = Int[]
-        nfall = 0
-        nwindow = 0
-        for t in target_times
-            (lo <= t <= hi) || continue
-            nwindow += 1
-            push!(Wj, get(timepos, t, 0))
-            r = get(zref, t, 0)
-            r == 0 && continue
-            push!(Wmj, get(timepos, t, 0))
-            push!(Rj, get(timepos, r, 0))
-            get(zfb, t, false) && (nfall += 1)
+        zl = zone_load[zone]
+        load_at(j) = j == 0 ? 0.0 : @inbounds zl[j]
+
+        # Net-position contribution of one category at one time index.
+        function cat_value(gen, chg, cat, j)
+            cat == _RD_CAT_LOAD && return -load_at(j) * scalefactor
+            cat == _RD_CAT_BAL && return 0.0
+            v = _zk_value(gen, zone, cat, j)
+            cat == _RD_CAT_STO && (v -= _zk_value(chg, zone, _CHARGE_KEY, j))
+            return v * scalefactor
+        end
+        shift_value(c) = _zk_value(shift_tbl, zone, c, jm) * scalefactor
+
+        cat_delta = Dict{String,Float64}(c => 0.0 for c in _RD_CATEGORIES)
+        for c in shift_comps
+            cat_delta[_RD_SHIFT_TO_CAT[c]] += shift_value(c)
         end
 
-        red(tbl, key, idx) = _zk_reduce(tbl, zone, key, idx, is_mean) * scalefactor
-
-        # heights per series, per stage (see the docstring for what each stage shows)
         for s = 1:nseries
             h = heights[s][]
-            if s <= length(types)
-                pt = types[s]
-                h[1] = red(src_tbl, pt, Rj)
-                h[2] = red(src_tbl, pt, Wj)
-                h[3] = h[1]                       # stage 3 restacks the reference day
-                h[4] = red(var_tbl, pt, Wj)
-            elseif s == length(types) + 1
-                # storage charge is a withdrawal, drawn downward; stage 3 is left to its
-                # Δsto shift segment, so no charge bar there
-                h[1] = -red(src_chg, _CHARGE_KEY, Rj)
-                h[2] = -red(src_chg, _CHARGE_KEY, Wj)
-                h[3] = 0.0
-                h[4] = -red(var_chg, _CHARGE_KEY, Wj)
-            else
-                c = shift_comps[s-length(types)-1]
-                h[1] = 0.0
+            if series_kind[s] === :cat
+                cat = series_key[s]
+                b1 = cat_value(src_tbl, src_chg, cat, jr)
+                h[1] = b1
                 h[2] = 0.0
-                h[3] = red(shift_tbl, c, Wmj)
-                h[4] = 0.0
+                h[3] = b1 + cat_delta[cat]
+                h[4] = cat_value(tbl.gen, tbl.chg, cat, jw)
+            else
+                v = shift_value(series_key[s])
+                h[1] = NaN
+                h[2] = v == 0.0 ? NaN : v
+                h[3] = NaN
+                h[4] = NaN
             end
         end
 
-        # stacking offsets: positives up from 0, negatives down from 0, in series order
+        # stacking offsets: positives up from 0, negatives down from 0, in series order.
+        # The running total of a bar is its net position, so the marker needs no separate
+        # reduction over the tables.
+        nps = zeros(Float64, 4)
         for x = 1:4
             pos, neg = 0.0, 0.0
             for s = 1:nseries
-                v = heights[s][][x]
+                v = _rd_finite(heights[s][][x])
                 o = offsets[s][]
                 if v >= 0
                     o[x] = pos
@@ -1086,78 +1291,63 @@ function POMATWO.plot_refday_dispatch_interactive(
                     neg += v
                 end
             end
+            nps[x] = pos + neg
         end
         foreach(notify, heights)
         foreach(notify, offsets)
+        np_pts[] = Point2f[Point2f(x, nps[x]) for x = 1:4]
 
-        # `f` in the original: mean or sum over the window, scaled, 0.0 on an empty window.
-        zl = zone_load[zone]
-        function reduce_over(g, idx)
-            isempty(idx) && return 0.0
-            s = 0.0
-            for j in idx
-                s += g(j)
-            end
-            return (is_mean ? s / length(idx) : s) * scalefactor
-        end
-        load_at(j) = j == 0 ? 0.0 : @inbounds zl[j]
+        state_label = state_menu.selection[] == _RD_STATE_SELF ? "market result" :
+                      state_menu.selection[]
+        ax.xticks = ([1, 2, 3, 4],
+                     [r == 0 ? "ref (no match)" : "ref (t=$r)", "shift",
+                      "shifted ref", state_label])
 
-        # load markers: the actual load change of the shift is -delta(load)
-        load_ref = reduce_over(load_at, Rj)
-        load_tgt = reduce_over(load_at, Wj)
-        load_shift = load_ref - red(shift_tbl, "load", Wmj)
-        load_pts[] = Point2f[Point2f(1, load_ref), Point2f(2, load_tgt),
-                             Point2f(3, load_shift), Point2f(4, load_tgt)]
-
-        # net position (+ = export): Σgen − load − charge per stage; the shifted basecase
-        # uses the identity NP(ref) + Σ deltas (export-positive)
-        np_src(j) = _zk_total(src_tbl, zone, j) - load_at(j) -
-                    _zk_value(src_chg, zone, _CHARGE_KEY, j)
-        np_var(j) = _zk_total(var_tbl, zone, j) - load_at(j) -
-                    _zk_value(var_chg, zone, _CHARGE_KEY, j)
-        np_ref = reduce_over(np_src, Rj)
-        np_tgt = reduce_over(np_src, Wj)
-        np_da  = reduce_over(np_var, Wj)
-        # `Rj[i]` and `Wmj[i]` are the reference/target pair of the same matched hour:
-        # the dispatch is read at the reference time, the shift deltas at the target time.
-        np_shift = reduce_over(
-            i -> np_src(Rj[i]) + _zk_partial(shift_tbl, zone, shift_core_rows, Wmj[i]),
-            eachindex(Wmj))
-        np_pts[] = Point2f[Point2f(1, np_ref), Point2f(2, np_tgt),
-                           Point2f(3, np_shift), Point2f(4, np_da)]
-
-        # --- legend: only the series that are actually non-zero in this window, in the
-        # order the stages draw them (stage 1 first), matching the old `seen` dedup.
-        handles, labels, seen = Any[], String[], Set{String}()
-        for x = 1:4, s = 1:nseries
-            heights[s][][x] == 0.0 && continue
-            lbl = series_labels[s]
-            lbl in seen && continue
-            push!(seen, lbl)
+        # legend: only the series that carry something in this timestep
+        handles, labels = Any[], String[]
+        for s = 1:nseries
+            any(x -> _rd_finite(heights[s][][x]) != 0.0, 1:4) || continue
             push!(handles, bar_handles[s])
-            push!(labels, lbl)
+            push!(labels, series_labels[s])
         end
-        push!(handles, loadplot); push!(labels, "Load")
-        push!(handles, npplot);   push!(labels, "Net position")
+        push!(handles, npplot)
+        push!(labels, "Net position")
 
-        unabs = _zk_reduce(shift_tbl, zone, "np_relax", Wmj, is_mean; absval = true) * scalefactor
-        unit = is_mean ? "GW" : "GWh"
-        ax.ylabel = is_mean ? "GW (mean)" : "GWh (sum)"
+        unabs = _zk_value(shift_tbl, zone, "np_relax", jm) * scalefactor
         rnd(x) = round(x, digits = 2)
-        info.text = "zone $zone | t = $lo..$hi ($nwindow h) | matched: $(length(Wmj))/$nwindow | " *
-                    "fallback matches: $nfall | $(agg_menu.selection[]) |np_relax| = " *
-                    "$(round(unabs, digits = 3)) $unit | NP [ref/tgt/shift/DA] = " *
-                    "$(rnd(np_ref)) / $(rnd(np_tgt)) / $(rnd(np_shift)) / $(rnd(np_da)) $unit"
+        info.text = "zone $zone | t = $t | " *
+                    (r == 0 ? "no reference match" :
+                     "reference hour $r$(fb ? " (fallback match)" : "")") *
+                    " | np_relax = $(round(unabs, digits = 3)) GW | " *
+                    "NP [ref/shift/shifted/market] = $(rnd(nps[1])) / $(rnd(nps[2])) / " *
+                    "$(rnd(nps[3])) / $(rnd(nps[4])) GW"
         autolimits!(ax)
         _clear_legends!(fig)
-        Legend(fig[2:3, 2], handles, labels, "Legend", nbanks = 2)
+        Legend(fig[3:4, 2], handles, labels, "Legend", nbanks = 2)
+        return nothing
+    end
+
+    on(export_btn.clicks) do _
+        fmt = fmt_menu.selection[]
+        raw = path_box.stored_string[]
+        p = _refday_with_ext(raw === nothing || isempty(raw) ? export_path : raw, fmt)
+        try
+            bars = [(heights[s][], offsets[s][], series_colors[s],
+                     series_kind[s] === :shift, series_labels[s]) for s = 1:nseries]
+            snap = _refday_snapshot_figure(bars, np_pts[], ax.xticks[], ax.ylabel[],
+                                           info.text[], export_figsize)
+            _refday_export(snap, p, fmt; px_per_unit = px_per_unit)
+            status.text = "saved $(abspath(p))"
+        catch err
+            status.text = "export failed: $(sprint(showerror, err))"
+        end
         return nothing
     end
 
     redraw!()
     on(_ -> redraw!(), zone_menu.selection)
-    on(_ -> redraw!(), agg_menu.selection)
-    on(_ -> redraw!(), islider.interval)
+    on(_ -> redraw!(), state_menu.selection)
+    on(_ -> redraw!(), tslider.value)
 
     return fig
 end

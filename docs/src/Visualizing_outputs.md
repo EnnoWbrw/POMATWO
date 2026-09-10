@@ -262,28 +262,38 @@ fig = plot_shift_map_interactive(variant;
 ```
 
 ### `plot_refday_dispatch_interactive(variant, source; kwargs...)`
-Per-zone comparison of generation, load and net position across the four stages of the reference-day pipeline:
+Single-timestep comparison of one zone's dispatch across the reference-day pipeline, as four stacked bars:
 
-1. **Reference day** — the source (basecase) run's dispatch by plant type at the matched reference times.
-2. **Target day** — the source run's dispatch at the forecast/target times the matching algorithm shifted towards.
-3. **Shifted basecase** — the reference-day stack plus one black-stroked segment per ShareShift component (`ΔRES_prestep`, `Δload_prestep`, `ΔRES`, `Δconv`, `Δload`, `Δsto`, `Δbalance`). The shift is a nodal injection change and cannot be attributed to plant types, which is what the separate stroked segments express.
-4. **DA result** — the variant run's actual flow-based day-ahead dispatch at the target times.
+1. **`ref`** — the source (basecase) run's dispatch at the reference hour matched to the selected timestep.
+2. **`shift`** — the ShareShift decomposition at that timestep, one black-stroked segment per REFDAY_SHIFT component (`ΔRES_prestep`, `Δload_prestep`, `ΔRES`, `Δconv`, `Δload`, `Δsto`, `Δbalance`).
+3. **`shifted ref`** — bar 1 plus bar 2, with the deltas merged into the bar's own categories.
+4. **market result** — the dispatch of the market state picked in the `Market state` menu, at the same timestep.
 
-Horizontal black markers show the zonal load per group. Blue diamonds show the zonal net position (+ = export) per stage, computed as `Σgen − load − charge`; the shifted-basecase net position uses the identity `NP(reference) + Σ shift deltas`. The shift guarantees `NP(shifted) + unabsorbed ≈ NP(target)`, which can be read off the info label.
+**Sign convention.** Every segment is an export-positive net-position contribution: generation and storage discharge stack upward, load and storage charging downward, and a shift delta lands on the axis matching its effect on the net position. `REFDAY_SHIFT` is already in that convention — a positive `load` delta is a load *decrease* — so a load decrease appears on the positive axis and a load increase on the negative one, exactly as a generation increase and decrease do. The net-position marker of a bar is therefore the algebraic sum of its segments, and bar 3 is a plain per-category addition of bars 1 and 2.
+
+**Categories.** Bars 1, 3 and 4 are stacked in `conventional` / `RES` / `storage` / `load`, plus `balance`, which only the shift produces. Plants are classified by the same function the reference-day basecase uses, driven by `matching.res_tags` — pass the run's own `MatchingConfig` and the conventional/RES/storage split is the one the shift itself applied.
+
+**Reading a state's dispatch.** Which table holds a state's dispatch differs by state, so the plot delegates to the shift's own accessors (`POMATWO._source_gen` / `_source_charge`) rather than reading `.GEN` itself. The day-ahead and `TwoDayAhead` states write `GEN` and `CHARGE`; **the redispatch stage writes neither** — its dispatch is `GEN_REDISP` / `CHARGE_REDISP` inside the `REDISP` table (`Redispatch_REDISP.arrow`), and there is no `Redispatch_GEN.arrow`. This matters twice: a redispatch `source` needs `source_type = "REDISP"`, and `Redispatch` is discovered for the state menu through its `REDISP` table.
 
 **Arguments**
 - `variant`: A `DataFiles` object of the reference-day run.
 - `source`: A `DataFiles` object of the source (forecast) run, loaded with the **same market state** the `ReferenceDayBasecase` used — e.g. `DataFiles(dir, TwoDayAhead)` for `source_type = "2DA"`. Loading a different stage silently compares against the wrong baseline.
 
 **Keyword arguments**
+- `matching`: (default `MatchingConfig()`) The run's matching config. Only `res_tags` is read.
+- `source_type`: (default `""`) Which market state `source` was loaded for — the same string the `ReferenceDayBasecase` was given (`""`/`"DA"`, `"2DA"`, `"REDISP"`, or a canonical state name). It decides which columns bar 1 is read from; a mismatch raises an error naming the state instead of drawing an empty bar.
+- `results_dir`: (default `""`) Results directory whose market states fill the `Market state` menu; the states are discovered from the stage-prefixed result files. Without it the menu holds the passed `variant` alone.
 - `scalefactor`: (default `1/1000`) Factor to scale power values (MW to GW).
-- `agg`: (default `:mean`) Initial aggregation, `:mean` (GW average over the window) or `:sum` (GWh).
 - `figsize`: (default `(1300, 850)`)
+- `px_per_unit`: (default `2`) Resolution multiplier of the PNG export.
+- `export_path`: (default `"refday_dispatch.png"`) Path prefilled into the export textbox.
+- `export_figsize`: (default `(1000, 650)`) Size of the exported figure, which carries no controls and so needs less width than the interactive one.
 
 **Interactivity**
 - Dropdown menu to select the market zone.
-- Dropdown menu to select the aggregation (`mean` or `sum`).
-- *`IntervalSlider`* for a single timestep or a period.
+- Dropdown menu to select the market state drawn as bar 4.
+- Slider selecting the single timestep shown.
+- Export of the current view: a format menu, a path textbox and an `Export view` button. What is written is the **plotted area alone** — axis, legend and caption — rebuilt as a static figure, so the menus, textbox, button and slider (which live in the same `Figure`) stay out of the file. PNG is always available; `pdf` and `svg` appear in the menu only when `CairoMakie` is loaded in the session, since GLMakie cannot write vector formats. The result — the written path, or the error — is reported under the info label.
 
 **Returns**
 - `fig`: An interactive plot figure (`Makie.Figure`).
@@ -291,10 +301,19 @@ Horizontal black markers show the zonal load per group. Blue diamonds show the z
 **Example**
 ```julia
 using GLMakie, Tyler, ColorSchemes, Colors
+using CairoMakie   # optional, unlocks the pdf/svg export formats
 
 variant = DataFiles(joinpath("results", "refday_gsk"))
 source  = DataFiles(joinpath("results", "forecast"), TwoDayAhead)
-fig = plot_refday_dispatch_interactive(variant, source)
+fig = plot_refday_dispatch_interactive(
+    variant, source;
+    source_type = "2DA",
+    results_dir = joinpath("results", "refday_gsk"),
+    matching = MatchingConfig(res_tags = ["solar", "wind"]))
+
+# a redispatch basecase source: its dispatch lives in REDISP, not GEN
+source = DataFiles(joinpath("results", "forecast"), Redispatch)
+fig = plot_refday_dispatch_interactive(variant, source; source_type = "REDISP")
 ```
 
 

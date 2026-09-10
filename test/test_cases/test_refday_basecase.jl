@@ -75,7 +75,8 @@ end
 # makes a load pre-step a silent no-op. `P(n,1) = RES + CONV − LOAD` (export-positive),
 # so the reference seed is internally consistent; `P(n,2)` is a free target used only
 # for the net-position gap. gmax_conv equals CONV, so the conventional lever has no
-# room UP — a γ test can then attribute everything it sees to the load lever.
+# room UP — whatever it cannot absorb is carried on to the levers behind it, which is
+# what the pre-step freeze tests need to see blocked.
 function create_refday_prestep_nd()
     nodes = ["n1", "n2", "n3"]; times = [1, 2]
     return (
@@ -540,28 +541,116 @@ function test_refday_basecase()
         @test all(isapprox(pN[n], seed(n); atol = 1e-9) for n in ndP.nodes)
     end
 
-    @testset "load pre-step re-anchors the γ budget to the target day" begin
-        # The pre-step is a hard-set, outside the γ budget (exactly as the RES pre-step
-        # is outside β_RES). Afterwards `load0` is the TARGET hour's load, so γ caps the
-        # deviation from the delivery-day forecast — not from the reference day.
+    @testset "a pre-stepped load lever is frozen for the rest of the shift" begin
+        # The hard-set is what puts the TARGET day's nodal texture into the basecase, so
+        # nothing afterwards may move that component again. `validate_shares` asserts its
+        # β is zero, which leaves exactly one way back in: a remainder carried down
+        # `fallback_order` (where :load sits by default). The freeze blocks it — the
+        # lever behaves like one with no headroom and passes the remainder on, so what
+        # would have been a hidden load shift surfaces as np_relax instead.
         ndP = create_refday_prestep_nd()
-        γ = 0.1
-        m = ShareShift(β_conv=0.0, β_load=1.0, β_RES=0.0, load_shift_share=γ,
+        m = ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, load_shift_share=1.0,
                        resolution=:nodal, prestep=:load, redist=RefPropRedist(),
                        enforce_balance=false)
-        p = POMATWO.shift_single(ndP, params, 2, 1, m)
+        tr = POMATWO.ShiftTraceCollector(); d = POMATWO.ShiftDiagCollector()
+        p = POMATWO.shift_single(ndP, params, 2, 1, m; trace = tr, diag = d)
+        df = POMATWO.shift_trace_df(tr); dg = POMATWO.shift_diag_df(d)
 
-        for n in ndP.nodes
-            after_prestep = ndP.P[(n, 1)] + ndP.LOAD[(n, 1)] - ndP.LOAD[(n, 2)]
-            D  = ndP.P[(n, 2)] - after_prestep          # :nodal ⇒ per-node gap
-            lo = -γ * ndP.load_max[n]                   # budget re-anchored: spent = 0
-            hi = min(γ * ndP.load_min[n], ndP.LOAD[(n, 2)])
-            @test isapprox(p[n], after_prestep + clamp(D, lo, hi); atol = 1e-9)
+        # gmax_conv == CONV ⇒ conv has no room UP, so n1's whole +15 gap is carried to
+        # :sto (inert) and on to the frozen :load; n2's −10 gap is met by conv down to
+        # zero (−2) and the remaining −8 is carried the same way. γ = 1 would leave the
+        # load lever ample room, so anything that moves here is the freeze failing.
+        after(n) = ndP.P[(n, 1)] + ndP.LOAD[(n, 1)] - ndP.LOAD[(n, 2)]
+        @test isapprox(p["n1"], after("n1"); atol = 1e-9)          # 5.0, nothing moved
+        @test isapprox(p["n2"], after("n2") - 2.0; atol = 1e-9)    # conv down only
+        @test isapprox(p["n3"], after("n3"); atol = 1e-9)          # zero gap
+
+        # the load lever never fires: no nodal delta at all, and the carried remainder
+        # is reported as wanted-but-unabsorbed
+        @test "load" ∉ df.component
+        rl = only(filter(r -> r.zone == "n1" && r.component == "load", dg))
+        @test isapprox(rl.want, 15.0; atol = 1e-9)
+        @test rl.applied == 0.0 && rl.beta_realised == 0.0
+        relax = filter(:component => ==("np_relax"), df)
+        @test isapprox(only(relax.delta[relax.node .== "n1"]), 15.0; atol = 1e-9)
+    end
+
+    @testset "a pre-stepped RES lever is frozen too" begin
+        # Two independent guards keep a pre-stepped component put: `validate_shares`
+        # rejects the configuration below, and `shift_single` freezes the lever anyway.
+        # This pins the second one, so β_RES > 0 is deliberate (and `:RES` always leads
+        # the cascade, so a carried remainder can never reach it — a non-zero β is the
+        # only way to ask the RES lever for anything at all).
+        ndP = create_refday_prestep_nd()
+        m = ShareShift(β_conv=0.5, β_load=0.0, β_RES=0.5, load_shift_share=1.0,
+                       resolution=:nodal, prestep=:res, redist=RefPropRedist(),
+                       enforce_balance=false)
+        @test_throws ErrorException POMATWO.validate_shares(m)
+
+        tr = POMATWO.ShiftTraceCollector()
+        p = POMATWO.shift_single(ndP, params, 2, 1, m; trace = tr)
+        df = POMATWO.shift_trace_df(tr)
+
+        # unfrozen, n3's RES would take 1.5 of its +3 gap (5 MW dispatched against an
+        # 8 MW cap after the hard-set); frozen, the whole share is carried to conv (no
+        # room up), on through inert storage, and closed by the load lever instead
+        @test "RES" ∉ df.component
+        @test isapprox(p["n3"], 18.0; atol = 1e-9)   # gap closed, but not by RES
+        @test isapprox(p["n1"], 14.0; atol = 1e-9)   # load capped at its own value ⇒ np_relax 6
+        @test isapprox(p["n2"], -10.0; atol = 1e-9)  # conv down 2, load up 6
+    end
+
+    @testset "the global balance pass respects a frozen load lever" begin
+        # Balance falls back to load when conventional headroom runs out. With :load
+        # pre-stepped that fallback is off the table: the pass warns and leaves the
+        # basecase unbalanced rather than quietly undoing the target-day load texture.
+        ndP = create_refday_prestep_nd()
+        z0 = Dict((n, t) => 0.0 for n in ndP.nodes, t in ndP.times)
+        nd0 = merge(ndP, (CONV = z0, gmax_conv = z0))   # no conventional headroom at all
+        m = ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, load_shift_share=1.0,
+                       resolution=:nodal, prestep=:load, redist=RefPropRedist(),
+                       enforce_balance=true)
+        tr = POMATWO.ShiftTraceCollector()
+        p = @test_logs (:warn, r"frozen") match_mode = :any POMATWO.shift_single(
+                nd0, params, 2, 1, m; trace = tr)
+
+        @test "balance" ∉ POMATWO.shift_trace_df(tr).component
+        for n in nd0.nodes
+            @test isapprox(p[n], nd0.P[(n, 1)] + nd0.LOAD[(n, 1)] - nd0.LOAD[(n, 2)];
+                           atol = 1e-9)
         end
-        # n1 needs load UP and n2 load DOWN, so both bounds are exercised and the
-        # not-re-anchored reading (spent = load_ref − load_tgt ≠ 0) is excluded
-        @test isapprox(p["n1"], 5.0 + 0.4; atol = 1e-9)
-        @test isapprox(p["n2"], 0.0 - 0.6; atol = 1e-9)
+        @test !isapprox(sum(values(p)), 0.0; atol = 1e-6)   # deliberately left unbalanced
+    end
+
+    @testset "REFDAY_DIAG: pre-step rows" begin
+        # The pre-steps are the biggest movers of a basecase; they belong in the same
+        # table as the β levers so their size is directly comparable, with the nodal
+        # detail left to REFDAY_SHIFT.
+        ndP = create_refday_prestep_nd()
+        mD(pre) = ShareShift(β_conv=1.0, β_load=0.0, β_RES=0.0, load_shift_share=1.0,
+                             resolution=:zonal, prestep=pre, redist=RefPropRedist(),
+                             enforce_balance=false)
+        for pre in (Symbol[], :res, :load, [:res, :load])
+            tr = POMATWO.ShiftTraceCollector(); d = POMATWO.ShiftDiagCollector()
+            POMATWO.shift_single(ndP, params, 2, 1, mD(pre); trace = tr, diag = d)
+            dg = POMATWO.shift_diag_df(d); df = POMATWO.shift_trace_df(tr)
+            active = POMATWO.prestep_components(mD(pre))
+
+            for (comp, name) in ((:res, "RES_prestep"), (:load, "load_prestep"))
+                rows = filter(r -> r.component == name, dg)
+                # one row per zone iff that pre-step ran at all
+                @test nrow(rows) == (comp in active ? length(ndP.nodes_in_zone) : 0)
+                for r in eachrow(rows)
+                    znodes = Set(ndP.nodes_in_zone[r.zone])
+                    nodal = sum(df.delta[(df.component .== name) .&
+                                         in.(df.node, Ref(znodes))]; init = 0.0)
+                    @test isapprox(r.applied, nodal; atol = 1e-9)  # zonal sum of the hard-set
+                    @test r.want == r.applied                      # unconditional, nothing clipped
+                    @test r.reallocated == 0.0 && r.beta_configured == 0.0
+                end
+            end
+            @test nrow(unique(dg[:, [:Time, :zone, :component]])) == nrow(dg)
+        end
     end
 
     @testset "storage lever + availability-weighted cap" begin
@@ -756,11 +845,14 @@ function test_refday_basecase()
             @test POMATWO.validate_shares(ShareShift(prestep = pre, β_conv = 0.0,
                                                      β_load = 0.0)) === nothing
         end
-        # moving a component twice (hard-set, then balancer) is warned, not blocked
-        @test_logs (:warn, r"prestep") POMATWO.validate_shares(
+        # a pre-stepped component is frozen afterwards, so a β share for it could never
+        # be spent — a configuration error, not a warning
+        @test_throws ErrorException POMATWO.validate_shares(
             ShareShift(prestep = :res, β_RES = 0.5, β_conv = 0.0, β_load = 0.0))
-        @test_logs (:warn, r"prestep") POMATWO.validate_shares(
+        @test_throws ErrorException POMATWO.validate_shares(
             ShareShift(prestep = :load, β_conv = 0.0, β_load = 0.5))
+        @test_throws ErrorException POMATWO.validate_shares(
+            ShareShift(prestep = [:res, :load], β_RES = 0.0, β_conv = 0.5, β_load = 0.5))
     end
 
     @testset "load lever bounded by load_shift_share (γ)" begin

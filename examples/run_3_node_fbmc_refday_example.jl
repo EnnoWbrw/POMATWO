@@ -55,7 +55,9 @@ setup_refday = ModelSetup(;
                 scope = ZonalMatchScope(), # per-TSO matching: each zone borrows its own reference day
             ),
             shift = ShareShift(
-                β_conv = 0.5, β_load = 0.5, β_RES = 0.0,
+                # both pre-stepped components are frozen afterwards, so neither may
+                # carry a β share as well — conventional generation takes the whole gap
+                β_conv = 1.0, β_load = 0.0, β_RES = 0.0,
                 resolution = :zonal,
                 prestep = [:res, :load],   # hard-align RES and load to the target first
                 redist = GSKRedist(DispOnlyGSK()),

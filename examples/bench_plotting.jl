@@ -160,7 +160,8 @@ if isdir(REFDAY_DIR)
         variant; background_map = false, line_value = :utilization))
     render("shift_map_f0", () -> plot_shift_map_interactive(
         variant; background_map = false, line_value = :f0_utilization))
-    render("refday_dispatch", () -> plot_refday_dispatch_interactive(variant, results))
+    render("refday_dispatch", () -> plot_refday_dispatch_interactive(
+        variant, results; results_dir = REFDAY_DIR))
 end
 
 report()
