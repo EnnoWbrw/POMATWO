@@ -401,14 +401,16 @@ end
     fix_net_positions!(sr::SubRun)
 
 No-op for every stage except an opted-in redispatch (`DCLF.fix_net_positions == true`),
-where it constrains each zone's net position to exactly equal its day-ahead cleared value.
+where it constrains each zone's net position to equal its day-ahead cleared value, up to
+the `DCLF.np_cost`-priced slack `NP_INF_POS`/`NP_INF_NEG` reported in the `NP_INF` table.
 """
 fix_net_positions!(::SubRun) = nothing
 
 function fix_net_positions!(
     sr::SubRun{MT,PS,DCLF{LF},MS},
 ) where {MT<:MarketType,PS<:ProsumerSetup,LF<:DCLFFormulation,MS<:Redispatch}
-    sr.modelrun.setup.RedispatchSetup.fix_net_positions || return nothing
+    rd = sr.modelrun.setup.RedispatchSetup
+    rd.fix_net_positions || return nothing
 
     params = sr.modelrun.params
     @unpack nodes_in_zone = params
@@ -427,11 +429,45 @@ function fix_net_positions!(
     # Skip zones with no nodes rather than emitting a trivially-infeasible `0 == np_da` row.
     zones = [z for z in Z if !isempty(get(nodes_in_zone, z, String[]))]
 
+    # The pin is a hard equality on a quantity the redispatch stage does not control
+    # directly: a zone whose day-ahead position is unreachable once the network
+    # constraints bind would make the whole model infeasible, with no result table left to
+    # say why. Soften it with a slack pair priced at `np_cost` (default 50000, above the
+    # CU/LL and storage slacks and below the FBMC one — see the penalty hierarchy in
+    # CLAUDE.md), so an unreachable pin surfaces as a reported NP_INF violation instead.
+    @variable(m, 0 <= NP_INF_POS[z = zones, t = T])
+    @variable(m, 0 <= NP_INF_NEG[z = zones, t = T])
+
     @constraint(
         m,
         FixNetPosition[z = zones, t = T],
-        sum(NETINPUT[n, t] for n in nodes_in_zone[z]) == np_da[z, t]
+        sum(NETINPUT[n, t] for n in nodes_in_zone[z]) ==
+        np_da[z, t] + NP_INF_POS[z, t] - NP_INF_NEG[z, t]
     )
+
+    # `add_dclf` — the only builder of the redispatch `:network` node — sets no objective,
+    # so `objective_function` here is the zero AffExpr. Accumulating rather than assigning
+    # keeps this correct anyway: `@objective` REPLACES (see CLAUDE.md).
+    @objective(
+        m,
+        Min,
+        JuMP.objective_function(m) +
+        rd.np_cost * sum(NP_INF_POS[z, t] + NP_INF_NEG[z, t] for z in zones, t in T)
+    )
+
+    # Signed net deviation from the day-ahead position, in the same import-positive
+    # convention as `NETINPUT`: positive means the zone imported more than it cleared.
+    @expression(m, NP_INF[z = zones, t = T], NP_INF_POS[z, t] - NP_INF_NEG[z, t])
+
+    df_np_inf(sr.results)
+    append_results!(sr.results, :NP_INF, DataFrame(
+        index = repeat(zones, inner = length(T)),
+        Time = repeat(collect(T), outer = length(zones)),
+        NP_INF_POS = [NP_INF_POS[z, t] for z in zones for t in T],
+        NP_INF_NEG = [NP_INF_NEG[z, t] for z in zones for t in T],
+        NP_INF = [NP_INF[z, t] for z in zones for t in T],
+        NP_DA = [np_da[z, t] for z in zones for t in T],
+    ))
 
     return nothing
 end

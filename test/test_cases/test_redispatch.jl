@@ -51,6 +51,7 @@ function test_redispatch()
             @test d.res_up_cost == 150.0
             @test d.res_down_cost == 150.0
             @test d.sto_cost == 500.0
+            @test d.np_cost == 50000.0
 
             @test DCLF(PhaseAngle) isa DCLF{PhaseAngle}
             @test DCLF(POMATWO.PTDF) isa DCLF{POMATWO.PTDF}
@@ -59,6 +60,8 @@ function test_redispatch()
             @test DCLF(; res_up_cost = 0.0).res_up_cost == 0.0
             @test DCLF(POMATWO.PTDF; disp_cost = 42.0).disp_cost == 42.0
             @test DCLF(POMATWO.PTDF; disp_cost = 42.0) isa DCLF{POMATWO.PTDF}
+            @test DCLF(; np_cost = 1.0).np_cost == 1.0
+            @test DCLF(POMATWO.PTDF; np_cost = 1.0).np_cost == 1.0
         end
 
         mktempdir() do tmpdir
@@ -186,6 +189,64 @@ function test_redispatch()
                 @test sum(free.NodalMarketRedispBalance.LL) ≈ 0.0 atol=1e-6
                 @test sum(pinned.NodalMarketRedispBalance.LL) > 1e-6
                 @test sum(ndisp_rows(pinned).GEN_UP) < sum(ndisp_rows(free).GEN_UP)
+
+                # The pin is softened by a slack pair, but at the default np_cost (50000)
+                # it sits above every other escape (CU/LL 9000, storage 10000): the pin
+                # holds exactly and the reported slack is identically zero. That is what
+                # makes the exact-equality assertions above meaningful.
+                np_inf = DataFiles(dir_pin, Redispatch).NP_INF
+                @test !isempty(np_inf)
+                @test Set(np_inf.index) == Set(Z)
+                @test nrow(np_inf) == length(Z) * length(T)
+                @test all(x -> abs(x) < 1e-6, np_inf.NP_INF_POS)
+                @test all(x -> abs(x) < 1e-6, np_inf.NP_INF_NEG)
+                @test all(x -> abs(x) < 1e-6, np_inf.NP_INF)
+                # NP_DA carries the day-ahead value each zone was pinned to.
+                for row in eachrow(np_inf)
+                    @test row.NP_DA ≈ da_np(row.index, row.Time) atol=1e-6
+                end
+                # This run does have lost load (asserted above), so the report is not
+                # empty — but no net-position violation is part of it.
+                pinned_report = with_logger(logger) do
+                    check_infeasibility(pinned)
+                end
+                @test !("NP_INF" in pinned_report.source)
+
+                # The unpinned run builds no such constraint and no such table.
+                @test isempty(DataFiles(dir_free, Redispatch).NP_INF)
+            end
+        end
+
+        # =================================================================
+        @testset "net position slack relaxes an unaffordable pin" begin
+            mktempdir() do tmpdir
+                # Price the pin below the CU/LL slack (9000) and below the lost load the
+                # default-priced pin was forced onto above: relaxing the net position now
+                # beats shedding load, so the slack must actually take a non-zero value.
+                cheap = run_redisp(tmpdir, "np_cheap", DCLF(; fix_net_positions = true, np_cost = 100.0))
+
+                np_inf = DataFiles(joinpath(tmpdir, "np_cheap"), Redispatch).NP_INF
+                @test sum(np_inf.NP_INF_POS) + sum(np_inf.NP_INF_NEG) > 1e-6
+                # Slack halves are complementary — never both non-zero in the same row.
+                @test all(row -> row.NP_INF_POS < 1e-6 || row.NP_INF_NEG < 1e-6, eachrow(np_inf))
+                @test all(row -> row.NP_INF ≈ row.NP_INF_POS - row.NP_INF_NEG, eachrow(np_inf))
+
+                # Relaxing beats shedding: no lost load left at this price.
+                @test sum(cheap.NodalMarketRedispBalance.LL) ≈ 0.0 atol=1e-6
+
+                # The realised net position is the pinned value plus the slack taken.
+                ni = DataFiles(joinpath(tmpdir, "np_cheap"), Redispatch).NETINPUT
+                for row in eachrow(np_inf)
+                    @test zone_np(ni, row.index, row.Time) ≈ row.NP_DA + row.NP_INF atol=1e-6
+                end
+
+                # check_infeasibility must surface it rather than report a clean run.
+                report = with_logger(logger) do
+                    check_infeasibility(cheap)
+                end
+                @test "NP_INF" in report.source
+                @test sum(filter(r -> r.source == "NP_INF", report).total) ≈
+                      sum(np_inf.NP_INF_POS) + sum(np_inf.NP_INF_NEG) atol=1e-6
             end
         end
 

@@ -135,6 +135,24 @@ function df_fbmc_inf(dict)
 end
 
 """
+Initializes the :NP_INF DataFrame in the results dictionary if it does not exist.
+Stores the net-position pinning slack per zone and time period, written only by an
+opted-in redispatch (`DCLF.fix_net_positions == true`, see `fix_net_positions!`).
+"""
+function df_np_inf(dict)
+    if !haskey(dict, :NP_INF)
+        dict[:NP_INF] = DataFrame(;
+            index = String[],
+            Time = Int[],
+            NP_INF_POS = VariableRef[],
+            NP_INF_NEG = VariableRef[],
+            NP_INF = AffOrVarOrFloatOrInt[],
+            NP_DA = Float64[],
+        )
+    end
+end
+
+"""
 Initializes the :RAM DataFrame in the results dictionary if it does not exist.
 Stores the flow-based Remaining Available Margin per CNE line and time period, together
 with the basecase reference flow `F0` it was derived from and the parameters of the

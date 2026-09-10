@@ -314,14 +314,20 @@ function _run_states(
             derive_results!(sr)
         end
         t_write = @elapsed write_results(sr; prefix = result_prefix(market_state))
+        isnothing(prog) || ProgressMeter.update!(prog, desc = "$lbl -> Postprocessing")
+        t_post = @elapsed begin
+            record_carry!(sr, ctx)
+            i < length(seq) && postprocess!(sr, ctx)
+        end
         # Stage timings: result extraction used to dominate a subrun (dense reporting
         # expressions resolved one solver round-trip per term), so the split between
-        # solving and persisting is worth seeing rather than guessing at.
+        # solving and persisting is worth seeing rather than guessing at. `post` covers
+        # carry recording and `postprocess!` (for FBMC: the basecase -> flow-based
+        # parameter calculation), which used to be the one sizeable unmeasured part of a
+        # state and made the spinner's elapsed time look inconsistent with the log.
         mr.verbose && @info "$lbl timings [s]" build = round(t_build; digits = 2) solve =
             round(t_solve; digits = 2) fetch = round(t_fetch; digits = 2) write =
-            round(t_write; digits = 2)
-        record_carry!(sr, ctx)
-        i < length(seq) && postprocess!(sr, ctx)
+            round(t_write; digits = 2) post = round(t_post; digits = 2)
     end
     isnothing(prog) || finish!(prog, desc = "Subrun -> Done")
     return ctx

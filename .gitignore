@@ -8,4 +8,5 @@ Manifest.toml
 bench_out/
 graphify-out/
 examples/Project.toml
-examples/run_8_node_shareshift_example.jl
+examples/Manifest.toml
+docs/superpowers

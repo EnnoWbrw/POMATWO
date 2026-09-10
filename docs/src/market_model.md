@@ -156,11 +156,19 @@ nevertheless pinned to its day-ahead cleared value by aggregating `INJ_n` over t
 nodes:
 
 ```math
-\sum_{n \in z}^N INJ_{n,t} = EX_{z,t}^{net,DA}, \qquad \forall z \in Z, t \in T
+\sum_{n \in z}^N INJ_{n,t} = EX_{z,t}^{net,DA} + NPINF_{z,t}^{pos} - NPINF_{z,t}^{neg},
+\qquad \forall z \in Z, t \in T
 ```
 
 `INJ_n` and `EX_z^{net}` follow the same import-positive convention, so no sign flip is
 needed. With this constraint active, redispatch may only reshuffle generation within a
 zone — it can no longer change cross-border exchange.
+
+The non-negative slack pair `NPINF^{pos}`, `NPINF^{neg}` keeps a net position that the
+network constraints make unreachable from rendering the whole model infeasible. It is
+priced at `DCLF.np_cost` (default `50000`), above every other infeasibility slack except
+the flow-based one, so the pin is relaxed only as a last resort. The values are written to
+the `NP_INF` result table (`NP_INF = NPINF^{pos} - NPINF^{neg}`, the signed deviation, next
+to the pinned day-ahead value `NP_DA`) and reported by `check_infeasibility`.
 
 

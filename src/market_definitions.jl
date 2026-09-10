@@ -258,7 +258,14 @@ technical potential), `res_down_cost` prices additional curtailment.
   generation within zones and cannot change cross-border exchange. Only meaningful when
   zones are defined (i.e. under a `ZonalMarket`, though the constraint is built from nodal
   `NETINPUT` regardless — see `fix_net_positions!` in `energy_balances.jl`); the constraint
-  is a hard equality, not a bound. Defaults to `false`.
+  is an equality softened only by the `np_cost`-priced slack below. Defaults to `false`.
+- `np_cost`: Price per MWh of the net-position pinning slack (`NP_INF_POS`/`NP_INF_NEG`,
+  written to the `NP_INF` result table and scanned by [`check_infeasibility`](@ref)).
+  Only used when `fix_net_positions == true`. Defaults to `50000.0`, which places it above
+  the nodal `CU`/`LL` (9000) and storage (10000) infeasibility slacks and below the FBMC
+  RAM slack (100000): the pin is relaxed only when no other escape exists, so it reports a
+  genuinely infeasible pinning instead of competing with lost load as a cheap alternative.
+  Lower it below 9000 to make relaxing the pin preferable to shedding load.
 
 # Constructors
 - `DCLF()`: Uses `PhaseAngle` as default.
@@ -271,6 +278,7 @@ struct DCLF{DCF<:DCLFFormulation} <: RedispatchType
     res_down_cost::Float64
     sto_cost::Float64
     fix_net_positions::Bool
+    np_cost::Float64
 end
 
 # 1) Null-Argument-Default: PhaseAngle
@@ -284,8 +292,16 @@ function DCLF(
     res_down_cost::Real = 150.0,
     sto_cost::Real = 500.0,
     fix_net_positions::Bool = false,
+    np_cost::Real = 50000.0,
 ) where {DCF<:DCLFFormulation}
-    return DCLF{DCF}(disp_cost, res_up_cost, res_down_cost, sto_cost, fix_net_positions)
+    return DCLF{DCF}(
+        disp_cost,
+        res_up_cost,
+        res_down_cost,
+        sto_cost,
+        fix_net_positions,
+        np_cost,
+    )
 end
 
 """
