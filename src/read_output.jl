@@ -331,7 +331,7 @@ end
 Aggregates generation results by plant type and time for a specified market kind and zone.
 
 # Arguments
-- `results`: [DataFiles](@ref) object containing generation data and parameters.
+- `results`: [`DataFiles`](@ref) object containing generation data and parameters.
 - `kind`: Symbol or string specifying the market result to extract (`:REDISP`, `:GEN`, or `:DA`).
 - `zone`: The name or key of the market zone to filter on.
 
