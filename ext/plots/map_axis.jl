@@ -335,7 +335,7 @@ function _style_map_axis!(
     # of them coordinate with this one: `plot_capacity_network` and `plot_shift_map_interactive`
     # put `_NO_COORDS_NOTE` there on the circular fallback (mutually exclusive with this
     # branch, since that path is not styled at all), and `plot_line_utils_interactive`
-    # rewrites it with its live colour/width key on every slider tick — which WOULD clobber
+    # rewrites it with its live colour/width key on every redraw — which WOULD clobber
     # the CRS note, silently and immediately, the moment `projection_note` is defaulted on.
     # Flipping that default therefore means giving the interactive key a slot of its own.
     if projection_note

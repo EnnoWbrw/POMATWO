@@ -3,14 +3,14 @@
 #
 #   plot_shift_map_interactive(results)          geographic map of the nodal
 #       injection deltas caused by the ShareShift (green = increase,
-#       red = decrease), with a component filter and a time-window slider, plus
+#       red = decrease), with a component filter and a time-window field, plus
 #       an optional AC-line colouring by the reference-day basecase flow
 #       (|flow|, utilization, or the F0 intercept under a selectable GSK).
 #   plot_refday_dispatch_interactive(variant, source)   per-zone stacked-bar
 #       comparison at ONE timestep of (1) the matched reference day, (2) the
 #       ShareShift decomposition, (3) the shifted reference day and (4) a
 #       selectable market state, with a net-position marker per bar, zone /
-#       market-state menus, a timestep slider and a PNG/PDF/SVG export of the
+#       market-state menus, a timestep field and a PNG/PDF/SVG export of the
 #       current view. Bars 1/3/4 stack merged categories whose conv/RES/storage
 #       split comes from the run's MatchingConfig.res_tags.
 #
@@ -21,7 +21,7 @@
 #
 # Both plots keep their scene children fixed and drive them through Observables:
 # the geometry (line segments, node markers, bar series) is built once and a
-# slider tick only rewrites preallocated value buffers. Lookups go into a dense
+# redraw only rewrites preallocated value buffers. Lookups go into a dense
 # `key × time` matrix (`_ZoneKeyTable`) rather than the nested
 # `Dict{String,Dict{Int,Dict{String,Float64}}}` these aggregations used to build.
 # =============================================================================
@@ -102,7 +102,7 @@ Replaces the `Dict{String,Dict{Int,Dict{String,Float64}}}` the aggregations belo
 return. That shape cost three chained hash lookups per (key, hour) inside `redraw!`, and
 `get(store, t, Dict{String,Float64}())` allocated a fresh empty `Dict` on **every** miss
 because `get`'s default argument is evaluated eagerly — at `|types| × |window|` calls per
-slider tick that was the dominant allocator of the reference-day plot. Here the keys are
+redraw that was the dominant allocator of the reference-day plot. Here the keys are
 resolved to indices once and a lookup is a single matrix index.
 """
 struct _ZoneKeyTable
@@ -359,7 +359,7 @@ In the hours mode `share` supplies the |value| / fmax matrix the threshold is co
 against — a threshold in MW would mean nothing across a network of mixed ratings, so the
 count is always over the utilization share even when the painted value is MW.
 
-Writes into `dest` rather than allocating, so a slider drag does not allocate per pixel.
+Writes into `dest` rather than allocating, so a redraw does not allocate per frame.
 """
 function _rd_reduce!(dest, V, cols, agg, share, thr)
     n = length(cols)
@@ -475,9 +475,11 @@ the basecase has no flow for sits at the bottom of the colour scale.
 - Component menu: total / individual shift components (node markers).
 - Line value menu, GSK menu, aggregation menu (`mean`, `hours ≥ threshold`, `sum`),
   colour-scale menu (`adaptive (this window)` / `fixed (whole horizon)`) and a threshold
-  slider (line layer). The threshold is always compared against `|value| / fmax`, in the
+  threshold slider (line layer). The threshold is always compared against
+  `|value| / fmax`, in the
   MW modes too — a MW threshold means nothing across a network of mixed ratings.
-- IntervalSlider: single timestep (handles together) or Σ over a window.
+- Time window field: `12` for a single timestep, `12-40` for the Σ over a window,
+  empty or `all` for the full horizon. Snapped onto the timesteps that exist.
 
 # Keyword arguments
 `figsize=(1250,1100)`, `background_map=true` (Tyler/CartoDB tiles; the axis stays
@@ -642,8 +644,10 @@ function POMATWO.plot_shift_map_interactive(
                                 format = x -> string(round(Int, 100x)) * " %"))
     thr_slider = thr_grid.sliders[1]
 
-    islider = IntervalSlider(fig[2, 1], range = sa.times,
-                             startvalues = (first(sa.times), first(sa.times)))
+    time_row, time_window = _time_range_row(fig, sa.times;
+                                            startvalues = (first(sa.times),
+                                                           first(sa.times)))
+    fig[2, 1] = time_row
     info = Label(fig[3, 1], ""; tellwidth = false, fontsize = 13)
 
     cbar = Colorbar(fig[1, 3]; colormap = ColorSchemes.lajolla.colors,
@@ -651,8 +655,8 @@ function POMATWO.plot_shift_map_interactive(
 
     # --- lazily built value matrices ----------------------------------------
     # One `lines × times` matrix per (mode, GSK) actually selected, kept for the life of
-    # the figure. F0 needs a PTDFz per GSK — recomputing it on every slider pixel would
-    # make the slider unusable on anything larger than a toy network.
+    # the figure. F0 needs a PTDFz per GSK — recomputing it on every redraw would
+    # make the figure unusable on anything larger than a toy network.
     f0_cache = Dict{String,Matrix{Float64}}()
     val_cache = Dict{String,Tuple{Matrix{Float64},Matrix{Float64}}}()
 
@@ -678,7 +682,7 @@ function POMATWO.plot_shift_map_interactive(
         end
     end
 
-    # Preallocated: a slider drag reassigns these in place rather than allocating three
+    # Preallocated: a redraw reassigns these in place rather than allocating three
     # fresh vectors per pixel, which is what the previous `lift` chain did.
     agg = zeros(Float64, nnodes)
     node_color = Observable(fill(_SHIFT_ZERO_COLOR, nnodes))
@@ -763,7 +767,7 @@ function POMATWO.plot_shift_map_interactive(
     function redraw!()
         comp = comp_menu.selection[]
         M = comp == "total" ? sa.total : sa.comp_mats[comp]
-        lo, hi = islider.interval[]
+        lo, hi = time_window[]
         cols = searchsortedfirst(sa.times, lo):searchsortedlast(sa.times, hi)
 
         fill!(agg, 0.0)
@@ -802,7 +806,7 @@ function POMATWO.plot_shift_map_interactive(
         return nothing
     end
 
-    on(_ -> redraw!(), islider.interval)
+    on(_ -> redraw!(), time_window)
     on(_ -> redraw!(), comp_menu.selection)
     on(_ -> redraw!(), line_menu.selection)
     on(_ -> redraw!(), gsk_menu.selection)
@@ -974,7 +978,7 @@ end
     _refday_snapshot_figure(bars, np, ticks, ylabel, caption, size) -> Figure
 
 The plotted area alone — axis, legend and caption — with none of the interactive
-furniture. The live figure carries its menus, textbox, button and slider inside the same
+furniture. The live figure carries its menus, textboxes and button inside the same
 `Figure`, so saving it would put the whole GUI in the file; this rebuilds just the plot
 from the values that figure currently holds.
 
@@ -1068,9 +1072,9 @@ Bars 1, 3 and 4 are stacked in `conventional` / `RES` / `storage` / `load` (plus
 so the split is the one the reference-day basecase applied.
 
 # Interactivity
-Zone menu, market-state menu, a single-timestep slider, and a PNG/PDF/SVG export (PDF and
+Zone menu, market-state menu, a single-timestep entry field, and a PNG/PDF/SVG export (PDF and
 SVG appear in the format menu only when `CairoMakie` is loaded). The export writes the
-plotted area only — axis, legend and caption — not the menus, textbox, button and slider,
+plotted area only — axis, legend and caption — not the menus, textboxes and button,
 which live in the same `Figure` and would otherwise land in the file.
 
 # Reading a state's dispatch
@@ -1091,7 +1095,8 @@ directly would therefore show an empty bar for a redispatch source instead of fa
   it the menu holds the passed `variant` alone.
 - `scalefactor = 1/1000`: MW → GW.
 - `figsize = (1300, 850)`, `px_per_unit = 2` (PNG export resolution),
-  `export_path = "refday_dispatch.png"` (prefilled export path),
+  `export_path = "refday_dispatch.png"` (prefilled export path, and the fallback when the
+  box is cleared; the path is read as displayed, so no Enter is needed before clicking),
   `export_figsize = (1000, 650)` (size of the exported plot, which carries no controls).
 """
 function POMATWO.plot_refday_dispatch_interactive(
@@ -1190,15 +1195,19 @@ function POMATWO.plot_refday_dispatch_interactive(
     export_btn = Button(fig, label = "Export view", fontsize = 18)
     # Two rows for the control column and one for the legend: the seven widgets overflow
     # a single row and the topmost one is clipped by the figure edge.
+    #
+    # `tellheight = false` means the stack is free to be taller than the two rows it spans,
+    # and at the default `valign = :center` it overflows by half of the excess in EACH
+    # direction — which put the first label off the top of the figure. `:top` spends the
+    # whole overflow downwards instead, into the gap above the legend in rows 3:4.
     fig[1:2, 2] = vgrid!(Label(fig, "Market Zone", fontsize = 20, width = 300), zone_menu,
                          Label(fig, "Market state", fontsize = 20), state_menu,
                          Label(fig, "Export format", fontsize = 20), fmt_menu,
-                         path_box, export_btn; tellheight = false)
+                         path_box, export_btn; tellheight = false, valign = :top)
 
-    sgrid = SliderGrid(fig[5, 1],
-                       (label = "Timestep", range = target_times,
-                        startvalue = first(target_times)))
-    tslider = sgrid.sliders[1]
+    tstep_row, tstep = _timestep_row(fig, target_times;
+                                     startvalue = first(target_times))
+    fig[5, 1] = tstep_row
     info = Label(fig[6, 1], ""; tellwidth = false, fontsize = 13)
     status = Label(fig[7, 1], ""; tellwidth = false, fontsize = 12, color = :gray30)
 
@@ -1229,7 +1238,7 @@ function POMATWO.plot_refday_dispatch_interactive(
 
     function redraw!()
         zone = zone_menu.selection[]
-        t = Int(tslider.value[])
+        t = tstep[]
         jw = get(timepos, t, 0)
         r = get(get(refmap, zone, Dict{Int,Int}()), t, 0)
         jr = r == 0 ? 0 : get(timepos, r, 0)
@@ -1327,10 +1336,31 @@ function POMATWO.plot_refday_dispatch_interactive(
         return nothing
     end
 
+    """
+    The path to export to, taken from what the box currently SHOWS.
+
+    A `Textbox` commits to `stored_string` only when Enter is pressed, so reading that here
+    wrote the *previous* path whenever a name was typed and `Export view` clicked straight
+    afterwards — the common gesture. Clicking the button is the commit for this box, so the
+    displayed text is what counts. It survives the defocus the click causes because
+    `path_box` leaves `reset_on_defocus` at its default `false`; a box cleared back to its
+    placeholder falls through to `export_path`, never to the last committed name.
+    """
+    function export_target()
+        s = path_box.displayed_string[]
+        s === nothing && return export_path
+        t = strip(s)
+        return isempty(t) ? export_path : String(t)
+    end
+
     on(export_btn.clicks) do _
         fmt = fmt_menu.selection[]
-        raw = path_box.stored_string[]
-        p = _refday_with_ext(raw === nothing || isempty(raw) ? export_path : raw, fmt)
+        raw = export_target()
+        p = _refday_with_ext(raw, fmt)
+        # Bring `stored_string` up to date with what was just acted on, so the box reads as
+        # committed (Makie greys the text while displayed ≠ stored) and a later read of
+        # either observable agrees with the file that was written.
+        path_box.stored_string[] == raw || (path_box.stored_string[] = raw)
         try
             bars = [(heights[s][], offsets[s][], series_colors[s],
                      series_kind[s] === :shift, series_labels[s]) for s = 1:nseries]
@@ -1347,7 +1377,7 @@ function POMATWO.plot_refday_dispatch_interactive(
     redraw!()
     on(_ -> redraw!(), zone_menu.selection)
     on(_ -> redraw!(), state_menu.selection)
-    on(_ -> redraw!(), tslider.value)
+    on(_ -> redraw!(), tstep)
 
     return fig
 end

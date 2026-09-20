@@ -3,13 +3,13 @@
 #
 # The interactive counterpart of `create_lineplot` (plotting_functions.jl): the
 # same |flow| / line_capacity colouring, but with a market-state menu, a time
-# window slider, an aggregation menu and a threshold control — plus per-line
+# window field, an aggregation menu and a threshold control — plus per-line
 # flow-direction arrowheads and one of two node keys: on a redispatch state the
 # nodal injection *change* caused by the redispatch measures (circles), on every
 # other state the nodal *net injection* itself (arrows).
 #
 # `create_lineplot` collapses the time axis in `_line_utilization_table`
-# (`@by :index`), so a slider needs its own data prep: `_line_util_matrix`
+# (`@by :index`), so a time window needs its own data prep: `_line_util_matrix`
 # keeps the per-(line, timestep) values in a `lines × times` matrix, where a
 # time window is a set of contiguous columns and every reduction runs over a
 # `view` without copying.
@@ -31,7 +31,7 @@ const _MODE_FLOWSUM = "absolute power flow sum"
 # both are offered:
 #
 #   window  — 0–max(1, peak of the current window). Best contrast inside one view, but the
-#             scale moves as the slider is dragged, so two windows cannot be compared by
+#             scale follows the entered window, so two windows cannot be compared by
 #             colour.
 #   horizon — 0–max(1, the largest single-timestep utilization anywhere in the state). Fixed,
 #             so colour means the same thing in every window; at the cost of contrast,
@@ -400,9 +400,13 @@ says nothing about how much power is at stake. DC lines are dashed.
   `ProsumerOptimizationState`, `Redispatch`, whichever are present); a legacy
   result directory offers a single composite entry. States are loaded lazily and
   cached on first selection.
-- **`IntervalSlider`** — the time window; drag the handles together for a single
-  timestep. Starts on the full horizon, so the first frame reproduces
-  `create_lineplot`.
+- **Time window field** — the time window, typed rather than dragged: `12` for a
+  single timestep, `12-40` for an inclusive window (`12:40`, `12..40` and `12 40`
+  are accepted too), empty or `all` for the full horizon. Reversed bounds are
+  sorted, and an entry is snapped onto the timesteps the state actually has and
+  written back in canonical form. An unparseable entry, or one that names no
+  existing timestep, turns the box red and leaves the current window live. Starts
+  on the full horizon, so the first frame reproduces `create_lineplot`.
 - **Mode menu**
     - `"average utilization"` — mean utilization over the window.
     - `"hours ≥ threshold"` — count of timesteps in the window at or above the
@@ -420,7 +424,7 @@ says nothing about how much power is at stake. DC lines are dashed.
   settings floor the maximum at 1 so an uncongested state is not stretched to look
   loaded.
     - `"adaptive (this window)"` (default) — 0–max(1, peak of the current window).
-      Best contrast within one view; the scale moves as the slider is dragged, so two
+      Best contrast within one view; the scale follows the entered window, so two
       windows cannot be compared by colour.
     - `"fixed (whole horizon)"` — 0–max(1, largest single-timestep utilization in the
       state). Colour means the same in every window, at the cost of contrast: a wide
@@ -508,7 +512,7 @@ map in degrees is worse than leaving it bare.
   `projection_note`, `scalebar_position`, `north_arrow_position`. Ignored on a run
   whose nodes carry no coordinates. Note that `projection_note = true` puts the
   CRS in the subtitle, which this plot then overwrites with its live colour key on
-  the next slider move.
+  the next redraw.
 - `show_redisp`: (default `true`) enable the redispatch node markers.
 - `redisp_ref`: (default `nothing`) pin the marker reference magnitude in MWh
   instead of taking the largest value in the window — use it to make two figures
@@ -714,11 +718,11 @@ function _plot_line_utils_interactive(
                      _net_injection_matrix(res, nodes, times),
                 slack = has_redisp ? _redisp_slack_volume(res) : 0.0,
                 # per-state scratch: the window reduction writes here instead of
-                # allocating a fresh vector on every slider pixel
+                # allocating a fresh vector on every window change
                 vals = zeros(Float32, size(U, 1)),
                 # Largest single-timestep utilization in this state. It bounds the mean of
                 # ANY window, so it is the one reference that never clips — see
-                # `_SCALE_HORIZON`. Computed once here, not per slider tick.
+                # `_SCALE_HORIZON`. Computed once here, not per redraw.
                 umax = isempty(U) ? 0.0 : Float64(maximum(U)),
             )
         end
@@ -767,7 +771,7 @@ function _plot_line_utils_interactive(
     chev_wid = Float32(_FLOW_CHEV_ASPECT * chev_len)
     # Two segments (4 points) per line: each arm runs from its outer end to the apex. A
     # line with no net flow collapses to its midpoint, which draws nothing — that keeps the
-    # buffer length fixed instead of resizing it per slider tick.
+    # buffer length fixed instead of resizing it per redraw.
     flow_pts = Observable([flow_mid[cld(k, 4)] for k in 1:4*length(segment_lines)])
     if show_flow_direction
         linesegments!(ax, flow_pts; color = _FLOW_DIR_COLOR, linewidth = 1.2)
@@ -822,8 +826,10 @@ function _plot_line_utils_interactive(
     ))
     thr_slider = thr_grid.sliders[1]
 
-    islider = IntervalSlider(fig[2, 1], range = init.times,
-                             startvalues = (first(init.times), last(init.times)))
+    time_row, time_window = _time_range_row(fig, init.times;
+                                            startvalues = (first(init.times),
+                                                           last(init.times)))
+    fig[2, 1] = time_row
     info = Label(fig[3, 1], ""; tellwidth = false, fontsize = 13)
 
     # Size scale for the node key. A Makie `Legend` label cannot be rebound, and the
@@ -964,7 +970,7 @@ function _plot_line_utils_interactive(
 
     function redraw!()
         st = state_data(state_menu.selection[])
-        lo, hi = islider.interval[]
+        lo, hi = time_window[]
         cols = searchsortedfirst(st.times, lo):searchsortedlast(st.times, hi)
         isempty(cols) && return nothing
         nhours = length(cols)
@@ -975,7 +981,7 @@ function _plot_line_utils_interactive(
 
         # Reduce into the per-state buffer. `count(…; dims = 2)` yields `Int` and
         # `mean(…; dims = 2)` `Float32`, so the previous branch join made `vals` a `Union`
-        # (and allocated a matrix plus a `vec` per slider pixel). The loop nests time
+        # (and allocated a matrix plus a `vec` per redraw). The loop nests time
         # outermost so the column-major matrix is walked in memory order.
         vals = st.vals
         U = st.U
@@ -1164,7 +1170,7 @@ function _plot_line_utils_interactive(
     on(_ -> redraw!(), mode_menu.selection)
     on(_ -> redraw!(), scale_menu.selection)
     on(_ -> redraw!(), thr_slider.value)
-    on(_ -> redraw!(), islider.interval)
+    on(_ -> redraw!(), time_window)
 
     redraw!()
     return fig

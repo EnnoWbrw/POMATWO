@@ -120,7 +120,7 @@ Zonal load over `time_values`, summed from `params.nodal_load` in one pass per z
 
 Replaces the per-element `_load_at(params, zone, t)`, which redid the `nodes_in_zone`
 lookup and a `haskey`-guarded generator for every single (zone, hour) — and was called
-again on every slider tick from the reference-day plot.
+again on every redraw of the reference-day plot.
 """
 function _zone_load_series(params, time_values; scalefactor = 1.0)
     out = Dict{String,Vector{Float64}}()

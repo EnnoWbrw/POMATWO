@@ -40,7 +40,7 @@ Anything that is neither a `Bool` nor a `NamedTuple`, and any unknown `NamedTupl
 
 Two interactions worth knowing:
 
-- `projection_note = true` writes the axis subtitle. In `plot_line_utils_interactive` the subtitle is also the live colour/width key, which is rewritten on every slider move — so the CRS note is overwritten there almost immediately. Put the CRS in the caption for that plot.
+- `projection_note = true` writes the axis subtitle. In `plot_line_utils_interactive` the subtitle is also the live colour/width key, which is rewritten on every redraw — so the CRS note is overwritten there almost immediately. Put the CRS in the caption for that plot.
 - `plot_capacity_network` and `plot_shift_map_interactive` use the subtitle for their no-coordinates note, but only on the fallback layout, which is never styled anyway.
 
 ## Interactive Plots
@@ -155,13 +155,13 @@ Interactive geographical map of transmission line utilization — the interactiv
 
 **Interactivity**
 - *Market state menu*: one entry per pipeline stage that wrote a `LINEFLOW` table under `results_path` (`TwoDayAhead`, `DayAhead`, `ProsumerOptimizationState`, `Redispatch`, whichever are present). Every stage writes one, including a zonal day-ahead, whose nodal flows are reported from the cleared dispatch. Result directories written before per-stage result prefixes existed offer a single composite entry. States are loaded lazily and cached on first selection.
-- *Time window slider*: an `IntervalSlider` over the model horizon; drag the two handles together for a single timestep. It starts on the full horizon, so the initial view reproduces `create_lineplot`.
+- *Time window field*: a text field the window is typed into rather than dragged — a slider cannot address a single hour of a year. `12` selects one timestep, `12-40` an inclusive window (`12:40`, `12..40`, `12 40` and `12,40` are equivalent), and an empty field or `all` the full horizon. Reversed bounds are sorted, and the entry is snapped onto the timesteps the selected state actually has and written back in canonical form, so the box always shows what the figure is drawing. An entry that cannot be parsed, or that names no existing timestep, turns the box red and leaves the current window in place. It starts on the full horizon, so the initial view reproduces `create_lineplot`.
 - *Aggregation menu*:
     - `"average utilization"`: mean utilization over the window.
     - `"hours ≥ threshold"`: count of timesteps in the window at or above the threshold, colorbar 0 to the window length. This is the mode `create_lineplot` calls `type = "max"`.
     - `"absolute power flow sum"`: total Σ|flow| per line over the window, in MWh, independent of line capacity. Colour scale is always adaptive to the current window — the colour-scale menu below has no effect on this mode, same as the counting mode.
 - *Colour scale menu* (average mode only): what the top of the colorbar means. Utilization above 1 is real rather than an artefact — a zonal day-ahead has no nodal variables, so its flows are reported from the cleared dispatch **without** applying line limits, and the overload is exactly what redispatch then resolves. Both settings floor the maximum at 1, so an uncongested state is not stretched to look loaded, and the active range is printed in the axis subtitle, which carries the live colour and width key.
-    - `"adaptive (this window)"` (default): 0 to max(1, peak of the current window). Best contrast within a single view, but the scale moves while the slider is dragged, so two windows cannot be compared by colour.
+    - `"adaptive (this window)"` (default): 0 to max(1, peak of the current window). Best contrast within a single view, but the scale follows the entered window, so two windows cannot be compared by colour.
     - `"fixed (whole horizon)"`: 0 to max(1, the largest single-timestep utilization in the state) — the only reference that can never clip, whatever window is selected. The cost is contrast, because a wide window averages peaks away: on a 168 h day-ahead run the worst single hour reaches 4.9 while the worst full-horizon average is 1.6, so the default view uses only the lower part of the colormap under this setting.
 
     The counting mode always scales to the window length, which is its natural ceiling; a horizon-wide count scale would render a short window as a single dark step.
@@ -244,7 +244,7 @@ The `hours ≥ threshold` aggregation always compares against `|value| / fmax`, 
 **Interactivity**
 - *Component menu*: `total` or an individual shift component (node markers).
 - *Line value / GSK / Aggregation / Colour scale menus and threshold slider*: the line layer.
-- *`IntervalSlider`*: a single timestep (handles together) or the sum over a window.
+- *Time window field*: `12` for a single timestep, `12-40` for the sum over an inclusive window, empty or `all` for the full horizon. Same parsing and snapping as `plot_line_utils_interactive`.
 
 **Returns**
 - `fig`: An interactive plot figure (`Makie.Figure`).
@@ -286,14 +286,14 @@ Single-timestep comparison of one zone's dispatch across the reference-day pipel
 - `scalefactor`: (default `1/1000`) Factor to scale power values (MW to GW).
 - `figsize`: (default `(1300, 850)`)
 - `px_per_unit`: (default `2`) Resolution multiplier of the PNG export.
-- `export_path`: (default `"refday_dispatch.png"`) Path prefilled into the export textbox.
+- `export_path`: (default `"refday_dispatch.png"`) Path prefilled into the export textbox, and the fallback when the box is left empty.
 - `export_figsize`: (default `(1000, 650)`) Size of the exported figure, which carries no controls and so needs less width than the interactive one.
 
 **Interactivity**
 - Dropdown menu to select the market zone.
 - Dropdown menu to select the market state drawn as bar 4.
-- Slider selecting the single timestep shown.
-- Export of the current view: a format menu, a path textbox and an `Export view` button. What is written is the **plotted area alone** — axis, legend and caption — rebuilt as a static figure, so the menus, textbox, button and slider (which live in the same `Figure`) stay out of the file. PNG is always available; `pdf` and `svg` appear in the menu only when `CairoMakie` is loaded in the session, since GLMakie cannot write vector formats. The result — the written path, or the error — is reported under the info label.
+- Text field for the timestep shown — typed, not dragged. Only a single timestep is accepted here; a range is refused, and so is a number the run has no results for.
+- Export of the current view: a format menu, a path textbox and an `Export view` button. The path is read from the box **as shown**, so a name typed straight before clicking `Export view` is used without having to press Enter first; clearing the box back to its placeholder falls back to `export_path`, and the extension always comes from the format menu. What is written is the **plotted area alone** — axis, legend and caption — rebuilt as a static figure, so the menus, text fields and button (which live in the same `Figure`) stay out of the file. PNG is always available; `pdf` and `svg` appear in the menu only when `CairoMakie` is loaded in the session, since GLMakie cannot write vector formats. The result — the written path, or the error — is reported under the info label.
 
 **Returns**
 - `fig`: An interactive plot figure (`Makie.Figure`).
