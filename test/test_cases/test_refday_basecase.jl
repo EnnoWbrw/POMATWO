@@ -102,6 +102,39 @@ function create_refday_prestep_nd()
     )
 end
 
+# Helper: a 5-node, two-zone example (DE = [n1,n2,n3], PL = [n4,n5]), frozen at the
+# day-ahead dispatch of a zonal flow-based source run. Conventional capacity
+# n1 70 (gas), n2 25 (oil), n3 200 (coal), n5 220 (coal), n4 none; wind at n2 (70 MW at
+# t1, 120 at t2) and n4 (120 both hours); n1's load drops 150 → 100 from t1 to t2. The
+# dispatch is consistent, `P = RES + CONV − LOAD` (export-positive) with `Σ_n P = 0` every
+# hour, so DE's net position is −110 at t1 and −10 at t2. Target t2 / reference t1 then
+# leaves DE a 50 MW gap after the RES pre-step, and none after RES + load.
+function create_refday_5node_nd()
+    nodes = ["n1", "n2", "n3", "n4", "n5"]; times = [1, 2]
+    z0() = Dict((n, t) => 0.0 for n in nodes, t in times)
+    wind = Dict(("n2",1)=>70.0, ("n2",2)=>120.0, ("n4",1)=>120.0, ("n4",2)=>120.0)
+    cap  = Dict("n1"=>70.0, "n2"=>25.0, "n3"=>200.0, "n4"=>0.0, "n5"=>220.0)
+    LOAD = Dict(("n1",1)=>150.0, ("n2",1)=>30.0, ("n3",1)=>200.0, ("n4",1)=>30.0, ("n5",1)=>200.0,
+                ("n1",2)=>100.0, ("n2",2)=>30.0, ("n3",2)=>200.0, ("n4",2)=>30.0, ("n5",2)=>200.0)
+    return (
+        nodes = nodes, times = times,
+        RES  = merge(z0(), wind),
+        CONV = merge(z0(), Dict(("n3",1)=>200.0, ("n5",1)=>220.0,
+                                ("n3",2)=>200.0, ("n5",2)=>120.0)),
+        STO  = Dict{Tuple{String,Int},Float64}(),
+        gmax_conv = Dict((n, t) => cap[n] for n in nodes, t in times),
+        gmax_res  = merge(z0(), wind),
+        gmax_sto_dis = Dict(n => 0.0 for n in nodes),
+        gmax_sto_chg = Dict(n => 0.0 for n in nodes),
+        P    = Dict(("n1",1)=>-150.0, ("n2",1)=>40.0, ("n3",1)=>0.0, ("n4",1)=>90.0, ("n5",1)=>20.0,
+                    ("n1",2)=>-100.0, ("n2",2)=>90.0, ("n3",2)=>0.0, ("n4",2)=>90.0, ("n5",2)=>-80.0),
+        LOAD = LOAD,
+        load_max = Dict(n => maximum(LOAD[(n, t)] for t in times) for n in nodes),
+        load_min = Dict(n => minimum(LOAD[(n, t)] for t in times) for n in nodes),
+        nodes_in_zone = Dict("DE" => ["n1", "n2", "n3"], "PL" => ["n4", "n5"]),
+    )
+end
+
 # Helper: lever state seeded from `nd` at a single reference hour. γ = 1.0 keeps the
 # load lever's UPWARD bound at the reference load, i.e. the pre-F4 behaviour, so tests
 # about the cascade itself are not entangled with the load cap (which F4's own tests pin).
@@ -1001,6 +1034,153 @@ function test_refday_basecase()
         end
     end
 
+    # ── ProRataShift ────────────────────────────────────────────────────────────
+    # All on the 5-node fixture, target t2 with reference t1. `params` is `nothing`
+    # throughout: the default fallback key (LoadPropRedist) reads nd alone.
+    nd5 = create_refday_5node_nd()
+    DE  = nd5.nodes_in_zone["DE"]
+    NP5(p, z) = sum(p[n] for n in nd5.nodes_in_zone[z])
+    # a node's conventional output after the shift: reference output + its conv deltas
+    # (and its balance deltas, which move conventional generation too)
+    conv5(df, n) = nd5.CONV[(n, 1)] +
+        sum(df.delta[(df.node .== n) .& in.(df.component, Ref(Set(["conv", "balance"])))];
+            init = 0.0)
+    comp5(df, n, c) = sum(df.delta[(df.node .== n) .& (df.component .== c)]; init = 0.0)
+    # the fixture with DE's target net position moved to `np` (via n1's target injection)
+    with_DE_target(np) = merge(nd5, (P = merge(nd5.P, Dict(("n1", 2) => np - 90.0)),))
+    prorata(nd_, m) = begin
+        tr = POMATWO.ShiftTraceCollector(); d = POMATWO.ShiftDiagCollector()
+        p = POMATWO.shift_single(nd_, nothing, 2, 1, m; trace = tr, diag = d)
+        (p, POMATWO.shift_trace_df(tr), POMATWO.shift_diag_df(d))
+    end
+
+    @testset "ProRataShift: 5-node example" begin
+        # RES pre-step only: +50 MW wind at n2 leaves DE a 50 MW gap, so the zone's
+        # conventional total rises 200 → 250 and every node runs at α = 250/295
+        p, df, dg = prorata(nd5, ProRataShift(prestep = [:res]))
+        α = 250 / 295
+        @test [conv5(df, n) for n in DE] ≈ α .* [70.0, 25.0, 200.0]
+        @test all(isapprox.([conv5(df, n) for n in DE], [59.32, 21.19, 169.49]; atol = 0.01))
+        @test isapprox(comp5(df, "n2", "RES_prestep"), 50.0; atol = 1e-9)
+        @test isapprox(NP5(p, "DE"), -10.0; atol = 1e-9)   # target reached, no fallback
+        @test isapprox(NP5(p, "PL"),  10.0; atol = 1e-9)   # PL: n5 alone, 220 → 120
+        @test isapprox(conv5(df, "n5"), 120.0; atol = 1e-9)
+        @test !("load" in df.component) && !("np_relax" in df.component)
+        @test !("load_prestep" in df.component)             # load stays the reference's
+        # diag: the pre-step heads the zone, then the re-dispatch, then the fallback
+        rows = filter(:zone => ==("DE"), dg)
+        @test rows.component == ["RES_prestep", "conv", "load"]
+        rc = rows[2, :]
+        @test isapprox(rc.want, 50.0; atol = 1e-9) && isapprox(rc.applied, 50.0; atol = 1e-9)
+        @test rc.reallocated == 0.0 && rc.beta_configured == 1.0
+        # the whole reshuffle counts, not just the gap: (59.32 + 21.19 + 30.51) / 50
+        @test isapprox(rc.beta_realised, (95α + 200(1 - α)) / 50; atol = 1e-9)
+        @test rc.beta_realised > 1
+        @test rows[3, :].want == 0.0 && rows[3, :].applied == 0.0
+
+        # RES and load pre-stepped: n1's load drop closes the gap on its own, yet the
+        # conventional pattern is still re-dispatched — to α = 200/295, where ShareShift
+        # would leave it untouched (it only moves generation to close a gap)
+        p, df, dg = prorata(nd5, ProRataShift(prestep = [:res, :load]))
+        α = 200 / 295
+        @test [conv5(df, n) for n in DE] ≈ α .* [70.0, 25.0, 200.0]
+        @test all(isapprox.([conv5(df, n) for n in DE], [47.46, 16.95, 135.59]; atol = 0.01))
+        @test isapprox(comp5(df, "n1", "load_prestep"), 50.0; atol = 1e-9)
+        @test isapprox(NP5(p, "DE"), -10.0; atol = 1e-9)
+        rc = only(filter(r -> r.zone == "DE" && r.component == "conv", dg))
+        @test isapprox(rc.want, 0.0; atol = 1e-9) && isapprox(rc.applied, 0.0; atol = 1e-9)
+        @test rc.beta_realised == 0.0                       # no gap to measure against
+        @test filter(:zone => ==("DE"), dg).component ==
+              ["RES_prestep", "load_prestep", "conv", "load"]
+    end
+
+    @testset "ProRataShift: one utilisation per zone, trace complete" begin
+        for pre in (Symbol[], [:res], [:res, :load]), np in (-300.0, -60.0, -10.0, 40.0, 150.0)
+            nd_ = with_DE_target(np)
+            p, df, _ = prorata(nd_, ProRataShift(prestep = pre))
+            # every DE node with capacity at the same share of it (clamped or not)
+            share = [conv5(df, n) / nd_.gmax_conv[(n, 2)] for n in DE]
+            @test all(isapprox(s, share[1]; atol = 1e-9) for s in share)
+            @test all(-1e-9 .<= share .<= 1 + 1e-9)
+            # every zone reaches its target — the fallback has room for all of these
+            @test isapprox(NP5(p, "DE"), np; atol = 1e-6)
+            @test isapprox(NP5(p, "PL"), 10.0; atol = 1e-6)
+            # p_new = P_ref + Σ nodal deltas, so the persisted identity holds
+            nodal = filter(:component => !=("np_relax"), df)
+            for n in nd_.nodes
+                @test isapprox(p[n], nd_.P[(n, 1)] + sum(nodal.delta[nodal.node .== n]; init = 0.0);
+                               atol = 1e-9)
+            end
+        end
+    end
+
+    @testset "ProRataShift: fallback when the zone's capacity runs out" begin
+        # DE target +190: after both pre-steps a 200 MW gap, 105 MW beyond the 295 MW
+        # conventional capacity → α = 1, and the target-hour load (100/30/200) is scaled
+        # down uniformly by the rest
+        nd_fb = with_DE_target(190.0)
+        p, df, dg = prorata(nd_fb, ProRataShift())
+        @test [conv5(df, n) for n in DE] ≈ [70.0, 25.0, 200.0]
+        @test [comp5(df, n, "load") for n in DE] ≈ 105 .* [100.0, 30.0, 200.0] ./ 330
+        @test isapprox(NP5(p, "DE"), 190.0; atol = 1e-9)
+        @test !("np_relax" in df.component)
+        rl = only(filter(r -> r.zone == "DE" && r.component == "load", dg))
+        @test isapprox(rl.want, 105.0; atol = 1e-9) && isapprox(rl.applied, 105.0; atol = 1e-9)
+        @test rl.beta_configured == 0.0                     # remainder-only lever
+        @test isapprox(rl.beta_realised, 105 / 200; atol = 1e-9)
+        # the hours the methodology calls potentially unrealistic are exactly these rows
+        @test rl.applied != 0.0
+        @test only(filter(r -> r.zone == "PL" && r.component == "load", dg)).applied == 0.0
+
+        # γ = 0.1, measured from the TARGET-day load the pre-step set (re-anchored): at
+        # most 10 / 3 / 20 MW of cut. Anchored at the reference load instead, n1 would have
+        # spent 50 MW of its 10 MW budget in the pre-step and be forced to ADD load here.
+        p, df, dg = prorata(nd_fb, ProRataShift(load_shift_share = 0.1))
+        @test [comp5(df, n, "load") for n in DE] ≈ [10.0, 3.0, 20.0]
+        @test isapprox(comp5(df, "DE", "np_relax"), 72.0; atol = 1e-9)
+        rl = only(filter(r -> r.zone == "DE" && r.component == "load", dg))
+        @test isapprox(rl.applied, 33.0; atol = 1e-9) && isapprox(rl.reallocated, 72.0; atol = 1e-9)
+
+        # fallback_order is honoured: 50 MW of storage at n3 goes first, load takes the rest
+        nd_sto = merge(nd_fb, (gmax_sto_dis = merge(nd_fb.gmax_sto_dis, Dict("n3" => 50.0)),))
+        p, df, dg = prorata(nd_sto, ProRataShift(fallback_order = [:sto, :load]))
+        @test isapprox(comp5(df, "n3", "sto"), 50.0; atol = 1e-9)
+        @test isapprox(sum(comp5(df, n, "load") for n in DE), 55.0; atol = 1e-9)
+        @test isapprox(NP5(p, "DE"), 190.0; atol = 1e-9)
+        @test filter(:zone => ==("DE"), dg).component ==
+              ["RES_prestep", "load_prestep", "conv", "sto", "load"]
+
+        # the other direction: DE target −400 needs less than no conventional output
+        # → α = 0, and the remaining 190 MW is added to the load
+        p, df, _ = prorata(with_DE_target(-400.0), ProRataShift())
+        @test all(isapprox(conv5(df, n), 0.0; atol = 1e-9) for n in DE)
+        @test [comp5(df, n, "load") for n in DE] ≈ -190 .* [100.0, 30.0, 200.0] ./ 330
+        @test isapprox(NP5(p, "DE"), -400.0; atol = 1e-9)
+    end
+
+    @testset "ProRataShift: the balance pass keeps each zone's α common" begin
+        # after the zonal step Σ p = 190 + 10 = 200; the pass lowers conventional output
+        # by 200 in proportion to it (70/25/200 in DE, 120 at n5), so every DE node
+        # lands on the same 215/415 of its capacity
+        p, df, _ = prorata(with_DE_target(190.0), ProRataShift(enforce_balance = true))
+        @test isapprox(sum(values(p)), 0.0; atol = 1e-6)
+        @test [conv5(df, n) for n in DE] ≈ (215 / 415) .* [70.0, 25.0, 200.0]
+        @test isapprox(conv5(df, "n5"), 120 * 215 / 415; atol = 1e-9)
+    end
+
+    @testset "ProRataShift: validate_shares" begin
+        @test POMATWO.validate_shares(ProRataShift()) === nothing
+        for pre in (Symbol[], :res, :load, [:res, :load])
+            @test POMATWO.validate_shares(ProRataShift(prestep = pre)) === nothing
+        end
+        @test_throws ErrorException POMATWO.validate_shares(ProRataShift(prestep = :bogus))
+        @test_throws ErrorException POMATWO.validate_shares(ProRataShift(fallback_order = [:conv]))
+        @test_throws ErrorException POMATWO.validate_shares(ProRataShift(fallback_order = [:RES]))
+        @test_throws ErrorException POMATWO.validate_shares(ProRataShift(load_shift_share = -0.1))
+        # finite on purpose: γ·load_max at a node without load would be Inf·0 = NaN
+        @test_throws ErrorException POMATWO.validate_shares(ProRataShift(load_shift_share = Inf))
+    end
+
     @testset "resolve_group_times: fallback flags and skip" begin
         sm = DataFrame(group = ["z1"], target_time = [3], matched_time = [1])
         fb = DataFrame(target_time = [3], matched_time = [2])
@@ -1117,6 +1297,42 @@ function test_refday_trace_e2e()
             end
             # no trace when disabled
             @test !haskey(build_refday_basecase(bc, params; collect_trace = false), :trace)
+
+            # ProRataShift through the same assembly: same reconstruction identity, its
+            # diag rows sum its trace, and every zone's net position is the target's less
+            # what was left relaxed
+            bc_pr = ReferenceDayBasecase(
+                source = joinpath(tmpdir, "forecast"), source_type = "2DA",
+                matching = bc.matching, shift = ProRataShift())
+            base_pr = build_refday_basecase(bc_pr, params)
+            trace_pr = base_pr[:trace]
+            reft_pr = innerjoin(trace_pr[:REFDAY_GROUPS], trace_pr[:REFDAY_MATCH]; on = :group)
+            refmap_pr = Dict((r.node, r.target_time) => r.matched_time for r in eachrow(reft_pr))
+            shifts_pr = trace_pr[:REFDAY_SHIFT]
+            for n in params.sets.N, t in 1:4
+                d = sum(shifts_pr.delta[(shifts_pr.node .== n) .& (shifts_pr.Time .== t)];
+                        init = 0.0)
+                @test isapprox(base_pr[:netinput_ac][n, t], P_src[(n, refmap_pr[(n, t)])] - d;
+                               atol = 1e-6)
+            end
+            diag_pr = trace_pr[:REFDAY_DIAG]
+            @test count(==("conv"), diag_pr.component) == length(params.sets.Z) * 4
+            @test all(r.beta_configured == 1.0 for r in eachrow(diag_pr) if r.component == "conv")
+            for r in eachrow(diag_pr)
+                znodes = Set(params.nodes_in_zone[r.zone])
+                applied = sum(shifts_pr.delta[(shifts_pr.Time .== r.Time) .&
+                                              (shifts_pr.component .== r.component) .&
+                                              in.(shifts_pr.node, Ref(znodes))]; init = 0.0)
+                @test isapprox(r.applied, applied; atol = 1e-6)
+            end
+            for z in params.sets.Z, t in 1:4
+                zn = params.nodes_in_zone[z]
+                relax = sum(shifts_pr.delta[(shifts_pr.node .== z) .& (shifts_pr.Time .== t) .&
+                                            (shifts_pr.component .== "np_relax")]; init = 0.0)
+                # export-positive NP = −Σ import-positive ACINJECTION
+                @test isapprox(-sum(base_pr[:netinput_ac][n, t] for n in zn) + relax,
+                               -sum(P_src[(n, t)] for n in zn); atol = 1e-6)
+            end
 
             # read-back through DataFiles
             out = DataFiles(scen)

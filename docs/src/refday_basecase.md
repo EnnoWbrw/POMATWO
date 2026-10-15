@@ -98,7 +98,8 @@ indistinguishable.
 
 ## Stage 2 — Shifting the reference day
 
-Implemented in `src/utils/refday_basecase.jl`, configured by [`ShareShift`](@ref). The
+Implemented in `src/utils/refday_basecase.jl`, configured by [`ShareShift`](@ref) (the
+alternative [`ProRataShift`](@ref) is described at the end of this stage). The
 whole pipeline works **export-positive** (feed-in convention: nodal injection
 `P = gen − load − charge`, positive = the node feeds the grid). The persisted
 `NETINPUT`/`ACINJECTION` result tables use the opposite, import-positive model convention;
@@ -293,3 +294,51 @@ are targets, not outcomes, which is exactly what `REFDAY_DIAG` quantifies
 (`beta_realised` vs `beta_configured`, and `reallocated` for the spatial split). Storage,
 finally, acts as a bidirectional shift lever (installed power assumed available every
 timestep) in addition to being netted in the baseline.
+
+### Alternative: pro-rata re-dispatch (`ProRataShift`)
+
+[`ProRataShift`](@ref) replaces the ``β`` cascade with the D2CF step as the CWE flow-based
+methodology describes it: once renewables and load are set to the delivery-day forecast,
+the only free parameter is conventional generation. Its zonal total is imposed by the
+target net position and distributed so that every unit runs at the same share of its
+maximum output. Per zone ``z`` and target hour ``t``:
+
+1. **Pre-steps** (`prestep`, default `[:res, :load]`) hard-set renewables and load as in
+   step 2 above. Unlike `ShareShift`, a pre-stepped load is **not** frozen — the fallback
+   below may scale it — and its ``γ`` budget is re-anchored to the target-day load.
+2. **Required conventional total.** ``F_{req}(z) = Σ_n CONV(n) + D(z)``, with ``D(z)`` the
+   remaining net-position gap and ``CONV(n)`` the reference hour's nodal conventional
+   output.
+3. **Pro-rata re-dispatch.** ``α = \mathrm{clamp}(F_{req} / Σ_n C(n),\ 0,\ 1)`` with
+   ``C(n)`` the node's availability-weighted conventional capacity at ``t``; every node's
+   conventional generation is set to ``α · C(n)`` and the change is traced as `conv`. A
+   node is one aggregate — its plants are not addressed individually, which with a common
+   ``α`` gives the same nodal injection as per-plant pro-rata, except that no plant (e.g.
+   nuclear) can be excluded.
+4. **Fallback.** When ``α`` clamps — the zone's conventional capacity cannot deliver
+   ``F_{req}``, typically because the reference day's renewable level differs strongly
+   from the target day's — the remainder ``F_{req} − α Σ_n C(n)`` goes down
+   `fallback_order` (default `[:load]`, spread by `fallback_key`, default
+   [`LoadPropRedist`](@ref): the zone's target-hour load is scaled uniformly). Whatever the
+   fallback cannot absorb is left as `np_relax`.
+5. **Global balance** (opt-in, `enforce_balance`) as in step 5 above. Its conventional
+   weights are proportional to ``C(n)`` while a zone's nodes share one ``α``, so it moves
+   each zone's ``α`` uniformly rather than breaking it.
+
+The difference to `ShareShift` is that this is an **absolute re-dispatch, not an
+increment**: the reference day's conventional pattern is discarded, and it is
+re-dispatched even when the gap is zero. In `REFDAY_DIAG` the `conv` row has
+`want = D`, `beta_configured = 1` and `reallocated = 0`; its `beta_realised` counts the
+whole re-dispatch, reshuffling between nodes included, so it can exceed 1 without any
+fallback. Fallback rows carry `beta_configured = 0`, and a fallback row with
+`applied ≠ 0` marks an hour whose imposed net position could only be reached by distorting
+load (or storage) — the case the methodology warns may be unrealistic.
+
+!!! warning "User decisions in `ProRataShift`"
+    | Decision | Default | Risk |
+    |---|---|---|
+    | `prestep` | `[:res, :load]` | With both pre-steps, renewables and load are the target day's and conventional generation is re-dispatched from scratch, so the reference day contributes little beyond its storage dispatch: the matching of Stage 1 then barely shapes the basecase. |
+    | `fallback_order` | `[:load]` | `:sto` and `:load` only. The fallback is where the imposed net position overrides physics; count the hours it fires (`REFDAY_DIAG`). |
+    | `fallback_key` | `LoadPropRedist()` | Scales load, not residual load (``load − RES``, whose weights turn negative where renewables exceed load). |
+    | `load_shift_share` | `1.0` | Measured from the target-day load when `:load` is pre-stepped. Must be finite — ``γ · load_{max}`` at a node without load would be `Inf · 0 = NaN`. |
+    | minimum stable generation | not modelled | A node's conventional floor is zero; ``α`` can drive every unit of a zone to 0. |

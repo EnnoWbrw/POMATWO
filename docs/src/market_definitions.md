@@ -100,7 +100,8 @@ Flow-based market coupling needs a *basecase* — the reference nodal injections
 which the zonal PTDF and the Remaining Available Margins (RAM) are derived. POMATWO
 either solves it (`OptimizationBasecase`) or constructs it from a matched reference day
 (`ReferenceDayBasecase`), warping the reference injections toward each zone's target net
-position with a `ShiftMethod` (`ShareShift`) and a redistribution key (`RedistKey`).
+position with a `ShiftMethod` (`ShareShift` or `ProRataShift`) and a redistribution key
+(`RedistKey`).
 The reference-day methodology, its user decisions, and a worked example are documented in
 [FBMC Reference-Day Basecase](refday_basecase.md).
 
@@ -115,6 +116,7 @@ ZonalMatchScope
 AreaMatchScope
 ShiftMethod
 ShareShift
+ProRataShift
 RedistKey
 GSKRedist
 RefPropRedist

@@ -38,7 +38,8 @@
     ShiftMethod
 
 Abstract supertype for strategies that shift a reference day's nodal injection
-toward a target day. Concrete: [`ShareShift`](@ref).
+toward a target day. Concrete: [`ShareShift`](@ref) (incremental, β-share cascade) and
+[`ProRataShift`](@ref) (absolute pro-rata re-dispatch of nodal conventional generation).
 """
 abstract type ShiftMethod end
 
@@ -160,8 +161,8 @@ Base.@kwdef struct ShareShift <: ShiftMethod
     load_shift_share::Float64 = 0.2
 end
 
-"The components hard-set by the pre-step, normalized to a deduplicated vector."
-prestep_components(m::ShareShift) =
+"The components hard-set by the pre-step, normalized to a deduplicated vector (any `ShiftMethod` with a `prestep` field)."
+prestep_components(m::ShiftMethod) =
     m.prestep isa Symbol ? [m.prestep] : unique(m.prestep)
 
 """
@@ -200,6 +201,90 @@ function validate_shares(m::ShareShift)
         error("load_shift_share must be ≥ 0 (got $(m.load_shift_share))")
     return nothing
 end
+
+"""
+    ProRataShift <: ShiftMethod
+
+TSO-style re-dispatch of the reference day, after the D2CF description in the CWE
+flow-based methodology: once the pre-steps have fixed renewables and load, the only free
+parameter is conventional generation.
+
+Everything works **per node**, like every other lever in this file: a node's conventional
+generation is one aggregate — its output `CONV(n)` and its availability-weighted capacity
+`C(n) = gmax_conv(n, t)` — and no individual plant is addressed. Per zone, the
+conventional total is whatever the target net position requires,
+
+    F_req(z) = Σ_n CONV(n) + D(z),        D(z) = NP_target(z) − NP_current(z),
+
+and it is spread so that every node runs its conventional generation at the SAME share
+`α` of its capacity (a node whose capacity is fully out at `t` drops out):
+
+    α = clamp(F_req / Σ_n C(n), 0, 1),     CONV_new(n) = α · C(n).
+
+Because the share is common, this yields the same nodal injections as spreading `α` over
+the individual plants would; working on nodal aggregates only means that no plant (e.g.
+nuclear) can be kept out of the re-dispatch.
+
+Unlike [`ShareShift`](@ref) this is an **absolute re-dispatch, not an increment**: the
+reference day's conventional pattern is discarded, while renewables and load keep theirs
+(or the target day's, where pre-stepped). All nodes share one `α` and therefore saturate
+together, so this step needs no waterfilling.
+
+When `α` clamps — the zone's conventional capacity cannot reach `F_req`, typically
+because the reference day's renewable level differs strongly from the target day's — the
+remainder `F_req − α·ΣC` goes down `fallback_order`. By default that is the load lever
+spread by `fallback_key = LoadPropRedist()`, i.e. the zone's target-hour load is scaled
+uniformly (the methodology's "scaling on residual load"). What the fallback cannot absorb
+is left relaxed toward the reference (`"np_relax"`). Fallback rows with `applied ≠ 0` in
+`REFDAY_DIAG` mark exactly the hours the methodology warns may carry an unrealistic
+imposed net position.
+
+# Fields
+- `prestep = [:res, :load]`: components hard-set to the target hour first (as in
+  `ShareShift`). Unlike `ShareShift`, a pre-stepped load is **not frozen**: the fallback
+  scales the target-day load, and the load lever's γ budget is re-anchored to it.
+- `fallback_order::Vector{Symbol} = [:load]`: levers for the unreachable remainder,
+  any of `:sto`, `:load`.
+- `fallback_key::RedistKey = LoadPropRedist()`: nodal key of the fallback levers.
+- `enforce_balance::Bool = false`: optional global balance pass
+  (`_enforce_global_balance!`). Its conventional weights — remaining headroom when
+  raising, current output when lowering — are both proportional to `C(n)` while a zone's
+  nodes share one `α`, so it moves each zone's `α` uniformly instead of breaking it (it
+  does change the zones' net positions, which is its purpose).
+- `load_shift_share::Float64 = 1.0`: γ, the cap on the load lever (see `_load_bounds`),
+  measured from the target-day load when `:load` is pre-stepped. Must be finite.
+
+Minimum stable generation is not modelled: a node's conventional floor is zero, as for
+every conventional lever in this file.
+"""
+Base.@kwdef struct ProRataShift <: ShiftMethod
+    prestep::Union{Symbol,Vector{Symbol}} = [:res, :load]
+    fallback_order::Vector{Symbol} = [:load]
+    fallback_key::RedistKey = LoadPropRedist()
+    enforce_balance::Bool = false
+    load_shift_share::Float64 = 1.0
+end
+
+"Error on an unsupported pre-step or fallback lever, or a non-finite / negative load-lever share."
+function validate_shares(m::ProRataShift)
+    pre = prestep_components(m)
+    bad = setdiff(pre, first.(PRESTEP_COMPONENTS))
+    isempty(bad) ||
+        error("ProRataShift: unsupported prestep component(s) $bad (allowed: :res, :load)")
+    badf = setdiff(m.fallback_order, [:sto, :load])
+    isempty(badf) ||
+        error("ProRataShift: unsupported fallback lever(s) $badf (allowed: :sto, :load)")
+    # finite on purpose: _load_bounds multiplies γ by load_max/load_min, and Inf·0 = NaN
+    # at nodes without load
+    (isfinite(m.load_shift_share) && m.load_shift_share >= 0.0) ||
+        error("ProRataShift: load_shift_share must be finite and ≥ 0 (got $(m.load_shift_share))")
+    return nothing
+end
+
+"The redistribution key whose static GSK `build_refday_basecase` precomputes once (`nothing`: none)."
+_redist_key(::ShiftMethod)   = nothing
+_redist_key(m::ShareShift)   = m.redist
+_redist_key(m::ProRataShift) = m.fallback_key
 
 # ---------------------------------------------------------------------------
 # Configuration structs (complete the BasecaseMethod family from
@@ -268,7 +353,8 @@ day's renewable infeed and zonal net positions.
   injections too, see `report_nodal_flows!`); `"2DA"` = TwoDayAhead basecase tables;
   `"REDISP"` = redispatch results. See `_source_state`.
 - `matching::MatchingConfig`: reference-day matching options.
-- `shift::ShiftMethod`: how the reference day is shifted toward the target day.
+- `shift::ShiftMethod`: how the reference day is shifted toward the target day —
+  [`ShareShift`](@ref) or [`ProRataShift`](@ref).
 
 # Example
 ```julia
@@ -663,10 +749,11 @@ are in the basecase under construction, seeded from that node's reference hour.
 
 `load0` holds the load the γ budget is measured against, which is what lets the load
 lever's cap apply to the CUMULATIVE deviation — the gap cascade and the global balance
-pass share one budget (`_load_bounds`). It is the reference hour's load and nothing
-writes it afterwards — a `:load` pre-step needs no re-anchoring, because it freezes the
-load lever outright (`prestep_levers`), leaving neither the cascade nor the balance pass
-a way to spend the budget at all.
+pass share one budget (`_load_bounds`). It is the reference hour's load. Under
+[`ShareShift`](@ref) nothing writes it afterwards — a `:load` pre-step needs no
+re-anchoring there, because it freezes the load lever outright (`prestep_levers`). Under
+[`ProRataShift`](@ref) the load lever stays live after its pre-step (the fallback scales
+the target-day load), so `_apply_presteps!` re-anchors `load0` to the target-day load.
 """
 struct ShiftLevers
     res::Dict{String,Float64}
@@ -699,11 +786,12 @@ global balance pass is confined to
 
     δ ∈ [ −γ·load_max[n] ,  min(γ·load_min[n], load0[n]) ]
 
-with γ = `ShareShift.load_shift_share`, `load_max`/`load_min` the node's extreme
+with γ = the shift method's `load_shift_share`, `load_max`/`load_min` the node's extreme
 loads over the forecast horizon and `load0[n]` the reference hour's load, the anchor
 the budget is measured from (so load can never be driven negative). The part already
 spent is `load0[n] - load[n]`, which is why this returns the *remaining* room rather
-than the total bound. Never reached when `:load` is pre-stepped — the lever is frozen.
+than the total bound. Under `ShareShift` never reached when `:load` is pre-stepped (the
+lever is frozen); under `ProRataShift` the anchor is then the target-day load.
 """
 function _load_bounds(lev::ShiftLevers, nd, n)
     γ = lev.load_shift_share
@@ -930,6 +1018,65 @@ shift_diag_df(d::ShiftDiagCollector) = DataFrame(
 # ---------------------------------------------------------------------------
 
 """
+    _apply_presteps!(p_new, lev, nd, t_tgt, pre, trace; reanchor_load = false)
+        -> Vector{Pair{String,Dict{String,Float64}}}
+
+Hard-set the pre-step components `pre` (`:res`, `:load`) to the target hour's nodal value,
+updating the injection `p_new` and the lever state `lev` and tracing `"RES_prestep"` /
+`"load_prestep"`. Returns the per-node deltas (trace label => deltas, in the order they
+ran) for the per-zone diagnostics, see `_record_prestep_diag!`.
+
+With `reanchor_load = true` the load lever's γ budget is re-anchored to the target-day
+load (`lev.load0`), for methods that keep the load lever live after its pre-step
+([`ProRataShift`](@ref)). [`ShareShift`](@ref) freezes the lever instead and leaves the
+anchor at the reference hour (see `ShiftLevers`).
+"""
+function _apply_presteps!(p_new, lev::ShiftLevers, nd, t_tgt, pre, trace;
+                          reanchor_load::Bool = false)
+    presteps = Pair{String,Dict{String,Float64}}[]
+    if :res in pre
+        δres = Dict{String,Float64}()
+        for n in nd.nodes
+            tgt = get(nd.RES, (n, t_tgt), 0.0)
+            δres[n] = tgt - lev.res[n]
+            _record!(trace, t_tgt, n, "RES_prestep", δres[n])
+            p_new[n] += δres[n]
+            lev.res[n] = tgt
+        end
+        push!(presteps, "RES_prestep" => δres)
+    end
+    if :load in pre
+        δload = Dict{String,Float64}()
+        for n in nd.nodes
+            tgt = get(nd.LOAD, (n, t_tgt), 0.0)
+            δload[n] = lev.load[n] - tgt   # export-positive: load down ⇒ injection up
+            _record!(trace, t_tgt, n, "load_prestep", δload[n])
+            p_new[n] += δload[n]
+            lev.load[n] = tgt
+            reanchor_load && (lev.load0[n] = tgt)
+        end
+        push!(presteps, "load_prestep" => δload)
+    end
+    return presteps
+end
+
+"""
+Head zone `z`'s `REFDAY_DIAG` rows with one row per pre-step: `want == applied` (a
+hard-set is unconditional), no key hence no reallocation, no configured share, and
+`beta_realised` against the same `|D|` as the levers below — it reads as the multiple of
+the remaining gap the pre-step moved. See [`ShiftDiagCollector`](@ref).
+"""
+function _record_prestep_diag!(diag, t_tgt, z, znodes, presteps, D)
+    for (label, δ) in presteps
+        tot = sum(δ[n] for n in znodes; init = 0.0)
+        absmoved = sum(abs(δ[n]) for n in znodes; init = 0.0)
+        _record_diag!(diag, t_tgt, string(z), label, tot, tot, 0.0, 0.0,
+                      abs(D) < 1e-12 ? 0.0 : absmoved / abs(D))
+    end
+    return nothing
+end
+
+"""
     shift_single(nd, params, t_tgt, t_ref, method; trace = nothing, diag = nothing)
         -> Dict(node => net_injection)
 
@@ -959,7 +1106,7 @@ injection delta (components `"RES_prestep"`, `"load_prestep"`, `"RES"`, `"conv"`
 pre-step hard-set, how much of each lever's share was really absorbed, and how much of
 its key-proportional split was clipped away.
 """
-shift_single(nd, params, t_tgt, t_ref::Integer, method::ShareShift;
+shift_single(nd, params, t_tgt, t_ref::Integer, method::ShiftMethod;
              gsk = nothing, trace = nothing, diag = nothing) =
     shift_single(nd, params, t_tgt, Dict(n => Int(t_ref) for n in nd.nodes), method;
                  gsk = gsk, trace = trace, diag = diag)
@@ -977,29 +1124,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
     # for the rest of the construction — see `frozen` below.
     pre      = prestep_components(method)
     frozen   = prestep_levers(method)
-    presteps = Pair{String,Dict{String,Float64}}[]   # trace label => per-node delta
-    if :res in pre
-        δres = Dict{String,Float64}()
-        for n in nodes
-            tgt = get(nd.RES, (n, t_tgt), 0.0)
-            δres[n] = tgt - lev.res[n]
-            _record!(trace, t_tgt, n, "RES_prestep", δres[n])
-            p_new[n] += δres[n]
-            lev.res[n] = tgt
-        end
-        push!(presteps, "RES_prestep" => δres)
-    end
-    if :load in pre
-        δload = Dict{String,Float64}()
-        for n in nodes
-            tgt = get(nd.LOAD, (n, t_tgt), 0.0)
-            δload[n] = lev.load[n] - tgt   # export-positive: load down ⇒ injection up
-            _record!(trace, t_tgt, n, "load_prestep", δload[n])
-            p_new[n] += δload[n]
-            lev.load[n] = tgt
-        end
-        push!(presteps, "load_prestep" => δload)
-    end
+    presteps = _apply_presteps!(p_new, lev, nd, t_tgt, pre, trace)   # label => per-node delta
 
     # ---- net-position gap apportionment ----
     zones = method.resolution == :nodal ? [(n, [n]) for n in nodes] :
@@ -1018,12 +1143,7 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
         # reallocation, no configured share, and `beta_realised` against the same |D| as
         # the levers below — it reads as the multiple of the remaining gap the pre-step
         # moved. The per-node detail is in REFDAY_SHIFT.
-        for (label, δ) in presteps
-            tot = sum(δ[n] for n in znodes; init = 0.0)
-            absmoved = sum(abs(δ[n]) for n in znodes; init = 0.0)
-            _record_diag!(diag, t_tgt, string(z), label, tot, tot, 0.0, 0.0,
-                          abs(D) < 1e-12 ? 0.0 : absmoved / abs(D))
-        end
+        _record_prestep_diag!(diag, t_tgt, z, znodes, presteps, D)
 
         carried = 0.0
         for comp in order
@@ -1075,6 +1195,95 @@ function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::Shar
     # global balance: force Σ_n p_new = 0 (production = consumption) via conventional gen
     method.enforce_balance &&
         _enforce_global_balance!(p_new, nd, t_tgt, lev, trace; frozen = frozen)
+    return p_new
+end
+
+"""
+    shift_single(nd, params, t_tgt, ref_of_node, method::ProRataShift; gsk, trace, diag)
+        -> Dict(node => net_injection)
+
+[`ProRataShift`](@ref): pre-steps, then per zone an absolute re-dispatch of every node's
+conventional generation to one common utilisation `α` of its capacity `gmax_conv(n, t)`,
+then the fallback levers for whatever `α ∈ [0, 1]` cannot deliver. The gap is measured per
+zone; the re-dispatch and the fallback act on nodes.
+
+Traced components: `"RES_prestep"` / `"load_prestep"`, `"conv"` (the re-dispatch delta
+`α·C(n) − F_ref(n)`, so the `ACINJECTION = ACINJECTION_REF − Σ deltas` identity holds
+unchanged), the fallback levers (`"load"`, `"sto"`), `"np_relax"` and, if enabled,
+`"balance"`. In `REFDAY_DIAG` the `conv` row has `want = D`, `beta_configured = 1` and
+`reallocated = 0` (a common `α` never departs from the capacity key); its
+`beta_realised` counts the whole re-dispatch, reshuffling between nodes included, so it
+can exceed 1 without any fallback. Fallback rows carry `beta_configured = 0` — they only
+ever receive the clamped remainder.
+"""
+function shift_single(nd, params, t_tgt, ref_of_node::AbstractDict, method::ProRataShift;
+                      gsk = nothing, trace = nothing, diag = nothing)
+    nodes = nd.nodes
+    p_new = Dict(n => get(nd.P, (n, ref_of_node[n]), 0.0) for n in nodes)
+    lev   = ShiftLevers(nd, ref_of_node, method.load_shift_share)
+
+    # pre-steps as in ShareShift, but nothing is frozen: the fallback may scale the
+    # target-day load, so its γ budget is measured from that load
+    presteps = _apply_presteps!(p_new, lev, nd, t_tgt, prestep_components(method), trace;
+                                reanchor_load = true)
+
+    for (z, znodes) in nd.nodes_in_zone
+        NP_tgt = sum(get(nd.P, (n, t_tgt), 0.0) for n in znodes)
+        D = NP_tgt - sum(p_new[n] for n in znodes)
+        _record_prestep_diag!(diag, t_tgt, z, znodes, presteps, D)
+
+        # ---- 1. total conventional output imposed by the target net position ----
+        # nodal aggregates: current output (reference hour, untouched by the pre-steps)
+        # and availability-weighted capacity at the target hour
+        F_ref = Dict(n => lev.conv[n] for n in znodes)
+        C     = Dict(n => get(nd.gmax_conv, (n, t_tgt), 0.0) for n in znodes)
+        F_req = sum(values(F_ref)) + D
+        Csum  = sum(values(C))
+        α     = Csum > 0 ? clamp(F_req / Csum, 0.0, 1.0) : 0.0
+
+        # ---- 2. absolute re-dispatch: every node's conventional generation at α · C(n) ----
+        tot = 0.0; absmoved = 0.0
+        for n in znodes
+            δ = α * C[n] - F_ref[n]
+            _record!(trace, t_tgt, n, "conv", δ)
+            p_new[n]    += δ
+            lev.conv[n] += δ
+            tot += δ; absmoved += abs(δ)
+        end
+        _record_diag!(diag, t_tgt, string(z), "conv", D, tot, 0.0, 1.0,
+                      abs(D) < 1e-12 ? 0.0 : absmoved / abs(D))
+
+        # ---- 3. fallback: what the zone's conventional capacity cannot deliver (α clamped) ----
+        rem = F_req - α * Csum          # export-positive injection still missing
+        for comp in method.fallback_order
+            if abs(rem) < 1e-12
+                _record_diag!(diag, t_tgt, string(z), string(comp), 0.0, 0.0, 0.0, 0.0, 0.0)
+                continue
+            end
+            w = _redist_weights(method.fallback_key, nd, params, znodes, t_tgt, ref_of_node;
+                                gsk = gsk, comp = comp)
+            lo = Dict{String,Float64}(); hi = Dict{String,Float64}()
+            for n in znodes
+                lo[n], hi[n] = _comp_bounds(comp, n, t_tgt, nd, lev)
+            end
+            applied, rem_next, reallocated = _waterfill(rem, znodes, w, lo, hi)
+            ftot = 0.0; fabs = 0.0
+            for n in znodes
+                _record!(trace, t_tgt, n, string(comp), applied[n])
+                p_new[n] += applied[n]
+                ftot += applied[n]; fabs += abs(applied[n])
+                comp == :sto  && (lev.sto[n]  += applied[n])
+                comp == :load && (lev.load[n] -= applied[n])   # +injection ⇒ load down
+            end
+            _record_diag!(diag, t_tgt, string(z), string(comp), rem, ftot, reallocated,
+                          0.0, abs(D) < 1e-12 ? 0.0 : fabs / abs(D))
+            rem = rem_next
+        end
+        _record!(trace, t_tgt, string(z), "np_relax", NP_tgt - sum(p_new[n] for n in znodes))
+    end
+
+    # optional; its conventional weights are ∝ C(n) within a zone, so each zone keeps one α
+    method.enforce_balance && _enforce_global_balance!(p_new, nd, t_tgt, lev, trace)
     return p_new
 end
 
@@ -1239,9 +1448,9 @@ function build_refday_basecase(results::DataFiles, matches, method::ShiftMethod;
 
     # Precompute a static GSK for the redistribution key; time-dependent
     # strategies bypass it in _key_weights (per-timestep load weights instead).
-    gsk = (method isa ShareShift && method.redist isa GSKRedist &&
-           !is_time_dependent(method.redist.strategy)) ?
-          build_gsk(params, method.redist.strategy; normalize_empty = :flat) : nothing
+    key = _redist_key(method)
+    gsk = (key isa GSKRedist && !is_time_dependent(key.strategy)) ?
+          build_gsk(params, key.strategy; normalize_empty = :flat) : nothing
 
     collector = collect_trace ? ShiftTraceCollector() : nothing
     diagnostics = collect_trace ? ShiftDiagCollector() : nothing
