@@ -11,6 +11,10 @@
 # (`plot_line_utils_interactive`, `plot_shift_map_interactive`) zoom and pan, so a static
 # `(positions, labels)` tuple or a scale bar drawn once at build time would be silently
 # wrong the moment the user scrolls.
+#
+# The flip side: a decoration positioned FROM the limits must never feed back INTO them.
+# Every plot drawn here therefore carries `xautolimits = false, yautolimits = false` — see
+# `_DECORATION_ATTRS` for what happens without it.
 
 "Latitude beyond which Web Mercator diverges; the value the tile grid is cut at."
 const _MERC_LAT_LIMIT = 85.05112878
@@ -154,6 +158,29 @@ end
 const _SCALEBAR_TARGET_FRAC = 0.25
 
 """
+Plot attributes shared by every scale-bar and north-arrow plot.
+
+`xautolimits = false, yautolimits = false` is the load-bearing part. The decorations are
+`lift`ed off `ax.finallimits`, so if they also took part in the axis' autolimits they would
+form a feedback loop: whenever Makie resolves autolimits (before a figure is displayed or
+saved, and on every `plot!` into an axis already on screen), the union it computes includes
+wherever the decorations were drawn for the PREVIOUS limits, and they are then re-anchored
+to the new ones. The loop is seeded at build time, when the decorations are laid out
+against the limits an `Axis` has before it holds any data — Makie's default window around
+the origin. On an axis without fixed limits the map therefore stretched from 0°N/0°E to the
+network, which sat squeezed into one corner, with the scale bar left down by the equator.
+Tiled maps never showed it only because `Tyler.Map` pins the limits, which overrides
+autolimits altogether.
+
+`overdraw` plus the large z translation applied at each call site keeps the decorations
+above both the tiles and the network; `inspectable = false` keeps them out of data
+inspection.
+"""
+const _DECORATION_ATTRS = (
+    overdraw = true, inspectable = false, xautolimits = false, yautolimits = false,
+)
+
+"""
     _scalebar_geometry(lims, position, pad) -> NamedTuple
 
 Bracket polyline, label anchor and label text for the scale bar at the current limits.
@@ -214,8 +241,9 @@ latitude correction, which is the part that makes the number on the label true r
 merely plausible.
 
 Drawn as a white halo under a dark rule so it stays legible on the pale CartoDB tiles;
-`overdraw` plus a large z translation keeps it above both the tiles and the network.
-`position` is one of `:rb`, `:lb`, `:rt`, `:lt`.
+`overdraw` plus a large z translation keeps it above both the tiles and the network. Kept
+out of the axis' autolimits, without which it would frame the map on itself — see
+[`_DECORATION_ATTRS`](@ref). `position` is one of `:rb`, `:lb`, `:rt`, `:lt`.
 """
 function _add_scalebar!(ax; position::Symbol = :rb, pad::Real = 0.035)
     geom = lift(l -> _scalebar_geometry(l, position, pad), ax.finallimits)
@@ -224,13 +252,11 @@ function _add_scalebar!(ax; position::Symbol = :rb, pad::Real = 0.035)
     label = lift(g -> g.label, geom)
     top = position === :rt || position === :lt
 
-    halo = lines!(ax, points; color = (:white, 0.9), linewidth = 5,
-                  overdraw = true, inspectable = false)
-    rule = lines!(ax, points; color = :black, linewidth = 2,
-                  overdraw = true, inspectable = false)
+    halo = lines!(ax, points; color = (:white, 0.9), linewidth = 5, _DECORATION_ATTRS...)
+    rule = lines!(ax, points; color = :black, linewidth = 2, _DECORATION_ATTRS...)
     txt = text!(ax, anchor; text = label, align = (:center, top ? :top : :bottom),
                 fontsize = 12, color = :black, strokecolor = (:white, 0.9), strokewidth = 2,
-                overdraw = true, inspectable = false)
+                _DECORATION_ATTRS...)
     for p in (halo, rule, txt)
         translate!(p, 0, 0, 1000)
     end
@@ -246,7 +272,8 @@ Web Mercator is north-up at every point on the map, so "up on the page" IS north
 arrow needs no rotation — that is a property of the projection, not a simplification. The
 arrow is still `lift`ed off `ax.finallimits` for the same reason the scale bar is: its size
 and its corner are fractions of the current view, so it neither shrinks to a dot nor wanders
-off screen while the user zooms.
+off screen while the user zooms. Like the scale bar it is kept out of the axis' autolimits
+([`_DECORATION_ATTRS`](@ref)).
 
 `position` is one of `:rt`, `:lt`, `:rb`, `:lb`.
 """
@@ -278,13 +305,12 @@ function _add_north_arrow!(ax; position::Symbol = :rt, pad::Real = 0.035)
     head = lift(g -> g.head, geom)
     anchor = lift(g -> g.anchor, geom)
 
-    stem = lines!(ax, shaft; color = :black, linewidth = 2,
-                  overdraw = true, inspectable = false)
+    stem = lines!(ax, shaft; color = :black, linewidth = 2, _DECORATION_ATTRS...)
     tip = poly!(ax, head; color = :black, strokecolor = (:white, 0.9), strokewidth = 1,
-                overdraw = true, inspectable = false)
+                _DECORATION_ATTRS...)
     txt = text!(ax, anchor; text = "N", align = (:center, :bottom), fontsize = 13,
                 font = :bold, color = :black, strokecolor = (:white, 0.9), strokewidth = 2,
-                overdraw = true, inspectable = false)
+                _DECORATION_ATTRS...)
     for p in (stem, tip, txt)
         translate!(p, 0, 0, 1000)
     end
@@ -315,6 +341,12 @@ The two `ticklabelspace` assignments are load-bearing, not cosmetic. Tyler leave
 limits → different ticks → different label widths → relayout → different limits — that ends
 in a stack overflow. Degree labels change width as you zoom (`5°E` vs `5.25°E`), which is
 precisely the trigger; reserving a fixed amount of space breaks the cycle.
+
+They must also come FIRST. Every attribute write below triggers a relayout of its own, so the
+space has to be reserved before the first of them: with the labels and ticks set ahead of
+it, `ax.xlabel = …` alone already overflowed the stack on a tiled `plot_network` /
+`create_lineplot` at the default `(800, 1000)` figure size — reproducibly on one display
+setup, never on another, since the window size Windows grants feeds the same loop.
 """
 function _style_map_axis!(
     ax;
@@ -324,20 +356,20 @@ function _style_map_axis!(
     scalebar_position::Symbol = :rb,
     north_arrow_position::Symbol = :rt,
 )
+    ax.xticklabelspace = 22.0
+    ax.yticklabelspace = 62.0
     ax.xlabel = "Longitude"
     ax.ylabel = "Latitude"
     ax.xticks = DegreeTicks(:x)
     ax.yticks = DegreeTicks(:y)
-    ax.xticklabelspace = 22.0
-    ax.yticklabelspace = 62.0
 
-    # `ax.subtitle` is CONTENDED, and last writer wins. Three other places write it and none
-    # of them coordinate with this one: `plot_capacity_network` and `plot_shift_map_interactive`
-    # put `_NO_COORDS_NOTE` there on the circular fallback (mutually exclusive with this
-    # branch, since that path is not styled at all), and `plot_line_utils_interactive`
-    # rewrites it with its live colour/width key on every redraw — which WOULD clobber
-    # the CRS note, silently and immediately, the moment `projection_note` is defaulted on.
-    # Flipping that default therefore means giving the interactive key a slot of its own.
+    # `ax.subtitle` is CONTENDED, and last writer wins. Other places write it and none of
+    # them coordinate with this one: every map entry point puts `_NO_COORDS_NOTE` there on
+    # the circular fallback (mutually exclusive with this branch, since that path is not
+    # styled at all), and `plot_line_utils_interactive` rewrites it with its live
+    # colour/width key on every redraw — which WOULD clobber the CRS note, silently and
+    # immediately, the moment `projection_note` is defaulted on. Flipping that default
+    # therefore means giving the interactive key a slot of its own.
     if projection_note
         ax.subtitle = _MAP_PROJECTION_NOTE
         ax.subtitlecolor = RGBAf(0.0, 0.0, 0.0, 0.55)

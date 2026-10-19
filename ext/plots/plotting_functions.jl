@@ -844,22 +844,31 @@ end
 
 """
     _line_endpoints_from_data(data, exclude_dc_lines)
-        -> (line_from_to, node_lonlat, node_coords)
+        -> (line_from_to, node_xy, node_coords, geographic)
 
-Line geometry read from the input CSVs. `line_from_to[l]` and `node_lonlat[n]` are
-web-mercator `Point2f` ready to plot; `node_coords[n]` is the raw `(lon, lat)` in WGS84,
-which is what [`_auto_map_extent`](@ref) and `Tyler.Map` need.
+Line geometry read from the input CSVs, with a circular fallback — the CSV counterpart of
+[`_results_topology`](@ref), same return contract and same all-or-nothing rule.
+
+While at least one node carries usable coordinates, `line_from_to[l]` and `node_xy[n]` are
+web-mercator `Point2f` ready to plot, `node_coords[n]` is the raw `(lon, lat)` in WGS84
+(what [`_auto_map_extent`](@ref) and `Tyler.Map` need) and `geographic` is `true`. A node on
+the `0, 0` sentinel is kept and placed on the mercator origin, as it always was. Only when
+**no** node has coordinates — the node file has no `lon`/`lat` columns, or every row is a
+sentinel — are the nodes put on a unit circle, with `node_coords` `nothing` and `geographic`
+`false`; the positions come from [`_node_positions_from_csv`](@ref) either way.
+
+Before the fallback a node file without `lon`/`lat` made every map with a `data` argument
+throw from [`_read_node_coords`](@ref) instead of drawing anything.
 """
 function _line_endpoints_from_data(data, exclude_dc_lines)
-    node_coords = _read_node_coords(data[:nodes])
-    node_lonlat = Dict{String,Point2f}(
-        n => project_point2f(c[1], c[2]) for (n, c) in node_coords)
+    node_xy, node_coords, geographic =
+        _node_positions_from_csv(data[:nodes]; keep_sentinels = true)
 
     line_from_to = Dict{String,_Segment}()
-    _collect_csv_endpoints!(line_from_to, data[:lines], node_lonlat)
-    exclude_dc_lines || _collect_csv_endpoints!(line_from_to, data[:dclines], node_lonlat)
+    _collect_csv_endpoints!(line_from_to, data[:lines], node_xy)
+    exclude_dc_lines || _collect_csv_endpoints!(line_from_to, data[:dclines], node_xy)
 
-    return line_from_to, node_lonlat, node_coords
+    return line_from_to, node_xy, node_coords, geographic
 end
 
 """
@@ -901,8 +910,9 @@ end
     _line_endpoints_from_results(results, exclude_dc_lines)
         -> (line_from_to, node_lonlat, node_coords)
 
-Line geometry read from `results.params`. Same return contract as
-[`_line_endpoints_from_data`](@ref); `node_coords` carries the raw WGS84 `(lon, lat)`.
+Line geometry read from `results.params`: web-mercator `line_from_to` / `node_lonlat` and
+the raw WGS84 `(lon, lat)` in `node_coords`. No fallback of its own — this is the geographic
+branch of [`_results_topology`](@ref), which is what the maps call.
 """
 function _line_endpoints_from_results(results, exclude_dc_lines)
     params = results.params
@@ -955,8 +965,10 @@ While at least one node carries usable coordinates this is exactly
 [`_line_endpoints_from_results`](@ref) and `geographic` is `true`. Only when **no** node does
 — every one of them on the `[0.0, 0.0]` sentinel, or the node input never had a `lon`/`lat`
 column — are the nodes placed on a unit circle instead, with `node_coords` `nothing` and
-`geographic` `false`. Callers must then skip the basemap and `_auto_map_extent`, and pass
-`geographic = false` to [`create_lineplot_layout`](@ref) so the map styling is skipped too.
+`geographic` `false`. Callers must then skip `_auto_map_extent` (it would answer a Germany
+cutout), pass `geographic = false` to [`create_lineplot_layout`](@ref) — which then draws
+neither the basemap nor the map styling — and put [`_NO_COORDS_NOTE`](@ref) in the axis
+subtitle. [`_line_endpoints_from_data`](@ref) is the same thing for input CSVs.
 
 Without this a coordinate-free result set draws every node on top of the same point and
 every line as a zero-length segment: a blank map rather than an error.
@@ -992,11 +1004,11 @@ function _collect_param_endpoints!(line_from_to, ids, starts, ends, node_lonlat)
 end
 
 function _prepare_lineplot_common(results, data, exclude_dc_lines, threshold)
-    line_from_to, node_lonlat, node_coords = data === nothing ?
-        _line_endpoints_from_results(results, exclude_dc_lines) :
+    line_from_to, node_xy, node_coords, geographic = data === nothing ?
+        _results_topology(results, exclude_dc_lines) :
         _line_endpoints_from_data(data, exclude_dc_lines)
     df_line_util = _line_utilization_table(results, exclude_dc_lines, threshold)
-    return results, df_line_util, line_from_to, node_lonlat, node_coords
+    return results, df_line_util, line_from_to, node_xy, node_coords, geographic
 end
 
 "`RGBAf` of a colormap colour at a fixed alpha, without going through Makie's parser."
@@ -1042,7 +1054,9 @@ function _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, typ
     return fig
 end
 
-# Fallback map window (Germany) for result sets whose nodes carry no usable coordinates.
+# Map window (Germany) of last resort: the default `extent` of `create_lineplot_layout` and
+# `_auto_map_extent`'s answer when no node has coordinates. No map entry point frames a
+# coordinate-free network with it — they all switch to the circular layout instead.
 const _DEFAULT_MAP_CUTOUT = Extent(X = (5.5, 15.0), Y = (47.0, 55.0))
 
 "`true` when `coords[n]` is a usable lon/lat pair — `_load_node_coords!` stores `[0.0, 0.0]` for nodes without one."
@@ -1077,12 +1091,22 @@ end
 The single axis factory every map in this extension goes through. Returns `(fig, ax)`.
 
 `background_map` decides only whether Tyler draws raster tiles; `geographic` decides whether
-the axis holds real coordinates. The two are independent: a caller may turn the tiles off for
-speed and still be plotting Web Mercator metres, which is why the publication styling
+the axis holds real coordinates. A caller may turn the tiles off for speed and still be
+plotting Web Mercator metres, which is why the publication styling
 ([`_style_map_axis!`](@ref) — degree ticks, `Longitude`/`Latitude`, scale bar, north arrow)
 is gated on `geographic` and not on `background_map`. Pass `geographic = false` for the
 [`_circular_node_positions`](@ref) fallback layout, whose unit-circle coordinates would turn
-every one of those decorations into a fabrication.
+every one of those decorations into a fabrication. The dependency runs one way only: tiles
+need geography, so `geographic = false` also suppresses the basemap whatever
+`background_map` says, and `extent` is ignored.
+
+**Framing.** A geographic map shows `extent` (WGS84) with and without tiles. With tiles
+`Tyler.Map` pins the limits to it; without them the same window is projected here and pinned
+with `limits!`, under `DataAspect()` so a mercator metre is equally long on both axes. Before
+this the tile-free branch was left to autolimits, which framed whatever was in the axis —
+see [`_DECORATION_ATTRS`](@ref) for how the scale bar turned that into a map stretched to the
+equator. `extent = nothing` on a geographic axis falls back to autolimits over the data,
+which the decorations no longer take part in. The circular fallback is always autolimited.
 
 `map_axis` is what the caller of a public entry point controls: `true` for the default
 styling, `false` for a bare Web Mercator axis, or a `NamedTuple` splatted into
@@ -1103,12 +1127,18 @@ function create_lineplot_layout(
     fig = Figure(; size = figsize)
     ax = Axis(fig[1, 1])
 
-    if background_map
+    if background_map && geographic
         provider = OpenStreetMap(:DE)
         tm = Tyler.Map(extent; provider, figure = fig, axis = ax)
         wait(tm)
     else
         ax.aspect = DataAspect()
+        if geographic && extent !== nothing
+            # The window `Tyler.Map` would pin, projected the way Tyler projects it
+            # (`setup_axis!` in Tyler's map.jl), so switching the tiles off does not move it.
+            merc = MapTiles.project_extent(extent, MapTiles.wgs84, MapTiles.web_mercator)
+            limits!(ax, merc.X, merc.Y)
+        end
     end
 
     # After `wait(tm)`, never before: Tyler sets axis attributes itself while the map spins
@@ -1146,16 +1176,16 @@ function POMATWO.create_lineplot(
     extent = nothing,
     map_axis = true,
 )
-    results, df_line_util, line_from_to, node_lonlat, node_coords =
+    # `geographic` is decided once, by `_results_topology`'s all-or-nothing rule: a node on
+    # the `[0.0, 0.0]` sentinel counts as having no coordinates, and only when NO node has
+    # any is the circular layout used — with no extent, no basemap and no map styling.
+    results, df_line_util, line_from_to, node_xy, node_coords, geographic =
         _prepare_lineplot_common(DataFiles(results_path), nothing, exclude_dc_lines, threshhold)
-    extent === nothing && (extent = _auto_map_extent(node_coords))
-    # Same sentinel trap as in `plot_network`: `_line_endpoints_from_*` place a node parked
-    # on `[0.0, 0.0]` like any other, so only `_has_coords` can tell a real map from a
-    # degenerate one.
-    geographic = any(n -> _has_coords(node_coords, n), keys(node_coords))
+    geographic && extent === nothing && (extent = _auto_map_extent(node_coords))
     fig, ax = create_lineplot_layout(; background_map = background_map, extent = extent,
                                      geographic = geographic, map_axis = map_axis)
-    return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshhold)
+    geographic || (ax.subtitle = _NO_COORDS_NOTE)
+    return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_xy, type, threshhold)
 end
 
 """
@@ -1178,11 +1208,11 @@ instead of from the input CSVs; everything below applies to both.
 
 # Keyword arguments
 - `background_map`: (default: `true`) Draw Tyler/CartoDB raster tiles behind the network.
-  Turning them off changes nothing about the axis: it stays geographic and keeps its degree
-  ticks, scale bar and north arrow.
-- `extent`: (default: `nothing`) Map window as a `Tyler.Extents.Extent`. `nothing` fits it
-  to the node coordinates; result sets whose nodes carry no coordinates fall back to
-  `_DEFAULT_MAP_CUTOUT` (Germany).
+  Turning them off changes nothing about the axis: it stays geographic, shows the same
+  window and keeps its degree ticks, scale bar and north arrow. Ignored when no node carries
+  coordinates — the circular fallback layout gets no basemap.
+- `extent`: (default: `nothing`) Map window as a `Tyler.Extents.Extent`, with or without
+  tiles. `nothing` fits it to the node coordinates. Ignored on the circular fallback layout.
 - `map_axis`: (default `true`) map-axis styling. `true` for degree ticks, `Longitude` /
   `Latitude` labels, a scale bar and a north arrow; `false` for a bare axis in raw Web
   Mercator metres; or a `NamedTuple` to override individual settings, e.g.
@@ -1202,8 +1232,13 @@ instead of from the input CSVs; everything below applies to both.
   north arrow. Geometry stays in Web Mercator throughout — state the CRS,
   `WGS 84 / Pseudo-Mercator (EPSG:3857)`, in the figure caption. Mercator scale is
   latitude-dependent, so the scale bar is exact only at the latitude it is drawn at.
-- A result set whose nodes carry no coordinates at all draws every node on the mercator
-  origin; the map decorations are suppressed there rather than labelling a degenerate map.
+- When NO node carries coordinates — the node file (or, without `data`, the node input the
+  results were built from) has no `lon`/`lat` columns, or every node sits on the `0, 0`
+  sentinel — the nodes are laid out on a circle instead, the basemap is suppressed and none
+  of the map decorations are drawn; the axis subtitle says so. Line colours, the colorbar
+  and the topology all still read correctly; only the geography is gone. While SOME node
+  has coordinates the map stays geographic, and a sentinel node sits on the mercator origin,
+  outside the map window.
 
 # Returns
 - `fig`: A Makie figure object with the network map, color-coded lines, and colorbar.
@@ -1238,16 +1273,16 @@ function POMATWO.create_lineplot(
     extent = nothing,
     map_axis = true,
 )
-    results, df_line_util, line_from_to, node_lonlat, node_coords =
+    # Same rule as the results-only method, read off the node CSV by
+    # `_line_endpoints_from_data`: a file without `lon`/`lat`, or with nothing but sentinel
+    # rows, gets the circular layout instead of an error or a map of the mercator origin.
+    results, df_line_util, line_from_to, node_xy, node_coords, geographic =
         _prepare_lineplot_common(DataFiles(results_path), data, exclude_dc_lines, threshhold)
-    extent === nothing && (extent = _auto_map_extent(node_coords))
-    # Same sentinel trap as in `plot_network`: `_line_endpoints_from_*` place a node parked
-    # on `[0.0, 0.0]` like any other, so only `_has_coords` can tell a real map from a
-    # degenerate one.
-    geographic = any(n -> _has_coords(node_coords, n), keys(node_coords))
+    geographic && extent === nothing && (extent = _auto_map_extent(node_coords))
     fig, ax = create_lineplot_layout(; background_map = background_map, extent = extent,
                                      geographic = geographic, map_axis = map_axis)
-    return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshhold)
+    geographic || (ax.subtitle = _NO_COORDS_NOTE)
+    return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_xy, type, threshhold)
 end
 
 """
@@ -1275,8 +1310,10 @@ Plots a simple network map of an energy system using line and node geographical 
   kilometre scale bar and a north arrow. Geometry stays in Web Mercator — state the CRS,
   `WGS 84 / Pseudo-Mercator (EPSG:3857)`, in the figure caption, and note that mercator
   scale is latitude-dependent, so the scale bar is exact only at its own latitude.
-- A node file whose `lon`/`lat` are all `0, 0` draws every node on the mercator origin. The
-  map decorations are suppressed in that case rather than labelling a degenerate map.
+- When the node file has no `lon`/`lat` columns, or every node sits on the `0, 0` sentinel,
+  the nodes are laid out on a circle instead, the basemap is suppressed and none of the map
+  decorations are drawn; the axis subtitle says so. While SOME node has coordinates the map
+  stays geographic, and a sentinel node sits on the mercator origin, outside the map window.
 
 # Returns
 - `fig`: The Makie figure object containing the network plot.
@@ -1296,22 +1333,22 @@ fig = plot_network(datafiles)
 ```
 """
 function POMATWO.plot_network(data::Dict{Symbol,String}; map_axis = true)
-    node_coords = _read_node_coords(data[:nodes])
-    node_lonlat = Dict{String,Point2f}(
-        n => project_point2f(c[1], c[2]) for (n, c) in node_coords)
-
-    # `_read_node_coords` keeps the `0.0, 0.0` sentinel rows, and `_auto_map_extent` answers
-    # a Germany cutout when every row is one — so without this check a coordinate-free node
-    # file would get degree ticks and a Germany-scaled scale bar over nodes stacked on the
-    # mercator origin.
-    geographic = any(n -> _has_coords(node_coords, n), keys(node_coords))
-    fig, ax = create_lineplot_layout(; extent = _auto_map_extent(node_coords),
-                                     geographic = geographic, map_axis = map_axis)
+    # All-or-nothing, like every other map: with no usable coordinate anywhere (no `lon`/`lat`
+    # columns, or nothing but `0.0, 0.0` sentinel rows) the nodes go on a circle and
+    # `geographic` is `false`, which keeps `_auto_map_extent` from answering a Germany cutout
+    # and `create_lineplot_layout` from drawing tiles, degree ticks and a scale bar around
+    # it. With some coordinates the sentinel nodes are kept, on the mercator origin.
+    node_xy, node_coords, geographic =
+        _node_positions_from_csv(data[:nodes]; keep_sentinels = true)
+    fig, ax = create_lineplot_layout(;
+        extent = geographic ? _auto_map_extent(node_coords) : nothing,
+        geographic = geographic, map_axis = map_axis)
+    geographic || (ax.subtitle = _NO_COORDS_NOTE)
 
     # One draw call per line style and one for all nodes, rather than one per row.
     for (path, style) in ((data[:lines], :solid), (data[:dclines], :dash))
         segs = Dict{String,_Segment}()
-        _collect_csv_endpoints!(segs, path, node_lonlat)
+        _collect_csv_endpoints!(segs, path, node_xy)
         isempty(segs) && continue
         pts = Point2f[]
         sizehint!(pts, 2 * length(segs))
@@ -1321,8 +1358,8 @@ function POMATWO.plot_network(data::Dict{Symbol,String}; map_axis = true)
         linesegments!(ax, pts; color = (:black, 0.98), linewidth = 1, linestyle = style)
     end
 
-    isempty(node_lonlat) ||
-        scatter!(ax, collect(values(node_lonlat)), color = :black, markersize = 5)
+    isempty(node_xy) ||
+        scatter!(ax, collect(values(node_xy)), color = :black, markersize = 5)
 
     return fig
 end

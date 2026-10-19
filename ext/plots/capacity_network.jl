@@ -44,9 +44,10 @@ function _label_offset(from, to, pad)
 end
 
 """
-    _node_positions_from_csv(path) -> (node_xy, node_coords, geographic)
+    _node_positions_from_csv(path; keep_sentinels = false) -> (node_xy, node_coords, geographic)
 
-Plotting positions for every node in the node input file.
+Plotting positions for every node in the node input file — the CSV counterpart of the
+all-or-nothing rule in [`_results_topology`](@ref).
 
 `node_xy[n]` is a `Point2f` in the axis' data space. When the file carries usable `lon`/`lat`
 that space is web mercator and `geographic` is `true`, with `node_coords` the raw WGS84
@@ -55,11 +56,18 @@ absent, or every node sits on the `(0.0, 0.0)` sentinel `_load_node_coords!` wri
 node without coordinates — the nodes are laid out on a unit circle instead, `geographic` is
 `false` and `node_coords` is `nothing`.
 
+`keep_sentinels` only matters while SOME node has coordinates. This plot drops the sentinel
+nodes then (`false`, the default). `plot_network` and the utilization maps' `data` path
+([`_line_endpoints_from_data`](@ref)) pass `true` and keep them, placed on the mercator
+origin, which is what they have always done and what [`_line_endpoints_from_results`](@ref)
+does with the same nodes when the geometry comes from `params` instead. `_auto_map_extent`
+skips the sentinels either way, so the window is the same.
+
 The fallback branch deliberately does not go through [`_read_node_coords`](@ref): that
-helper `error`s on a missing column by design, which is the right behaviour for the
-result-driven maps but would make this plot unusable on a coordinate-free network.
+helper `error`s on a missing column by design, which is why every map that reads node
+coordinates from the input files comes through here instead.
 """
-function _node_positions_from_csv(path)
+function _node_positions_from_csv(path; keep_sentinels::Bool = false)
     header = String.(propertynames(CSV.File(path; limit = 0)))
     if "lon" in header && "lat" in header
         all_coords = _read_node_coords(path)
@@ -68,6 +76,7 @@ function _node_positions_from_csv(path)
         node_coords = Dict{String,Tuple{Float64,Float64}}(
             n => c for (n, c) in all_coords if !(c[1] == 0.0 && c[2] == 0.0))
         if !isempty(node_coords)
+            keep_sentinels && (node_coords = all_coords)
             node_xy = Dict{String,Point2f}(
                 n => project_point2f(c[1], c[2]) for (n, c) in node_coords)
             return node_xy, node_coords, true
@@ -181,8 +190,8 @@ labelled underneath.
   Ignored when the node file carries no coordinates — the circular fallback layout is not
   geographic and gets no basemap. Turning the tiles off on a geographic dataset keeps the
   map axis: degree ticks, `Longitude` / `Latitude` labels, scale bar and north arrow stay.
-- `extent`: (default `nothing`) map window as a `Tyler.Extents.Extent`. `nothing` fits it to
-  the node coordinates.
+- `extent`: (default `nothing`) map window as a `Tyler.Extents.Extent`, with or without
+  tiles. `nothing` fits it to the node coordinates.
 - `figsize`: (default `(1000, 1100)`) figure size in pixels.
 - `exclude_dc_lines`: (default `false`) if `true`, DC lines are not drawn.
 - `linewidth_range`: (default `(0.6, 4.5)`) width in points of the smallest and the largest
@@ -301,15 +310,14 @@ function POMATWO.plot_capacity_network(
                 clamp(wlo + (whi - wlo) * Float32(get(line_caps, l, 0.0) / capmax), wlo, whi)
 
     # --- layout ------------------------------------------------------------------
-    use_basemap = background_map && geographic
+    # `extent` is passed with and without tiles: it is also what frames the tile-free map.
+    # On the circular fallback `create_lineplot_layout` ignores it and draws no basemap.
     if geographic && extent === nothing
         extent = _auto_map_extent(node_coords)
     end
-    fig, ax = use_basemap ?
-        create_lineplot_layout(figsize; background_map = true, extent = extent,
-                               geographic = true, map_axis = map_axis) :
-        create_lineplot_layout(figsize; background_map = false, geographic = geographic,
-                               map_axis = map_axis)
+    fig, ax = create_lineplot_layout(figsize; background_map = background_map,
+                                     extent = extent, geographic = geographic,
+                                     map_axis = map_axis)
 
     # --- lines -------------------------------------------------------------------
     label_pos = Point2f[]

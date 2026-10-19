@@ -480,9 +480,14 @@ mercator scale is latitude-dependent, so the scale bar is exact only at the
 latitude it is drawn at. The axis **subtitle** carries the live colour and width
 key for the current selection.
 
-A run whose nodes carry no coordinates at all draws every node on the mercator
-origin; none of the map decorations are added there, since labelling a degenerate
-map in degrees is worse than leaving it bare.
+If NO node carries coordinates — the node input has no `lon`/`lat` columns, or
+every node sits on the `0, 0` sentinel — the nodes are laid out on a circle
+instead, the basemap is suppressed and none of the map decorations are drawn; a
+last line of the subtitle says so. Line colours and widths, the direction chevrons
+and both node keys all still read correctly; only the geography is gone. While SOME
+node has coordinates the map stays geographic, and a sentinel node sits on the
+mercator origin, outside the map window. The same rule applies with and without
+`data`.
 
 # Arguments
 - `results_path`: directory containing the results of a model run, or an
@@ -501,9 +506,10 @@ map in degrees is worse than leaving it bare.
   last stage of the pipeline.
 - `background_map`: (default `true`) draw the raster tiles. The axis stays a map
   axis either way — degree ticks, `Longitude` / `Latitude` labels, scale bar and
-  north arrow do not depend on the tiles.
-- `extent`: (default `nothing`) map window; `nothing` fits it to the node
-  coordinates.
+  north arrow do not depend on the tiles, and neither does the initial window.
+  Ignored on the circular fallback layout.
+- `extent`: (default `nothing`) initial map window, with or without tiles;
+  `nothing` fits it to the node coordinates. Ignored on the circular fallback.
 - `map_axis`: (default `true`) map-axis styling. `true` for degree ticks,
   `Longitude` / `Latitude` labels, a scale bar and a north arrow; `false` for a
   bare axis in raw Web Mercator metres; or a `NamedTuple` overriding individual
@@ -624,20 +630,21 @@ function _plot_line_utils_interactive(
         "state \"$initial_state\" not available. Found: $(join(state_names, ", "))"))
 
     # --- topology (shared by every state) ------------------------------------
+    # Both sources apply the same all-or-nothing rule: while some node has coordinates the
+    # map is geographic (a `[0.0, 0.0]` sentinel node is kept, on the mercator origin); when
+    # none has — no `lon`/`lat` columns, or nothing but sentinels — the nodes go on a unit
+    # circle and `geographic` is `false`. Every plot below works in whichever data space that
+    # is: arrow and chevron lengths are fractions of `_node_span`, not metres.
     first_results = load_state(initial_state)
-    line_from_to, node_lonlat, node_coords = data === nothing ?
-        _line_endpoints_from_results(first_results, exclude_dc_lines) :
+    line_from_to, node_lonlat, node_coords, geographic = data === nothing ?
+        _results_topology(first_results, exclude_dc_lines) :
         _line_endpoints_from_data(data, exclude_dc_lines)
+    # Not a coordinate test any more — the circular fallback places every node — but a line
+    # set whose endpoints match no node still leaves nothing to draw.
     isempty(line_from_to) && error(
-        "No line has usable node coordinates — nothing to draw. Check the lon/lat " *
-        "columns of the node input file.")
-
-    # That guard is NOT a geographic test. `_line_endpoints_from_*` place every node that
-    # HAS a coordinate entry, sentinel `[0.0, 0.0]` included, so an all-sentinel run yields
-    # a fully populated `line_from_to` of zero-length segments at the mercator origin and
-    # never trips it. Degree ticks, a scale bar and a north arrow over that would be a
-    # confident mislabelling of a degenerate map, so they are gated on a real check.
-    geographic = any(n -> _has_coords(node_coords, n), keys(node_coords))
+        "No line has both endpoints placed — nothing to draw. Check that the line " *
+        "endpoints name nodes of the node input file and, on a geographic network, the " *
+        "lon/lat columns of that file.")
 
     # Fixed drawing order: the segment geometry is built once and never rebuilt,
     # only the per-segment colour values change.
@@ -730,7 +737,9 @@ function _plot_line_utils_interactive(
     init = state_data(initial_state)
 
     # --- layout --------------------------------------------------------------
-    extent === nothing && (extent = _auto_map_extent(node_coords))
+    # On the circular fallback `create_lineplot_layout` ignores `extent` and the basemap,
+    # and `redraw!` appends `_NO_COORDS_NOTE` to the subtitle it rewrites.
+    geographic && extent === nothing && (extent = _auto_map_extent(node_coords))
     fig, ax = create_lineplot_layout(figsize; background_map = background_map,
                                      extent = extent, geographic = geographic,
                                      map_axis = map_axis)
@@ -1040,7 +1049,9 @@ function _plot_line_utils_interactive(
 
         # Subtitle, not `ax.xlabel`: this is a map axis and its x label now carries
         # "Longitude". The subtitle is the one axis slot that is both free here and wide
-        # enough for the two-line key.
+        # enough for the two-line key. Rewritten wholesale on every redraw, so the
+        # no-coordinates note of the circular fallback has to be re-appended each time —
+        # set once after the layout, as the other maps do, it would be gone on first draw.
         ax.subtitle = (if ishours
             "Line colour: timesteps with utilization ≥ $(round(Int, 100 * thr)) % in the selected window"
         elseif isflowsum
@@ -1048,7 +1059,8 @@ function _plot_line_utils_interactive(
         else
             "Line colour: average line utilization in the selected window " *
             "(scale 0–$(round(cmax, digits = 2)), $(fixed_scale ? "fixed over the horizon" : "adaptive to this window"))"
-        end) * (linewidth_by_capacity ? "\nLine width: line capacity (MW)" : "")
+        end) * (linewidth_by_capacity ? "\nLine width: line capacity (MW)" : "") *
+            (geographic ? "" : "\n" * _NO_COORDS_NOTE)
         cbar.label = isflowsum ? "abs. flow [MWh]" : "line utilization"
 
         # Signed flow sum over the window drives the direction arrowheads. A line whose flow
