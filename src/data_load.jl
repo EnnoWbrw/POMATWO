@@ -64,6 +64,13 @@ function add_plants!(params::Parameters, df_pp::AbstractDataFrame, report::DataR
         storage_power = hasproperty(row, :storage_power) ? row[:storage_power] : missing
         storage_param_exist = !ismissing(storage_capacity) && !ismissing(storage_power)
 
+        # Without storage_power the capacity would be dropped silently and the plant
+        # modelled as a plain generator. Zero capacity is the "no storage" convention.
+        if storage_capacity isa Number && storage_capacity > 0 && ismissing(storage_power)
+            add_error!(report, "missing_storage_power",
+                       "Plant '$(row[:index])' has storage_capacity $(storage_capacity) but no storage_power", location)
+        end
+
         if storage_param_exist
             params.storage[row[:index]] = storage_capacity
             params.gmax_storage[row[:index]] = storage_power
