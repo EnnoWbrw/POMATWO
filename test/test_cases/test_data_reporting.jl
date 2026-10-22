@@ -99,7 +99,42 @@ function test_data_reporting()
         @test report.has_errors  # Should have errors for negative capacity and duplicates
         @test length(get_errors(report)) >= 1
     end
-    
+
+    @testset "Storage capacity without storage power" begin
+        storage_errors(r) = filter(i -> i.category == "missing_storage_power", get_errors(r))
+
+        # Capacity given, power missing: storage would be silently dropped
+        report = DataReport()
+        plants = DataFrame(
+            index = ["p1", "p2"],
+            plant_type = ["coal", "battery"],
+            node = ["n1", "n2"],
+            g_max = [100.0, 50.0],
+            eta = [0.4, 0.9],
+            storage_capacity = [missing, 200.0],
+            storage_power = [missing, missing]
+        )
+        POMATWO.add_plants!(POMATWO.Parameters(), plants, report, "test_plants")
+        @test report.has_errors
+        errs = storage_errors(report)
+        @test length(errs) == 1
+        @test occursin("p2", only(errs).message)
+
+        # storage_power column absent altogether
+        report = DataReport()
+        POMATWO.add_plants!(POMATWO.Parameters(), select(plants, Not(:storage_power)),
+                            report, "test_plants")
+        @test length(storage_errors(report)) == 1
+
+        # Zero capacity with missing power is the "no storage" convention of the
+        # shipped datasets and must not be flagged
+        report = DataReport()
+        plants.storage_capacity = [0.0, 0.0]
+        POMATWO.add_plants!(POMATWO.Parameters(), plants, report, "test_plants")
+        @test isempty(storage_errors(report))
+        @test !report.has_errors
+    end
+
     @testset "Integration Test with Sample Data" begin
         # Test with the existing sample data
         datapath = joinpath(@__DIR__, "data", "test_data_3_nodes_prosumer")

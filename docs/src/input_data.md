@@ -27,7 +27,7 @@ One row per power plant.
 | `node`             | ✔        | String  | Node the plant is connected to. |
 | `g_max`            | ✔        | Float   | Maximum generation capacity (MW). Must be positive. |
 | `eta`              | ✔        | Float   | Efficiency factor. Must be in [0, 1]. |
-| `storage_capacity` | optional | Float   | Storage energy capacity (MWh). Both `storage_capacity` **and** `storage_power` must be present and non-missing together to activate storage for this plant. |
+| `storage_capacity` | optional | Float   | Storage energy capacity (MWh). Both `storage_capacity` **and** `storage_power` must be present and non-missing together to activate storage for this plant. A positive `storage_capacity` without `storage_power` is reported as a `missing_storage_power` error. |
 | `storage_power`    | optional | Float   | Maximum charge/discharge power of the storage unit (MW). See `storage_capacity`. |
 | `mc`               | optional | Float   | Marginal cost (€/MWh). Loaded as a fixed profile. Takes priority over the calculated marginal cost — if present, no calculation is performed for this plant. |
 | `availability`     | optional | Float   | Fixed availability factor in [0, 1]. Loaded as a fixed profile. Takes lowest priority; plant-level availability files (`:avail`) override this. |
