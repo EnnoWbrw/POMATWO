@@ -27,6 +27,75 @@ function reconstruct_parameters(old_obj)
 end
 
 """
+    _ptdf_file(params_file) -> String
+
+The PTDF file stored next to a run's params file: `params.jld2` → `params_ptdf.jld2`.
+"""
+_ptdf_file(params_file::AbstractString) = string(splitext(params_file)[1], "_ptdf.jld2")
+
+"""
+    _save_params(file, params::Parameters)
+
+Write `params` to `file` (a run's `params.jld2`) with an empty `ptdf`, and the PTDF as a
+plain `Float64` matrix plus its line and node names to `_ptdf_file(file)`
+(`params_ptdf.jld2`). JLD2 spends ~200 bytes per `Tuple{String,String}` Dict entry
+against 8 per matrix entry, so a ~3000-node grid's PTDF shrinks from ~2.8 GB to ~0.1 GB.
+`params.jld2` stays a single object, so `load_object` keeps working on it (JLD2 refuses
+files holding more than one object); [`DataFiles`](@ref) refills `ptdf` with
+`_restore_ptdf!`.
+
+A PTDF that is not a full lines × nodes table stays inside `params.jld2` as a Dict, and
+any `params_ptdf.jld2` left over from an earlier run in the same folder is removed.
+"""
+function _save_params(file::AbstractString, params::Parameters)
+    ptdf_file = _ptdf_file(file)
+    ptdf = params.ptdf
+    lines = sort!(unique!([k[1] for k in keys(ptdf)]))
+    nodes = sort!(unique!([k[2] for k in keys(ptdf)]))
+    # Keys are unique and drawn from lines × nodes, so equal counts mean every pair is present.
+    if isempty(ptdf) || length(ptdf) != length(lines) * length(nodes)
+        rm(ptdf_file; force = true)   # never let a stale PTDF be restored onto these params
+        save_object(file, params)
+        return nothing
+    end
+    line_idx = Dict(l => i for (i, l) in enumerate(lines))
+    node_idx = Dict(n => j for (j, n) in enumerate(nodes))
+    matrix = Matrix{Float64}(undef, length(lines), length(nodes))
+    for ((l, n), v) in ptdf
+        matrix[line_idx[l], node_idx[n]] = v
+    end
+    slim = Parameters((f === :ptdf ? Dict{Tuple{String,String},Float64}() : getfield(params, f)
+                       for f in fieldnames(Parameters))...)
+    jldsave(ptdf_file; lines = lines, nodes = nodes, matrix = matrix)
+    save_object(file, slim)
+    return nothing
+end
+
+"""
+    _restore_ptdf!(params::Parameters, params_file) -> params
+
+Refill an empty `params.ptdf` from the `params_ptdf.jld2` that `_save_params` wrote next
+to `params_file`. A no-op when `ptdf` is already filled (params files written before the
+split layout) or there is no PTDF file. Refuses, with a warning, a PTDF whose lines or
+nodes are not in `params.sets`.
+"""
+function _restore_ptdf!(params::Parameters, params_file::AbstractString)
+    isempty(params.ptdf) || return params
+    ptdf_file = _ptdf_file(params_file)
+    isfile(ptdf_file) || return params
+    lines, nodes, matrix = jldopen(f -> (f["lines"], f["nodes"], f["matrix"]), ptdf_file, "r")
+    if !(issubset(lines, params.sets.L) && issubset(nodes, params.sets.N))
+        @warn "$(ptdf_file) does not match the lines/nodes in $(params_file); params.ptdf stays empty"
+        return params
+    end
+    sizehint!(params.ptdf, length(matrix))
+    for (j, n) in enumerate(nodes), (i, l) in enumerate(lines)
+        params.ptdf[(l, n)] = matrix[i, j]
+    end
+    return params
+end
+
+"""
     DataFiles
 
 A container for loading and storing output data related to a model run. Each field corresponds to a specific dataset represented as a `DataFrame`.
@@ -173,6 +242,13 @@ struct DataFiles
                 @warn "Could not load params from $(params_file); using default Parameters() due to: $(typeof(e)) - $(e)"
                 Parameters()
             end
+        end
+
+        # The PTDF is stored as a matrix in params_ptdf.jld2 next to params.jld2 (see _save_params).
+        try
+            _restore_ptdf!(params, params_file)
+        catch e
+            @warn "Could not restore the PTDF from $(_ptdf_file(params_file)); params.ptdf stays empty: $(typeof(e)) - $(e)"
         end
 
         return new(params, values...)

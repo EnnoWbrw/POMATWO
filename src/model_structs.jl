@@ -174,9 +174,9 @@ It is typically used as a central configuration object passed to optimization or
 - `line_start::Dict{String,String}`: Start node of each AC line.
 - `line_end::Dict{String,String}`: End node of each AC line.
 
-- `b::Dict{Tuple{String,String},Float64}`: Line susceptance between node pairs.
-- `h::Dict{Tuple{String,String},Float64}`: Network matrix entries used in power flow approximations.
-- `ptdf::Dict{Tuple{String,String},Float64}`: Power Transfer Distribution Factors between (line, node) pairs.
+- `b::Dict{Tuple{String,String},Float64}`: Unused, always empty. Kept so older `params.jld2` files load (it used to hold the dense nodal susceptance matrix).
+- `h::Dict{Tuple{String,String},Float64}`: Unused, always empty. Kept so older `params.jld2` files load (it used to hold the dense line-node susceptance matrix).
+- `ptdf::Dict{Tuple{String,String},Float64}`: Power Transfer Distribution Factors between (line, node) pairs. A run writes it as a plain matrix to `params_ptdf.jld2` next to `params.jld2` (which holds `Parameters` with an empty `ptdf`); [`DataFiles`](@ref) restores it.
 
 ## DC line parameters
 - `dcline_capacity::Dict{String,Float64}`: Transfer capacity of each DC line.

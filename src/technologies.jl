@@ -507,9 +507,7 @@ Updates results with net input and line flow data.
 function add_dclf(sr::SubRun, ::Type{PhaseAngle})
     T = sr.market_state.Time
     @unpack N, DC, L = sr.modelrun.params.sets
-    @unpack b,
-    h,
-    slack,
+    @unpack slack,
     slack_zone,
     acline_capacity,
     dcline_capacity,

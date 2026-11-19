@@ -194,14 +194,10 @@ function calc_h_b!(params, report::Union{DataReport,Nothing}=nothing)
 
     calc_PTDF!(h, b, slack, N, L, params, report)
 
-    for l in eachindex(L), n in eachindex(N)
-        params.h[(L[l], N[n])] = h[l, n]
-    end
-
-    for n in eachindex(N), m in eachindex(N)
-        params.b[(N[n], N[m])] = b[n, m]
-    end
-
+    # `h` and `b` are deliberately NOT copied into `params.h` / `params.b`: nothing reads them,
+    # and as dense Dicts keyed by name pairs they hold lines×nodes + nodes² entries — for a
+    # ~3000-node grid ~23M entries, ~4.6 GB in params.jld2. The fields stay on `Parameters`
+    # (empty) so params.jld2 files written before this change still load.
 end
 function calc_PTDF!(h::Matrix{Float64}, b::Matrix{Float64}, slack_list::Vector{String}, N::Vector{String}, L::Vector{String}, params::Parameters, report::Union{DataReport,Nothing}=nothing)
 

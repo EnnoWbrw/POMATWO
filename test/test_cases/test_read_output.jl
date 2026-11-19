@@ -395,6 +395,41 @@ function test_read_output()
                 end
                 @test isempty(empty_bc.GEN)
             end
+
+            # =================================================================
+            @testset "params.jld2 -- PTDF stored as a matrix, restored by DataFiles" begin
+                JLD2 = POMATWO.JLD2
+                @test !isempty(params_no_prs.ptdf)
+                # the dense B / H matrices are no longer copied onto Parameters (unused, GBs on big grids)
+                @test isempty(params_no_prs.b)
+                @test isempty(params_no_prs.h)
+
+                # run() stores Parameters with an empty ptdf in params.jld2 (still a single
+                # object, so load_object works) and the PTDF as a plain matrix next to it ...
+                file = joinpath(tmpdir, "ro_redisp", "params.jld2")
+                @test isempty(JLD2.load_object(file).ptdf)
+                @test JLD2.load(joinpath(tmpdir, "ro_redisp", "params_ptdf.jld2"), "matrix") isa Matrix{Float64}
+                # ... and DataFiles restores it exactly
+                @test results_redisp.params.ptdf == params_no_prs.ptdf
+
+                # a params.jld2 written before this change (full ptdf Dict, no params_ptdf.jld2) still loads
+                old_dir = joinpath(tmpdir, "ro_oldparams")
+                cp(joinpath(tmpdir, "ro_redisp"), old_dir)
+                rm(joinpath(old_dir, "params_ptdf.jld2"))
+                JLD2.save_object(joinpath(old_dir, "params.jld2"), params_no_prs)
+                old = with_logger(logger) do; DataFiles(old_dir) end
+                @test old.params.ptdf == params_no_prs.ptdf
+
+                # a PTDF that is not a full lines × nodes table stays a Dict inside params.jld2,
+                # and a stale params_ptdf.jld2 from an earlier run in the folder is removed
+                ragged = POMATWO.Parameters(ptdf = Dict(("l1", "n1") => 0.5, ("l2", "n2") => -0.25))
+                ragged_file = joinpath(tmpdir, "ragged_params.jld2")
+                stale = POMATWO._ptdf_file(ragged_file)
+                write(stale, "stale")
+                POMATWO._save_params(ragged_file, ragged)
+                @test JLD2.load_object(ragged_file).ptdf == ragged.ptdf
+                @test !isfile(stale)
+            end
         end  # mktempdir
     end  # testset
 end
