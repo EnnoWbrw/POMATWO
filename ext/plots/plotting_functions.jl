@@ -612,7 +612,7 @@ function _line_endpoints_from_data(data, exclude_dc_lines)
         end
     end
 
-    return line_from_to, node_lonlat
+    return line_from_to, node_lonlat, node_coords
 end
 
 function _line_endpoints_from_results(results, exclude_dc_lines)
@@ -645,16 +645,18 @@ function _line_endpoints_from_results(results, exclude_dc_lines)
         end
     end
 
-    return line_from_to, node_lonlat
+    return line_from_to, node_lonlat, params.node_coords
 end
 
+# `node_coords` (lon/lat, unprojected) is returned last so the callers can fit the map
+# window to the network with `_auto_map_extent`.
 function _prepare_lineplot_common(results, data, exclude_dc_lines, threshold)
-    line_from_to, node_lonlat = data === nothing ?
+    line_from_to, node_lonlat, node_coords = data === nothing ?
         _line_endpoints_from_results(results, exclude_dc_lines) :
         _line_endpoints_from_data(data, exclude_dc_lines)
     df_line_util = _line_utilization_table(results, exclude_dc_lines, threshold)
     df_redisp_combined = _redisp_node_summary(results)
-    return results, df_line_util, line_from_to, node_lonlat, df_redisp_combined
+    return results, df_line_util, line_from_to, node_lonlat, df_redisp_combined, node_coords
 end
 
 function _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshold)
@@ -891,17 +893,48 @@ function prepare_lineplot_data2(results_path, exclude_dc_lines, threshhold)
     return results, df_line_util, line_from_to, node_lonlat, df_redisp_combined
 end
 
-function create_lineplot_layout(figsize = (800, 1000); background_map = true)
+"Map window used when no node carries coordinates (Germany)."
+const _DEFAULT_MAP_CUTOUT = Extent(X = (5.5, 15.0), Y = (47.0, 55.0))
+
+"""
+    _auto_map_extent(node_coords; pad = 0.5)
+
+WGS84 bounding box of the usable coordinates in `node_coords` (values indexable as
+`[lon, lat]`), padded by `pad` degrees. Falls back to `_DEFAULT_MAP_CUTOUT` when
+no node carries one. `_load_node_coords!` stores `[0.0, 0.0]` for a node without
+coordinates, so that sentinel is skipped rather than stretching the window to the equator.
+"""
+function _auto_map_extent(node_coords; pad = 0.5)
+    pts = [c for c in values(node_coords)
+           if length(c) >= 2 && !(c[1] == 0.0 && c[2] == 0.0)]
+    isempty(pts) && return _DEFAULT_MAP_CUTOUT
+    lons = [c[1] for c in pts]
+    lats = [c[2] for c in pts]
+    return Extent(
+        X = (minimum(lons) - pad, maximum(lons) + pad),
+        Y = (minimum(lats) - pad, maximum(lats) + pad),
+    )
+end
+
+# `Tyler.Map` pins the axis limits to `extent` and locks the aspect itself, so a fixed
+# window clips every node outside it; callers therefore pass `_auto_map_extent` of their
+# nodes. Without tiles nothing locks the aspect, and the Web Mercator metres would be
+# stretched to the figure shape — `DataAspect` keeps the map undistorted.
+function create_lineplot_layout(
+    figsize = (800, 1000);
+    background_map = true,
+    extent = _DEFAULT_MAP_CUTOUT,
+)
     GLMakie.activate!(inline = false)
     fig = Figure(; size = figsize)
     ax = Axis(fig[1, 1])
 
     if background_map
-        cutout = (5.5, 15, 47, 55)
-        provider = CartoDB()
-        extent = Extent(X = (cutout[1], cutout[2]), Y = (cutout[3], cutout[4]))
+        provider = OpenStreetMap(:DE)
         tm = Tyler.Map(extent; provider, figure = fig, axis = ax)
         wait(tm)
+    else
+        ax.aspect = DataAspect()
     end
 
     return fig, ax
@@ -913,10 +946,12 @@ function create_lineplot(
     exclude_dc_lines::Bool = false,
     threshhold::Float64 = 0.95;
     background_map::Bool = true,
+    extent = nothing,
 )
-    results, df_line_util, line_from_to, node_lonlat, _ =
+    results, df_line_util, line_from_to, node_lonlat, _, node_coords =
         _prepare_lineplot_common(DataFiles(results_path), nothing, exclude_dc_lines, threshhold)
-    fig, ax = create_lineplot_layout(; background_map = background_map)
+    extent === nothing && (extent = _auto_map_extent(node_coords))
+    fig, ax = create_lineplot_layout(; background_map = background_map, extent = extent)
     return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshhold)
 end
 
@@ -934,12 +969,18 @@ Creates a geographical network map showing transmission line utilization with co
 - `exclude_dc_lines`: (optional, default: `false`) If `true`, only AC lines are visualized.
 - `threshhold`: (optional, default: `0.95`) Utilization threshold (0-1 scale) for `"max"` mode counting.
 
+# Keyword arguments
+- `background_map`: (default `true`) draw OpenStreetMap raster tiles behind the network.
+- `extent`: (default `nothing`) map window as a `Tyler.Extents.Extent`. `nothing` fits it to
+  the node coordinates with a 0.5° margin.
+
 # Plot Details
 - Lines are colored using the `ColorSchemes.lajolla` colormap.
 - **Max mode**: Colorbar shows the count of hours where line utilization exceeds the threshold.
 - **Avg mode**: Colorbar shows average utilization percentage (0-100%).
 - Network nodes are displayed as black points.
-- Uses geographical coordinates with Web Mercator projection.
+- Uses geographical coordinates with Web Mercator projection, drawn at equal x/y scale with
+  or without the background map.
 
 # Returns
 - `fig`: A Makie figure object with the network map, color-coded lines, and colorbar.
@@ -971,10 +1012,12 @@ function POMATWO.create_lineplot(
     exclude_dc_lines::Bool = false,
     threshhold::Float64 = 0.95;
     background_map::Bool = true,
+    extent = nothing,
 )
-    results, df_line_util, line_from_to, node_lonlat, _ =
+    results, df_line_util, line_from_to, node_lonlat, _, node_coords =
         _prepare_lineplot_common(DataFiles(results_path), data, exclude_dc_lines, threshhold)
-    fig, ax = create_lineplot_layout(; background_map = background_map)
+    extent === nothing && (extent = _auto_map_extent(node_coords))
+    fig, ax = create_lineplot_layout(; background_map = background_map, extent = extent)
     return _render_lineplot!(fig, ax, df_line_util, line_from_to, node_lonlat, type, threshhold)
 end
 
@@ -990,6 +1033,7 @@ Plots a simple network map of an energy system using line and node geographical 
 - **AC lines** are drawn as solid black lines.
 - **DC lines** are drawn as dashed black lines.
 - **Nodes** are plotted as black points.
+- The map window is fitted to the node coordinates with a 0.5° margin.
 
 # Returns
 - `fig`: The Makie figure object containing the network plot.
@@ -1019,7 +1063,7 @@ function POMATWO.plot_network(data::Dict{Symbol,String})
 
     ac_lines = select!(CSV.read(data[:lines], DataFrame), [:node_i, :node_j])
     dc_lines = select!(CSV.read(data[:dclines], DataFrame), [:node_i, :node_j])
-    fig, ax = create_lineplot_layout()
+    fig, ax = create_lineplot_layout(; extent = _auto_map_extent(node_coords))
 
     for row in eachrow(ac_lines)
         from = project_point2f.(node_coords[row.node_i][1], node_coords[row.node_i][2])
