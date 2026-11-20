@@ -166,6 +166,10 @@ function test_zonal_ptdf()
         @test result_unsorted["a_row", "a_col"] == 1.0
         @test result_unsorted["m_row", "m_col"] == 5.0
         @test result_unsorted["z_row", "z_col"] == 9.0
+        # pairs missing from the Dict are 0.0
+        @test result_unsorted["a_row", "z_col"] == 0.0
+        @test result_unsorted["z_row", "m_col"] == 0.0
+        @test count(iszero, result_unsorted.data) == 6
     end
 
 

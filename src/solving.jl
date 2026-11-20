@@ -28,7 +28,7 @@ function run(mr::ModelRun)
         end
     end
     @info "Saving parameters to results folder"
-    save_object(joinpath(mr.scen_dir, "params.jld2"), mr.params)
+    _save_params(joinpath(mr.scen_dir, "params.jld2"), mr.params)
     _run(mr)
 end
 

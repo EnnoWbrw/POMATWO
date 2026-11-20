@@ -321,21 +321,23 @@ end
 
 
 function dict_to_matrix(d::Dict{Tuple{String, String}, Float64})
-    # Extract unique row and column keys
-    rows = sort(unique([k[1] for k in keys(d)]))
-    cols = sort(unique([k[2] for k in keys(d)]))
-    
-    # Create matrix
+    # Sorted unique row and column keys
+    rows = sort!(unique!([k[1] for k in keys(d)]))
+    cols = sort!(unique!([k[2] for k in keys(d)]))
+
+    # Name → position lookups. A linear `findfirst` per entry costs
+    # O(entries × (rows + cols)): tens of billions of string comparisons for the
+    # ~4700-line × 3000-node PTDF of a large grid. A hash lookup keeps the fill O(entries).
+    row_idx = Dict(r => i for (i, r) in enumerate(rows))
+    col_idx = Dict(c => j for (j, c) in enumerate(cols))
+
+    # Pairs missing from `d` stay 0.0
     matrix = zeros(Float64, length(rows), length(cols))
-    
-    # Fill matrix
     for ((row_key, col_key), value) in d
-        i = findfirst(==(row_key), rows)
-        j = findfirst(==(col_key), cols)
-        matrix[i, j] = value
+        matrix[row_idx[row_key], col_idx[col_key]] = value
     end
-    
-    return  JuMP.Containers.DenseAxisArray(matrix, rows, cols)
+
+    return JuMP.Containers.DenseAxisArray(matrix, rows, cols)
 end
 
 """
