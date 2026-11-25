@@ -58,11 +58,12 @@ function test_storage_boundary()
         params = load_data(_storage_test_files())
         @test params.sets.S == ["psp1"]
 
-        run_with(boundary, name, tmpdir) = begin
+        run_with(boundary, name, tmpdir; curtailment_cost = 0.0) = begin
             setup = ModelSetup(
                 TimeHorizon = TimeHorizon(stop = 4, split = 2),
                 MarketType = ZonalMarket(),
                 StorageBoundary = boundary,
+                curtailment_cost = curtailment_cost,
             )
             mr = ModelRun(params, setup, solver;
                 resultdir = tmpdir, scenarioname = name, overwrite = true)
@@ -74,7 +75,12 @@ function test_storage_boundary()
         with_logger(NullLogger()) do
 
             @testset "CarryOverStorage: levels cross splits" begin
-                results = run_with(CarryOverStorage(), "carryover", tmpdir)
+                # Split 1 cannot see split 2. With the default curtailment_cost = 0, storing
+                # the wind surplus and curtailing it are equally cheap, so whether split 1
+                # stores anything is up to the solver. A positive curtailment cost makes
+                # storing strictly better, so the carried-over level is deterministic.
+                results = run_with(CarryOverStorage(), "carryover", tmpdir;
+                    curtailment_cost = 1.0)
 
                 # storage bridges the splits: no lost load anywhere
                 @test sum(results.ZonalMarketBalance.LL) ≈ 0 atol = 1e-6

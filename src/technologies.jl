@@ -79,9 +79,12 @@ function add_ndisp_generators(mr::SubRun{MT,PS,RD,MS}) where {MT<:MarketType,PS 
     # term into `obj` and set the objective exactly once, at the end of the builder.
     # NDISP may be empty, so accumulate term by term rather than with `sum` — outside a JuMP
     # macro, `sum` over an empty collection throws.
+    # The curtailment cost is a modelling assumption (`ModelSetup.curtailment_cost`, default 0):
+    # it is the negative of the renewables' bid price and sets the price in surplus hours.
+    curtailment_cost = mr.modelrun.setup.curtailment_cost
     obj = AffExpr()
     for p in NDISP, t in T
-        add_to_expression!(obj, 50.0, CU[p, t])
+        add_to_expression!(obj, curtailment_cost, CU[p, t])
     end
 
     if !isempty(historical_generation)
