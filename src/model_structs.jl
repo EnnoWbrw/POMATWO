@@ -41,6 +41,7 @@ A container struct that holds the basic configuration for the market simulation 
 - `RedispatchSetup::RedispatchSetup`: Configuration of redispatch modeling in the simulation (see section 'RedispatchSetup'). Defaults to `NoRedispatch()`.
 - `StorageBoundary::StorageBoundary`: Boundary condition for storage levels at time-split edges (see [`StorageBoundary`](@ref)). Defaults to `CyclicStorage()`.
 - `components::Vector{ModelComponent}`: Additional user-defined model components (see [`ModelComponent`](@ref)). Defaults to none.
+- `curtailment_cost::Float64`: Cost per MWh of curtailed non-dispatchable generation in the day-ahead and two-day-ahead basecase stages. Equivalent to non-dispatchables bidding at `-curtailment_cost`, so it sets the price in surplus hours. Defaults to `0.0` (renewables bid at their zero marginal cost). At `0.0` curtailing surplus and storing it are equally cheap, so with [`CarryOverStorage`](@ref) surplus is not deliberately kept for later splits. A positive value breaks that tie, but turns every surplus hour into a negative-price hour and can make storages with round-trip losses and low marginal cost charge and discharge simultaneously to absorb surplus.
 
 This struct supports keyword-based construction using default values where provided.
 
@@ -62,6 +63,7 @@ Base.@kwdef struct ModelSetup{MT<:MarketType, PS<:ProsumerSetup, RD<:RedispatchS
     RedispatchSetup::RD = NoRedispatch()
     StorageBoundary::StorageBoundary = CyclicStorage()
     components::Vector{ModelComponent} = ModelComponent[]
+    curtailment_cost::Float64 = 0.0
 end
 
 ### Parameters

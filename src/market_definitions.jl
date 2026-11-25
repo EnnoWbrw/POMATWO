@@ -291,6 +291,9 @@ This is the physically consistent choice — energy cannot teleport between days
     to keep energy for later splits and will discharge whatever is profitable before
     each split boundary. For day-cycling storages (batteries, pumped hydro) consider
     [`CyclicStorage`](@ref), or use splits long enough to cover the storage cycle.
+    With the default `curtailment_cost = 0` (see [`ModelSetup`](@ref)) there is also no
+    incentive to store surplus renewable energy for later splits: curtailing it is just
+    as cheap.
 """
 struct CarryOverStorage <: StorageBoundary
     start_share::Float64

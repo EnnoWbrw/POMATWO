@@ -24,7 +24,7 @@ isolation:
 
 | Cost | Where | Meaning |
 |---|---|---|
-| 50 | `technologies.jl` DA ndisp | day-ahead curtailment |
+| 0 | `ModelSetup.curtailment_cost` | day-ahead curtailment (see below) |
 | 150 | `DCLF` fields | redispatch activation (see below) |
 | 1000 | `technologies.jl` DA ndisp | historical / min-generation slack |
 | 9000 | `energy_balances.jl` | nodal+zonal `CU` / `LL` infeasibility slack |
@@ -33,6 +33,14 @@ isolation:
 
 Redispatch costs are configurable on `DCLF`: `disp_cost` (150), `res_up_cost` (1),
 `res_down_cost` (150), `sto_cost` (150). The rest are still literals.
+
+Day-ahead curtailment cost is a deliberate modelling decision, not a penalty: it equals the
+renewables' bid price negated (`-curtailment_cost` is the price in surplus hours). The
+default 0 means unsubsidised RES. At 0, storing surplus and curtailing it tie, so a
+rolling-horizon `CarryOverStorage` run does not stock up surplus for later splits. Any
+positive value turns every surplus hour into a negative-price hour, and because DA storage
+may charge and discharge in the same hour, lossy low-mc storages can cycle to burn surplus.
+Do not "fix" the default without that trade-off in mind.
 
 **Edit every stage, not just one.** Dispatch keys off `SubRun{MT,PS,RD,MS}` where
 `MS <: DayAhead | TwoDayAhead | Redispatch`. The same function name (`add_disp_generators`,
